@@ -16,7 +16,7 @@ import tqdm_loggable.auto as tqdm
 
 # Environment variable to control cache directory path, ~/.cache/openpi will be used by default.
 _OPENPI_DATA_HOME = "OPENPI_DATA_HOME"
-DEFAULT_CACHE_DIR = "~/.cache/openpi"
+DEFAULT_CACHE_DIR = "~/work/openpi/models"
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ def maybe_download(url: str, *, force_download: bool = False, **kwargs) -> pathl
     """
     # Don't use fsspec to parse the url to avoid unnecessary connection to the remote filesystem.
     parsed = urllib.parse.urlparse(url)
+    print(parsed)
 
     # Short circuit if this is a local path.
     if parsed.scheme == "":

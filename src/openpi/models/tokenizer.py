@@ -9,15 +9,24 @@ from transformers import AutoProcessor
 
 import openpi.models.utils.fsq_tokenizer as fsq_tokenizer
 import openpi.shared.download as download
+import os
 
 
 class PaligemmaTokenizer:
     def __init__(self, max_len: int = 48):
         self._max_len = max_len
 
-        path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
-        with path.open("rb") as f:
+        # path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+        # with path.open("rb") as f:
+        #     self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+        
+        # 使用 os.path.join 构建路径字符串
+        path_str = os.path.join("/home/xlk/work/openpi/models/paligemma_tokenizer", "paligemma_tokenizer.model")
+
+        # 使用内置的 open 函数打开文件
+        with open(path_str, "rb") as f:  # 使用 open() 函数而不是 path.open()
             self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+                
 
     def tokenize(self, prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
         cleaned_text = prompt.strip().replace("_", " ").replace("\n", " ")
