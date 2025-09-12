@@ -13,7 +13,7 @@ from examples.mobile_aloha_AgileX import env as _env
 @dataclasses.dataclass
 class Args:
     host: str = "0.0.0.0"
-    port: int = 6006
+    port: int = 8000
     action_horizon: int = 25
 
     num_episodes: int = 1

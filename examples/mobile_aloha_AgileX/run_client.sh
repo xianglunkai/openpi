@@ -1,8 +1,11 @@
 # Create virtual environment
-uv venv --python 3.10 examples/aloha_real/.venv
-source examples/aloha_real/.venv/bin/activate
-uv pip sync examples/aloha_real/requirements.txt
-uv pip install -e packages/openpi-client
+# export HF_ENDPOINT=https://hf-mirror.com
+# uv venv --python 3.10 examples/mobile_aloha_AgileX/.venv
+source examples/mobile_aloha_AgileX/.venv/bin/activate
+
+# uv pip sync examples/mobile_aloha_AgileX/requirements.txt
+# uv pip install -e packages/openpi-client
 
 # Run the robot
-python -m examples.aloha_real.main
+python -m examples.mobile_aloha_AgileX.main
+
