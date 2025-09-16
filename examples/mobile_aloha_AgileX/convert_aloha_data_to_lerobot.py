@@ -218,10 +218,12 @@ def populate_dataset(
                 frame["observation.velocity"] = velocity[i]
             if effort is not None:
                 frame["observation.effort"] = effort[i]
+            
+            frame['task'] = task
 
             dataset.add_frame(frame)
 
-        dataset.save_episode(task=task)
+        dataset.save_episode()
 
     return dataset
 
@@ -262,7 +264,6 @@ def port_aloha(
         task=task,
         episodes=episodes,
     )
-    dataset.consolidate()
 
     if push_to_hub:
         dataset.push_to_hub()
