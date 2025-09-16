@@ -6,7 +6,5 @@ uv run scripts/serve_policy.py \
     policy:checkpoint --policy.config=pi0_aloha --policy.dir=/home/xlk/work/openpi/models/checkpoints_pi0_aloha_towel/pi0_aloha_towel \
 
     # policy:checkpoint --policy.config=pi05_aloha --policy.dir=/home/xlk/work/openpi/models/checkpoints_pi05/pi05_base \
-    # --default_prompt='fold the towel' \
-    # policy:checkpoint --policy.config=pi05_aloha --policy.dir=/home/xlk/work/openpi/models/checkpoints_pi05/pi05_base \
     # policy:checkpoint --policy.config=pi0_aloha --policy.dir=/home/xlk/work/openpi/models/checkpoints_pi0_aloha_towel/pi0_aloha_towel \
   
