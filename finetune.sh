@@ -1,6 +1,6 @@
 # 1. Convert your data to a LeRobot dataset
 
-uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir /home/xlk/work/my_cool_dataset/adjust_bottle_simple --repo_id adjust_bottle_simple
+uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir /home/xlk/work/my_cool_dataset/adjust_bottle_simple --repo_id adjust_bottle_simple --push_to_hub False
 
 
 # 2. Defining training configs and running training
