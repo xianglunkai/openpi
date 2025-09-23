@@ -1,3 +1,5 @@
+export HF_ENDPOINT=https://hf-mirror.com
+
 # 1. Convert your data to a LeRobot dataset
 
 uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir /home/xlk/work/my_cool_dataset/adjust_bottle_simple --repo_id adjust_bottle_simple --push_to_hub False
@@ -13,7 +15,7 @@ uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir /
 # We provide example fine-tuning configs for π₀, π₀-FAST, and π₀.₅ on LIBERO data.
 
 # # 3. Compute the normalization statistics for the training data
-# uv run scripts/compute_norm_stats.py --config-name pi05_libero
+uv run scripts/compute_norm_stats.py --config-name pi05_cobot
 
 # # 4. Start fine-tuning
-# XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_libero --exp-name=my_experiment --overwrite
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_cobot --exp-name=pi05_cobot_adjust_bottle_simple --overwrite
