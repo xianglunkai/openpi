@@ -564,7 +564,7 @@ class TrainConfig:
     # How often (in steps) to log training metrics.
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
-    save_interval: int = 1000
+    save_interval: int = 3000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
@@ -878,12 +878,34 @@ _CONFIGS = [
     ),
     
     TrainConfig(
+        name="pi0_cobot_low_mem_finetune",
+        # Here is an example of loading a pi0 model for LoRA fine-tuning.
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotLiberoDataConfig(
+            repo_id="adjust_bottle",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/pi0_base/params"),
+        num_train_steps=30_000,
+        # The freeze filter defines which parameters should be frozen during training.
+        # We have a convenience function in the model config that returns the default freeze filter
+        # for the given model config for LoRA finetuning. Just make sure it matches the model config
+        # you chose above.
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+    ),
+    
+    TrainConfig(
         name="pi05_cobot",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotDataConfig(
-            repo_id="adjust_bottle_simple",
+            repo_id="adjust_bottle",
             assets=AssetsConfig(
-                assets_dir="/home/xlk/work/openpi/models/checkpoints_pi05/pi05_base/assets",
+                assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
                 asset_id="trossen",
             ),
             default_prompt="Use the correct hand to pick up the bottle on the table, place it in a suitable location or pass it to the right hand, and finally put it on top of the black book with the bottle neck facing up",
@@ -903,9 +925,31 @@ _CONFIGS = [
                 ]
             ),
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/home/xlk/work/openpi/models/checkpoints_pi05/pi05_base/params"),
-        num_train_steps=20_000,
-        batch_size=64,
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/params"),
+      
+        batch_size=16,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 2,
+        # Number of train steps (batches) to run.
+        num_train_steps=60_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 500,
+        # How often (in steps) to save checkpoints.
+        save_interval= 3000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = False,
     ),
     #
     # Fine-tuning DROID configs.
