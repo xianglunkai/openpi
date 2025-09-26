@@ -2,22 +2,29 @@
 
 # 配置变量 - 设置为 1 表示执行，0 表示跳过
 DO_STEP1=0  # 转换数据到 LeRobot 数据集
-DO_STEP2=1  # 定义训练配置（此步骤主要是编辑文件，这里保留为提醒）
+DO_STEP2=1 # 定义训练配置（此步骤主要是编辑文件，这里保留为提醒）
 DO_STEP3=1  # 计算归一化统计量
 DO_STEP4=1  # 开始微调训练
 
-export RAYON_NUM_THREADS=4
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
+export RAYON_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
+
 export TORCH_NCCL_ENABLE_MONITORING=0  # disable watchdog
-export OPENBLAS_NUM_THREADS=4  
+# export OPENBLAS_NUM_THREADS=8
 
+# export HF_DATASETS_NUM_PROC=8
+# export HF_DATASETS_MAX_THREADS=8
 
-export JAX_NUM_CPUS=8
-export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=8"
-export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
+# export JAX_NUM_CPUS=1
+# export XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=8"
+# export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# export NUM_EXPROCESSORS=1
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
 # 设置 Hugging Face 镜像端点
 export HF_ENDPOINT=https://hf-mirror.com
@@ -25,7 +32,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 # 步骤1: 将数据转换为 LeRobot 数据集
 if [ $DO_STEP1 -eq 1 ]; then
     echo "执行步骤1: 转换数据到 LeRobot 数据集..."
-    uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir datasets/adjust_bottle --repo_id adjust_bottle
+    uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir datasets/fold_towel --repo_id fold_towel
     echo "步骤1完成"
 else
     echo "跳过步骤1: 转换数据到 LeRobot 数据集"
@@ -39,7 +46,6 @@ if [ $DO_STEP2 -eq 1 ]; then
     echo "2. 调整 LeRobotLiberoDataConfig"
     echo "3. 设置 TrainConfig 中的超参数"
     echo "完成后按回车继续..."
-    read -r
 else
     echo "跳过步骤2: 定义训练配置"
 fi
@@ -57,9 +63,8 @@ fi
 # 步骤4: 开始微调训练
 if [ $DO_STEP4 -eq 1 ]; then
     echo "执行步骤4: 开始微调训练..."
-    CUDA_VISIBLE_DEVICES=4,6 \
     uv run scripts/train.py pi05_cobot \
-        --exp-name=pi05_cobot_adjust_bottle \
+        --exp-name=pi05_cobot_fold_towel \
         --overwrite
     echo "步骤4完成"
 else

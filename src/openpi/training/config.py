@@ -555,7 +555,7 @@ class TrainConfig:
     # How often (in steps) to log training metrics.
     log_interval: int = 100
     # How often (in steps) to save checkpoints.
-    save_interval: int = 3000
+    save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
 
@@ -565,7 +565,7 @@ class TrainConfig:
     resume: bool = False
 
     # If true, will enable wandb logging.
-    wandb_enabled: bool = False
+    wandb_enabled: bool = True
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
@@ -894,12 +894,13 @@ _CONFIGS = [
         name="pi05_cobot",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotDataConfig(
-            repo_id="adjust_bottle",
+            repo_id="fold_towel",
             assets=AssetsConfig(
                 assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
                 asset_id="trossen",
             ),
-            default_prompt="Use the correct hand to pick up the bottle on the table, place it in a suitable location or pass it to the right hand, and finally put it on top of the black book with the bottle neck facing up",
+            # default_prompt="Use the correct hand to pick up the bottle on the table, place it in a suitable location or pass it to the right hand, and finally put it on top of the black book with the bottle neck facing up",
+            default_prompt="Carefully fold the towel and then place the folded towel on the black notebook",
             repack_transforms=_transforms.Group(
                 inputs=[
                     _transforms.RepackTransform(
@@ -918,18 +919,18 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/params"),
       
-        batch_size=16,
+        batch_size=64,
         
         # Number of workers to use for the data loader. Increasing this number will speed up data loading but
         # will increase memory and CPU usage.
         num_workers= 2,
         # Number of train steps (batches) to run.
-        num_train_steps=60_000,
+        num_train_steps=50_000,
 
         # How often (in steps) to log training metrics.
         log_interval= 500,
         # How often (in steps) to save checkpoints.
-        save_interval= 3000,
+        save_interval= 1000,
         # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
         keep_period = 5000,
 
