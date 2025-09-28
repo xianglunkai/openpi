@@ -92,22 +92,22 @@ class RealEnv:
         # 如果仍然希望把两个夹爪做归一化，可在这里额外处理：
         # qpos[6]  和 qpos[13]  分别是左右夹爪
         # qvel[6]  和 qvel[13] 同理
-        qpos[6]  = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos[6])
-        qpos[13] = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos[13])
-        qvel[6]  = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qvel[6])
-        qvel[13] = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qvel[13])
+        # qpos[6]  = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos[6])
+        # qpos[13] = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos[13])
+        # qvel[6]  = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qvel[6])
+        # qvel[13] = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qvel[13])
  
 
         # --- 图像 --------------------------------------------------------------
         images = self.build_image_dict(img_front, img_left, img_right)
-        print("2")
+        # print("2")
         # --- 打包成 OrderedDict -------------------------------------------------
         obs = collections.OrderedDict()
         obs["qpos"]   = qpos
-        obs["qvel"]   = qvel
-        obs["effort"] = effort
+        # obs["qvel"]   = qvel
+        # obs["effort"] = effort
         obs["images"] = images
-        print("3")
+        # print("3")
     
         return obs
     
@@ -154,8 +154,8 @@ class RealEnv:
         left_arm_target  = np.array(left_action,  dtype=float)
         right_arm_target = np.array(right_action, dtype=float)
 
-        left_arm_target[-1]  = constants.PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN(left_arm_target[-1])
-        right_arm_target[-1] = constants.PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN(right_arm_target[-1])
+        # left_arm_target[-1]  = constants.PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN(left_arm_target[-1])
+        # right_arm_target[-1] = constants.PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN(right_arm_target[-1])
 
         print("[STEP] left target :", [round(x, 3) for x in left_arm_target])
         print("[STEP] right target:", [round(x, 3) for x in right_arm_target])
