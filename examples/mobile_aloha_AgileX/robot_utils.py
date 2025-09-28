@@ -35,7 +35,6 @@ def get_ros_observation(args,ros_operator):
 
     while True and not rospy.is_shutdown():
         result = ros_operator.get_frame()
-        print("1")
         if not result:
             if print_flag:
                 print("syn fail when get_ros_observation")
@@ -200,7 +199,7 @@ class RosOperator:
         self.puppet_arm_publish_thread.start()
 
     def get_frame(self, max_retries=3, retry_delay=0.01):
- 
+        
         for attempt in range(max_retries):
             required_queues_empty = (
                 not self.img_left_deque or 
@@ -480,13 +479,14 @@ def get_arguments():
     args.robot_base_topic = '/odom_raw'
     args.robot_base_cmd_topic = '/cmd_vel'
     args.use_robot_base = False
-    args.publish_rate = 30
+    args.publish_rate = 50
+    
     args.ctrl_freq = 25
 
     args.chunk_size = 64
     args.arm_steps_length = [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.02]
 
-    args.use_actions_interpolation = True
+    args.use_actions_interpolation = False
     args.use_depth_image = False
     args.disable_puppet_arm = False
 
