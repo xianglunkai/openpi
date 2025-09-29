@@ -14,7 +14,7 @@ from examples.mobile_aloha_AgileX import env as _env
 class Args:
     host: str = "0.0.0.0"
     port: int = 8000
-    action_horizon: int = 25
+    action_horizon: int = 50
 
     num_episodes: int = 1
     max_episode_steps: int = 10000

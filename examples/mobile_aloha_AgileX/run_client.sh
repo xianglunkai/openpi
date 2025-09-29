@@ -7,5 +7,5 @@ source examples/mobile_aloha_AgileX/.venv/bin/activate
 # uv pip install -e packages/openpi-client
 
 # Run the robot
-python -m examples.mobile_aloha_AgileX.main
+python -m examples.mobile_aloha_AgileX.main 
 

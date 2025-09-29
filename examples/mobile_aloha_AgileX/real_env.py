@@ -148,33 +148,29 @@ class RealEnv:
         left_action = action[:state_len]         # [arm6, grip_norm]
         right_action = action[state_len:]        # [arm6, grip_norm]
 
-        print("[STEP] raw  action :", [round(x, 3) for x in action])
+        # print("[STEP] raw  action :", [round(x, 3) for x in action])
 
         # 2) 反归一化夹爪值 -----------------------------------------------------------------
         left_arm_target  = np.array(left_action,  dtype=float)
         right_arm_target = np.array(right_action, dtype=float)
 
-        # left_arm_target[-1]  = constants.PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN(left_arm_target[-1])
-        # right_arm_target[-1] = constants.PUPPET_GRIPPER_JOINT_UNNORMALIZE_FN(right_arm_target[-1])
-
-        print("[STEP] left target :", [round(x, 3) for x in left_arm_target])
-        print("[STEP] right target:", [round(x, 3) for x in right_arm_target])
+      
+        # print("[STEP] left target :", [round(x, 3) for x in left_arm_target])
+        # print("[STEP] right target:", [round(x, 3) for x in right_arm_target])
 
         # 3) 连续发布 ----------------------------------------------------------------------
         try:
-            self.ros_operator.puppet_arm_publish_continuous(
+            self.ros_operator.puppet_arm_publish(
                 left_arm_target.tolist(),
                 right_arm_target.tolist()
             )
-            print("[STEP] publish thread started OK")
+            # print("[STEP] publish thread started OK")
         except Exception as e:
             print("[STEP] ERROR start publish:", e)
             raise
 
-        # 4) 控制周期同步 -------------------------------------------------------------------
-        time.sleep(constants.DT)
 
-            # 5) 返回新的 dm_env.TimeStep
+        # 5) 返回新的 dm_env.TimeStep
         return dm_env.TimeStep(
                 step_type  = dm_env.StepType.MID,
                 reward     = self.get_reward(),

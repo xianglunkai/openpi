@@ -198,7 +198,7 @@ class RosOperator:
         self.puppet_arm_publish_thread = threading.Thread(target=self.puppet_arm_publish_continuous, args=(left, right))
         self.puppet_arm_publish_thread.start()
 
-    def get_frame(self, max_retries=3, retry_delay=0.01):
+    def get_frame(self, max_retries=4, retry_delay=0.01):
         
         for attempt in range(max_retries):
             required_queues_empty = (
