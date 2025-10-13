@@ -7,9 +7,13 @@ import numpy as np
 from examples.mobile_aloha_AgileX import constants
 from examples.mobile_aloha_AgileX import robot_utils
 
+import rospy
+from std_msgs.msg import Float64MultiArray
+
 # This is the reset position that is used by the standard Aloha runtime.
 DEFAULT_RESET_POSITION = [0, -0.96, 1.16, 0, -0.3, 0]
 
+from examples.mobile_aloha_AgileX.td_filter import MultiJointTDFilter, MultiJointLowPassFilter
 
 class RealEnv:
     """
@@ -43,6 +47,41 @@ class RealEnv:
 
         if setup_robots:
             self.setup_robots()
+        
+        if self.args.use_actions_filter:
+            
+            if self.args.filter_alg_type == "low_pass":
+            
+                self.left_action_joint_filter = MultiJointLowPassFilter(
+                    num_joints=7,
+                    cutoff_freq=1,
+                    dt = 1.0/ self.args.publish_rate
+                )
+                
+                self.right_action_joint_filter = MultiJointLowPassFilter(
+                    num_joints=7,
+                    cutoff_freq=1,
+                    dt = 1.0/ self.args.publish_rate
+                )
+            else:
+                self.left_action_joint_filter = MultiJointTDFilter(
+                    num_joints=7,
+                    filt_r0=np.array([1,1,1,1,1,1,1]) * 100,  # 每个关节不同的速度因子
+                    filt_n1=np.array([1,1,1,1,1,1,1]) * 5,  # 所有关节相同的参数
+                    filt_n2=0.0,   # 所有关节相同的参数
+                    dt = 1.0/ self.args.publish_rate
+                )
+            
+                self.right_action_joint_filter = MultiJointTDFilter(
+                    num_joints=7,
+                    filt_r0=np.array([1,1,1,1,1,1,1]) * 100,  # 每个关节不同的速度因子
+                    filt_n1=np.array([1,1,1,1,1,1,1]) * 5,  # 所有关节相同的参数
+                    filt_n2=0.0,   # 所有关节相同的参数
+                    dt = 1.0/ self.args.publish_rate
+                )
+            
+        self.raw_action_publisher = rospy.Publisher("/joint_commands/raw", Float64MultiArray, queue_size=100)
+        self.filter_action_publisher = rospy.Publisher("/joint_commands/filtered", Float64MultiArray, queue_size=100)
 
     def setup_robots(self):
         return 0
@@ -89,14 +128,6 @@ class RealEnv:
             axis=0
         )
 
-        # 如果仍然希望把两个夹爪做归一化，可在这里额外处理：
-        # qpos[6]  和 qpos[13]  分别是左右夹爪
-        # qvel[6]  和 qvel[13] 同理
-        # qpos[6]  = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos[6])
-        # qpos[13] = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qpos[13])
-        # qvel[6]  = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qvel[6])
-        # qvel[13] = constants.PUPPET_GRIPPER_POSITION_NORMALIZE_FN(qvel[13])
- 
 
         # --- 图像 --------------------------------------------------------------
         images = self.build_image_dict(img_front, img_left, img_right)
@@ -153,11 +184,29 @@ class RealEnv:
         # 2) 反归一化夹爪值 -----------------------------------------------------------------
         left_arm_target  = np.array(left_action,  dtype=float)
         right_arm_target = np.array(right_action, dtype=float)
+        # left_arm_target[6] = tanh_smooth_map(left_arm_target[6])   # Left arm gripper
+        # right_arm_target[6] = tanh_smooth_map(right_arm_target[6])  # Right arm gripper
 
-      
-        # print("[STEP] left target :", [round(x, 3) for x in left_arm_target])
-        # print("[STEP] right target:", [round(x, 3) for x in right_arm_target])
+        # 发布原始动作
+        raw_msg = Float64MultiArray()
+        raw_msg.data =  np.concatenate((left_arm_target.copy(), right_arm_target.copy()))
+        self.raw_action_publisher.publish(raw_msg)
+        
+        # 如果使用动作滤波器
+        if self.args.use_actions_filter:
+            left_arm_target = self.left_action_joint_filter.update_all_joints(left_arm_target)
+            right_arm_target = self.right_action_joint_filter.update_all_joints(right_arm_target)
+            filtered_action = np.concatenate([
+                left_arm_target,
+                right_arm_target
+            ])
 
+            # 发布滤波后动作
+            filtered_msg = Float64MultiArray()
+            filtered_msg.data = filtered_action
+            self.filter_action_publisher.publish(filtered_msg)
+        
+        
         # 3) 连续发布 ----------------------------------------------------------------------
         try:
             self.ros_operator.puppet_arm_publish(
@@ -193,3 +242,24 @@ def get_action(master_bot_left, master_bot_right):
 
 def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True) -> RealEnv:
     return RealEnv(init_node, reset_position=reset_position, setup_robots=setup_robots)
+
+
+def tanh_smooth_map(x, threshold=0.05, width=0.01, low_output=0.0, high_output=0.1):
+    """
+    使用双曲正切(tanh)函数实现平滑映射
+    
+    参数:
+    x: 输入值或数组
+    threshold: 中心阈值（过渡中心点）
+    width: 过渡区域宽度（值越小过渡越陡峭）
+    low_output: 低输出值
+    high_output: 高输出值
+    """
+    # 将输入归一化到以threshold为中心的过渡区间
+    normalized = (x - threshold) / width
+    
+    # 使用tanh函数计算平滑过渡（范围[-1, 1]）
+    tanh_result = np.tanh(normalized)
+    
+    # 将tanh结果从[-1, 1]映射到[low_output, high_output]
+    return low_output + (tanh_result + 1) * (high_output - low_output) / 2
