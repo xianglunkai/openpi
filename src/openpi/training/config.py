@@ -952,6 +952,114 @@ _CONFIGS = [
         # If true, will enable wandb logging.
         wandb_enabled = False,
     ),
+    
+    TrainConfig(
+        name="pi05_cobot_fold_towel",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotDataConfig(
+            repo_id="fold_towel",
+            assets=AssetsConfig(
+                assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
+                asset_id="trossen",
+            ),
+            # default_prompt="Use the correct hand to pick up the bottle on the table, place it in a suitable location or pass it to the right hand, and finally put it on top of the black book with the bottle neck facing up",
+            default_prompt="Carefully fold the towel and then place the folded towel on the black notebook",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/params"),
+      
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 2,
+        # Number of train steps (batches) to run.
+        num_train_steps=50_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 500,
+        # How often (in steps) to save checkpoints.
+        save_interval= 1000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = False,
+    ),
+    
+    TrainConfig(
+        name="pi05_cobot_adjust_bottle",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotDataConfig(
+            repo_id="adjust_bottle",
+            assets=AssetsConfig(
+                assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
+                asset_id="trossen",
+            ),
+            default_prompt="Use the correct hand to pick up the bottle on the table, place it in a suitable location or pass it to the right hand, and finally put it on top of the black book with the bottle neck facing up",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/params"),
+      
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 2,
+        # Number of train steps (batches) to run.
+        num_train_steps=30_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 500,
+        # How often (in steps) to save checkpoints.
+        save_interval= 1000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = False,
+    ),
+    
     #
     # Fine-tuning DROID configs.
     #
