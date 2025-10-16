@@ -39,8 +39,8 @@ class RealEnv:
 
     def __init__(self, init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True):
         self._reset_position = reset_position[:6] if reset_position else DEFAULT_RESET_POSITION
-        self._reset_position_left0= [-0.00133514404296875, 0.00209808349609375, 0.01583099365234375, -0.032616615295410156, -0.00286102294921875, 0.00095367431640625, 0]
-        self._reset_position_right0 = [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0]
+        self._reset_position_left0= [-0.00133514404296875, 0.00209808349609375, 0.01583099365234375, -0.032616615295410156, -0.00286102294921875, 0.00095367431640625, 0.09]
+        self._reset_position_right0 = [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
 
         self.args =robot_utils.get_arguments()
         self.ros_operator = robot_utils.RosOperator(self.args)
@@ -184,8 +184,12 @@ class RealEnv:
         # 2) 反归一化夹爪值 -----------------------------------------------------------------
         left_arm_target  = np.array(left_action,  dtype=float)
         right_arm_target = np.array(right_action, dtype=float)
-        # left_arm_target[6] = tanh_smooth_map(left_arm_target[6])   # Left arm gripper
-        # right_arm_target[6] = tanh_smooth_map(right_arm_target[6])  # Right arm gripper
+        
+        left_arm_target[6] =  left_arm_target[6].copy() - 0.0045
+        right_arm_target[6] = right_arm_target[6].copy() - 0.0045
+      
+        # left_arm_target[6] = tanh_smooth_map(left_arm_target[6].copy())   # Left arm gripper
+        # right_arm_target[6] = tanh_smooth_map(right_arm_target[6].copy())  # Right arm gripper
 
         # 发布原始动作
         raw_msg = Float64MultiArray()
