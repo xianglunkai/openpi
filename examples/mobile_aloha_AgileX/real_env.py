@@ -185,9 +185,11 @@ class RealEnv:
         left_arm_target  = np.array(left_action,  dtype=float)
         right_arm_target = np.array(right_action, dtype=float)
         
-        left_arm_target[6] =  left_arm_target[6].copy() - 0.0045
-        right_arm_target[6] = right_arm_target[6].copy() - 0.0045
+        # ! useful for pour water
+        left_arm_target[6] =  left_arm_target[6].copy() - 0.00
+        right_arm_target[6] = right_arm_target[6].copy() - 0.005
       
+        #! useful for adjust bottle task
         # left_arm_target[6] = tanh_smooth_map(left_arm_target[6].copy())   # Left arm gripper
         # right_arm_target[6] = tanh_smooth_map(right_arm_target[6].copy())  # Right arm gripper
 
