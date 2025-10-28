@@ -21,7 +21,7 @@ class PaligemmaTokenizer:
         #     self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
         
         # 使用 os.path.join 构建路径字符串
-        path_str = os.path.join("/home/xlk/work/openpi/models/paligemma_tokenizer", "paligemma_tokenizer.model")
+        path_str = os.path.join("/workspace/openpi/models/paligemma_tokenizer", "paligemma_tokenizer.model")
 
         # 使用内置的 open 函数打开文件
         with open(path_str, "rb") as f:  # 使用 open() 函数而不是 path.open()
