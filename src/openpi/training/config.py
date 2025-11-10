@@ -19,6 +19,7 @@ import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.cobot_policy as cobot_policy
+import openpi.policies.mobile_cobot_policy as mobile_cobot_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
@@ -277,7 +278,57 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             action_sequence_keys=self.action_sequence_keys,
         )
+@dataclasses.dataclass(frozen=True)
+class LeRobotMobileCobotDataConfig(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_joint_actions: bool = True
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model. People who
+    # use standard Aloha data should set this to true.
+    adapt_to_pi: bool = False
 
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.top"},
+                        "state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[mobile_cobot_policy.MobileCobotInputs(adapt_to_pi=self.adapt_to_pi)],
+            outputs=[mobile_cobot_policy.MobileCobotOutputs(adapt_to_pi=self.adapt_to_pi)],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1, -2)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )     
 @dataclasses.dataclass(frozen=True)
 class LeRobotCobotDataConfig(DataConfigFactory):
     # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
@@ -900,113 +951,6 @@ _CONFIGS = [
     ),
     
     TrainConfig(
-        name="pi05_cobot",
-        model=pi0_config.Pi0Config(pi05=True),
-        data=LeRobotCobotDataConfig(
-            repo_id="fold_towel",
-            assets=AssetsConfig(
-                assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
-                asset_id="trossen",
-            ),
-            # default_prompt="Use the correct hand to pick up the bottle on the table, place it in a suitable location or pass it to the right hand, and finally put it on top of the black book with the bottle neck facing up",
-            default_prompt="Carefully fold the towel and then place the folded towel on the black notebook",
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.cam_high",
-                                "cam_left_wrist": "observation.images.cam_left_wrist",
-                                "cam_right_wrist": "observation.images.cam_right_wrist",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                        }
-                    )
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/params"),
-      
-        batch_size=64,
-        
-        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
-        # will increase memory and CPU usage.
-        num_workers= 2,
-        # Number of train steps (batches) to run.
-        num_train_steps=50_000,
-
-        # How often (in steps) to log training metrics.
-        log_interval= 500,
-        # How often (in steps) to save checkpoints.
-        save_interval= 1000,
-        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
-        keep_period = 5000,
-
-        # If true, will overwrite the checkpoint directory if it already exists.
-        overwrite = False,
-        
-        # If true, will resume training from the last checkpoint.
-        resume = False,
-
-        # If true, will enable wandb logging.
-        wandb_enabled = False,
-    ),
-    
-    TrainConfig(
-        name="pi05_cobot_handover_bottle_action_from_slave",
-        model=pi0_config.Pi0Config(pi05=True),
-        data=LeRobotCobotDataConfig(
-            repo_id="handover_bottle_action_from_slave_2_0",
-            assets=AssetsConfig(
-                assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
-                asset_id="trossen",
-            ),
-            default_prompt="Use the one arm to grasp the bottle on the table, handover it to the another arm and place it on the black book.",
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.cam_high",
-                                "cam_left_wrist": "observation.images.cam_left_wrist",
-                                "cam_right_wrist": "observation.images.cam_right_wrist",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                        }
-                    )
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/params"),
-      
-        batch_size=64,
-        
-        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
-        # will increase memory and CPU usage.
-        num_workers= 8,
-        # Number of train steps (batches) to run.
-        num_train_steps=30_000,
-
-        # How often (in steps) to log training metrics.
-        log_interval= 100,
-        # How often (in steps) to save checkpoints.
-        save_interval= 5000,
-        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
-        keep_period = 5000,
-
-        # If true, will overwrite the checkpoint directory if it already exists.
-        overwrite = False,
-        
-        # If true, will resume training from the last checkpoint.
-        resume = False,
-
-        # If true, will enable wandb logging.
-        wandb_enabled = True,
-    ),
-    
-    TrainConfig(
         name="pi05_cobot_pour_water",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotDataConfig(
@@ -1094,7 +1038,7 @@ _CONFIGS = [
         # will increase memory and CPU usage.
         num_workers= 2,
         # Number of train steps (batches) to run.
-        num_train_steps=50_000,
+        num_train_steps=30_000,
 
         # How often (in steps) to log training metrics.
         log_interval= 500,
@@ -1166,6 +1110,115 @@ _CONFIGS = [
         wandb_enabled = False,
     ),
     
+    
+    TrainConfig(
+        name="pi05_cobot_fold_shirt",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotDataConfig(
+            repo_id="fold_towel",
+            assets=AssetsConfig(
+                assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
+                asset_id="trossen",
+            ),
+            # default_prompt="Use the correct hand to pick up the bottle on the table, place it in a suitable location or pass it to the right hand, and finally put it on top of the black book with the bottle neck facing up",
+            default_prompt="Carefully using its two arms to fold the shirt softly",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/params"),
+      
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 2,
+        # Number of train steps (batches) to run.
+        num_train_steps=30_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 500,
+        # How often (in steps) to save checkpoints.
+        save_interval= 1000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = False,
+    ),
+    TrainConfig(
+        name="pi05_mobile_cobot_navigation_demo",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotMobileCobotDataConfig(
+            repo_id="navigation_demo",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_mobile_cobot_navigation_demo", # /workspace/openpi/models/checkpoints_pi05/pi05_base/assets
+                asset_id="navigation_demo", # trossen_mobile
+            ),
+            default_prompt="Navigate the mobile base to the target location while avoiding obstacles, and then pour me a glass of water to drink",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
+        
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 8,
+        # Number of train steps (batches) to run.
+        num_train_steps=30_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 100,
+        # How often (in steps) to save checkpoints.
+        save_interval= 5000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = True,
+    ),
     #
     # Fine-tuning DROID configs.
     #
