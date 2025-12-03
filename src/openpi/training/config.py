@@ -1106,7 +1106,7 @@ _CONFIGS = [
         name="pi05_cobot_fold_shirt",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotDataConfig(
-            repo_id="fold_towel",
+            repo_id="fold_shirt",
             assets=AssetsConfig(
                 assets_dir="/workspace/code/Agilex/openpi/models/checkpoints_pi05/pi05_base/assets",
                 asset_id="trossen",
