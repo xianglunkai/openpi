@@ -46,7 +46,7 @@ def get_ros_observation(args,ros_operator):
          puppet_arm_left, puppet_arm_right, robot_base) = result
 
         return (img_front, img_left, img_right,
-         puppet_arm_left, puppet_arm_right)
+         puppet_arm_left, puppet_arm_right, robot_base)
     
 # ROS operator class
 class RosOperator:

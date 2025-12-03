@@ -22,27 +22,30 @@ class RealEnv:
                         left_gripper_positions (1),    # normalized gripper position (0: close, 1: open)
                         right_arm_qpos (6),            # absolute joint position
                         right_gripper_positions (1),]  # normalized gripper position (0: close, 1: open)
+                        [vx, wz]                      # optional mobile base velocities
 
     Observation space: {"qpos": Concat[ left_arm_qpos (6),          # absolute joint position
                                         left_gripper_position (1),  # normalized gripper position (0: close, 1: open)
                                         right_arm_qpos (6),         # absolute joint position
                                         right_gripper_qpos (1)]     # normalized gripper position (0: close, 1: open)
+                                        [vx, wz]                   # optional mobile base velocities
                         "qvel": Concat[ left_arm_qvel (6),         # absolute joint velocity (rad)
                                         left_gripper_velocity (1),  # normalized gripper velocity (pos: opening, neg: closing)
                                         right_arm_qvel (6),         # absolute joint velocity (rad)
                                         right_gripper_qvel (1)]     # normalized gripper velocity (pos: opening, neg: closing)
                         "images": {"cam_high": (480x640x3),        # h, w, c, dtype='uint8'
-                                   "cam_low": (480x640x3),         # h, w, c, dtype='uint8'
-                                   "cam_left_wrist": (480x640x3),  # h, w, c, dtype='uint8'
-                                   "cam_right_wrist": (480x640x3)} # h, w, c, dtype='uint8'
+                                "cam_low": (480x640x3),         # h, w, c, dtype='uint8'
+                                "cam_left_wrist": (480x640x3),  # h, w, c, dtype='uint8'
+                                "cam_right_wrist": (480x640x3)} # h, w, c, dtype='uint8'
     """
-
     def __init__(self, init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True):
         self._reset_position = reset_position[:6] if reset_position else DEFAULT_RESET_POSITION
         self._reset_position_left0= [-0.00133514404296875, 0.00209808349609375, 0.01583099365234375, -0.032616615295410156, -0.00286102294921875, 0.00095367431640625, 0.09]
         self._reset_position_right0 = [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
 
+       
         self.args =robot_utils.get_arguments()
+        self.use_robot_base =  self.args.use_robot_base
         self.ros_operator = robot_utils.RosOperator(self.args)
 
         if setup_robots:
@@ -63,6 +66,13 @@ class RealEnv:
                     cutoff_freq=1,
                     dt = 1.0/ self.args.publish_rate
                 )
+                
+                if self.use_robot_base:
+                    self.velocity_filter = MultiJointLowPassFilter(
+                        num_joints=2,
+                        cutoff_freq=1,
+                        dt = 1.0/ self.args.publish_rate
+                    )
             else:
                 self.left_action_joint_filter = MultiJointTDFilter(
                     num_joints=7,
@@ -79,6 +89,15 @@ class RealEnv:
                     filt_n2=0.0,   # 所有关节相同的参数
                     dt = 1.0/ self.args.publish_rate
                 )
+                
+                if self.use_robot_base:
+                    self.velocity_filter = MultiJointTDFilter(
+                        num_joints=2,
+                        filt_r0=np.array([1,1]) * 100,
+                        filt_n1=np.array([1,1]) * 5,
+                        filt_n2=0.0,
+                        dt = 1.0/ self.args.publish_rate
+                    )
             
         self.raw_action_publisher = rospy.Publisher("/joint_commands/raw", Float64MultiArray, queue_size=100)
         self.filter_action_publisher = rospy.Publisher("/joint_commands/filtered", Float64MultiArray, queue_size=100)
@@ -99,7 +118,7 @@ class RealEnv:
             "cam_right_wrist":    img_right,
             "cam_right_wrist_depth": None,
             }
-
+  
     def get_observation(self):
         """
         从 ROS 获取一帧同步观测并封装成 OrderedDict,
@@ -107,16 +126,28 @@ class RealEnv:
         """
         # 阻塞直到拿到一帧完整数据
         (img_front, img_left, img_right,
-         puppet_arm_left, puppet_arm_right) = robot_utils.get_ros_observation(
+         puppet_arm_left, puppet_arm_right, robot_base) = robot_utils.get_ros_observation(
             self.args, self.ros_operator
         )
 
         # --- 关节状态 ----------------------------------------------------------
-        qpos   = np.concatenate(
-            (np.asarray(puppet_arm_left.position),
-             np.asarray(puppet_arm_right.position)),
-            axis=0
-        )                             # shape = (14,)
+           # 关节状态
+        if self.use_robot_base:
+            qpos = np.concatenate(
+                (np.asarray(puppet_arm_left.position),
+                 np.asarray(puppet_arm_right.position),
+                 np.asarray([robot_base.twist.twist.linear.x]),
+                 np.asarray([robot_base.twist.twist.angular.z])),
+                axis=0
+            )  # shape = (16,)
+        else:
+            qpos = np.concatenate(
+                (np.asarray(puppet_arm_left.position),
+                 np.asarray(puppet_arm_right.position)),
+                axis=0
+            )  # shape = (14,)
+            
+        # shape = (14,)
         qvel   = np.concatenate(
             (np.asarray(puppet_arm_left.velocity),
              np.asarray(puppet_arm_right.velocity)),
@@ -161,6 +192,10 @@ class RealEnv:
                 self._reset_position_left0,
                 self._reset_position_right0
             )
+            
+            # 如果有移动底座，发布零速度
+            if self.use_robot_base:
+                self.ros_operator.robot_base_publish([0, 0])
 
         # 给学习框架返回 FIRST 时间步
         return dm_env.TimeStep(
@@ -174,20 +209,28 @@ class RealEnv:
         """
         使用 print 方式输出调试信息，不依赖 logging。
         """
-        # 1) 拆左右 7 维动作 ----------------------------------------------------------------
-        state_len   = len(action) // 2
-        left_action = action[:state_len]         # [arm6, grip_norm]
-        right_action = action[state_len:]        # [arm6, grip_norm]
+        # 解析动作
+        if self.use_robot_base:
+            left_action = action[:7]      # [arm6, grip_norm]
+            right_action = action[7:14]   # [arm6, grip_norm]
+            vel_action = action[14:16]    # [vx, wz]
+        else:
+            state_len = len(action) // 2
+            left_action = action[:state_len]   # [arm6, grip_norm]
+            right_action = action[state_len:]  # [arm6, grip_norm]
+            vel_action = None
 
         # print("[STEP] raw  action :", [round(x, 3) for x in action])
 
         # 2) 反归一化夹爪值 -----------------------------------------------------------------
         left_arm_target  = np.array(left_action,  dtype=float)
         right_arm_target = np.array(right_action, dtype=float)
+        if self.use_robot_base and vel_action is not None:
+            vel_action_target = np.array(vel_action, dtype=float)
         
         # ! useful for pour water
-        # left_arm_target[6] =  left_arm_target[6].copy() - 0.005
-        # right_arm_target[6] = right_arm_target[6].copy() - 0.005
+        left_arm_target[6] =  left_arm_target[6].copy() - 0.005
+        right_arm_target[6] = right_arm_target[6].copy() - 0.005
       
         #! useful for adjust bottle task
         # left_arm_target[6] = tanh_smooth_map(left_arm_target[6].copy())   # Left arm gripper
@@ -200,12 +243,17 @@ class RealEnv:
         
         # 如果使用动作滤波器
         if self.args.use_actions_filter:
-            left_arm_target = self.left_action_joint_filter.update_all_joints(left_arm_target)
-            right_arm_target = self.right_action_joint_filter.update_all_joints(right_arm_target)
+            left_arm_target = self.left_action_joint_filter.update_all_joints(left_arm_target.copy())
+            right_arm_target = self.right_action_joint_filter.update_all_joints(right_arm_target.copy())
             filtered_action = np.concatenate([
                 left_arm_target,
                 right_arm_target
             ])
+            
+            # 滤波移动底座速度
+            if self.use_robot_base and vel_action_target is not None:
+                vel_action_target = self.velocity_filter.update_all_joints(vel_action_target.copy())
+           
 
             # 发布滤波后动作
             filtered_msg = Float64MultiArray()
@@ -219,7 +267,10 @@ class RealEnv:
                 left_arm_target.tolist(),
                 right_arm_target.tolist()
             )
-            # print("[STEP] publish thread started OK")
+            
+            if self.use_robot_base and vel_action_target is not None:
+                self.ros_operator.robot_base_publish(vel_action_target.tolist())
+                
         except Exception as e:
             print("[STEP] ERROR start publish:", e)
             raise
@@ -232,19 +283,6 @@ class RealEnv:
                 discount   = None,
                 observation= self.get_observation()
         )
-
-
-def get_action(master_bot_left, master_bot_right):
-    action = np.zeros(14)  # 6 joint + 1 gripper, for two arms
-    # Arm actions
-    action[:6] = master_bot_left.dxl.joint_states.position[:6]
-    action[7 : 7 + 6] = master_bot_right.dxl.joint_states.position[:6]
-    # Gripper actions
-    action[6] = constants.MASTER_GRIPPER_JOINT_NORMALIZE_FN(master_bot_left.dxl.joint_states.position[6])
-    action[7 + 6] = constants.MASTER_GRIPPER_JOINT_NORMALIZE_FN(master_bot_right.dxl.joint_states.position[6])
-
-    return action
-
 
 def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True) -> RealEnv:
     return RealEnv(init_node, reset_position=reset_position, setup_robots=setup_robots)
