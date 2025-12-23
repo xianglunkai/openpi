@@ -476,7 +476,7 @@ def get_arguments():
     args.puppet_arm_left_topic = '/puppet/joint_left'
     args.puppet_arm_right_topic = '/puppet/joint_right'
 
-    args.robot_base_topic = '/odom_raw'
+    args.robot_base_topic = '/odom'
     args.robot_base_cmd_topic = '/cmd_vel'
     args.use_robot_base = False
     args.publish_rate = 50

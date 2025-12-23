@@ -229,6 +229,9 @@ class RealEnv:
             vel_action_target = np.array(vel_action, dtype=float)
         
         # ! useful for pour water
+        # left_arm_target[6] =  left_arm_target[6].copy()
+        # right_arm_target[6] = right_arm_target[6].copy()
+        
         left_arm_target[6] =  left_arm_target[6].copy() - 0.005
         right_arm_target[6] = right_arm_target[6].copy() - 0.005
       
