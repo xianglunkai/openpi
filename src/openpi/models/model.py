@@ -282,7 +282,9 @@ class BaseModel(nnx.Module, abc.ABC):
     @abc.abstractmethod
     def sample_actions(self, rng: at.KeyArrayLike, observation: Observation, **kwargs) -> Actions: ...
 
-
+    @abc.abstractmethod
+    def guided_inference(
+        self, rng: at.KeyArrayLike, prev_action: Actions, observation: Observation, **kwargs) -> Actions: ...
 def restore_params(
     params_path: pathlib.Path | str,
     *,

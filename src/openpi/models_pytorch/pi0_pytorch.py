@@ -9,7 +9,8 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
-
+  
+from torch.func import vjp
 
 def get_safe_dtype(target_dtype, device_type):
     """Get a safe dtype for the given device type."""
@@ -110,6 +111,7 @@ class PI0Pytorch(nn.Module):
 
         torch.set_float32_matmul_precision("high")
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
+        self.guided_inference = torch.compile(self.guided_inference_compilable, mode="max-autotune")
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
@@ -416,6 +418,7 @@ class PI0Pytorch(nn.Module):
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t + dt * v_t
             time += dt
+        print("sample_actions")
         return x_t
 
     def denoise_step(
@@ -459,3 +462,272 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)
+
+    @torch.no_grad()
+    def guided_inference(
+        self,
+        device,
+        prev_action,
+        observation,
+        noise=None,
+        num_steps=10,
+        s=5,
+        d=4,
+        beta=8.0,
+    ) -> Tensor:
+        """Do RTC-guided inference with guidance from previous actions."""
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+        # Compute image and language key value cache
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+        _, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+
+        dt = -1.0 / num_steps
+        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+
+        # Prepare previous action slice for guidance
+        # Get prev_action from s-th step to the end, then pad s steps with zeros
+        prev_action_slice = prev_action[:, s:, :]  # shape: [bsize, action_horizon-s, action_dim]
+        zero_actions = torch.zeros((bsize, s, self.config.action_dim), device=device, dtype=prev_action_slice.dtype)
+        prev_action_slice = torch.cat([prev_action_slice, zero_actions], dim=1)  # shape: [bsize, action_horizon, action_dim]
+
+        # Create weight matrix W
+        def make_w(d, s, device):
+            """Generate the weight vector W ∈ R^H and create diagonal matrix."""
+            H = self.config.action_horizon
+            i = torch.arange(H, device=device, dtype=torch.float32)
+            
+            # Three-segment condition
+            cond_1 = i < d
+            cond_2 = (i >= d) & (i < H - s)
+            
+            # Segment (1): all 1
+            w1 = torch.ones_like(i)
+            
+            # Segment (2): exponential decay
+            c_i = (H - s - i) / (H - s - d + 1)
+            w2 = torch.exp(c_i) - 1
+            w2 = c_i * w2 / (math.e - 1)
+            
+            # Segment (3): all 0
+            w3 = torch.zeros_like(i)
+            
+            # Combine segments
+            w = torch.where(cond_1, w1, torch.where(cond_2, w2, w3))
+            
+            # Create diagonal matrix
+            W = torch.diag(w)
+            return W.unsqueeze(0)  # Add batch dimension
+
+        # Create W matrix
+        diag_w = make_w(d, s, device)  # shape: [1, action_horizon, action_horizon]
+
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+            
+            # Enable gradient computation for this step
+            with torch.enable_grad():
+                # Create a copy of x_t that requires gradients
+                x_t_grad = x_t.detach().clone().requires_grad_(True)
+                
+                # Compute a_1_prime and v_t
+                v_t = self.denoise_step(state, prefix_pad_masks, past_key_values, x_t_grad, expanded_time)
+                a_1_prime = x_t_grad - time * v_t
+                
+                # Compute guidance error
+                e = prev_action_slice - a_1_prime  # shape: [bsize, action_horizon, action_dim]
+                
+                # Apply weight matrix W to error
+                e_weighted = torch.matmul(diag_w, e)  # shape: [bsize, action_horizon, action_dim]
+                
+                # Compute gradient of a_1_prime w.r.t x_t
+                grad_a_1_prime_x_t = torch.autograd.grad(
+                    outputs=a_1_prime,
+                    inputs=x_t_grad,
+                    grad_outputs=e_weighted,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+                
+                # Clean up gradient computation
+                x_t_grad.requires_grad_(False)
+            
+            # Compute r_t
+            r_t = time * time / (time * time + (1 - time) * (1 - time) + 1e-8)
+            
+            # Compute guidance coefficient
+            guidance_coeff = time / ((1 - time) * r_t * r_t + 1e-6)
+            guidance_coeff = torch.clamp(torch.tensor(beta, device=device), max=guidance_coeff.item())
+            
+            # Update x_t using RTC algorithm
+            x_t = x_t + dt * (v_t - guidance_coeff * grad_a_1_prime_x_t)
+            time += dt
+        print("guided_inference")
+        return x_t
+    
+
+
+    @torch.no_grad()
+    def guided_inference_compilable(
+        self,
+        device,
+        prev_action,
+        observation,
+        noise=None,
+        num_steps=10,
+        s=5,
+        d=4,
+        beta=8.0,
+    ) -> torch.Tensor:
+        """
+        可编译版本的 RTC 引导推理。
+        使用 torch.func.vjp 进行函数式梯度计算，兼容 torch.compile。
+        """
+
+        # 1. 基本设置与噪声采样
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        # 2. 预处理观察值并获取前缀特征（与原始函数相同）
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(
+            observation, train=False
+        )
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, lang_tokens, lang_masks
+        )
+
+        # 构建前缀注意力掩码并计算 KV 缓存
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+
+        # 临时设置为 eager 模式以获取缓存
+        original_attn_implementation = self.paligemma_with_expert.paligemma.language_model.config._attn_implementation
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"
+
+        _, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+
+        # 恢复原始注意力实现设置
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = original_attn_implementation
+
+        # 3. 准备引导所需的前一动作切片和权重矩阵
+        # 3.1 前一动作切片
+        prev_action_slice = prev_action[:, s:, :]
+        zero_actions = torch.zeros(
+            (bsize, s, self.config.action_dim),
+            device=device,
+            dtype=prev_action_slice.dtype
+        )
+        prev_action_slice = torch.cat([prev_action_slice, zero_actions], dim=1)
+
+        # 3.2 权重矩阵 W (对角矩阵)
+        def make_w(d, s, device):
+            """Generate the weight vector W ∈ R^H and create diagonal matrix."""
+            H = self.config.action_horizon
+            i = torch.arange(H, device=device, dtype=torch.float32)
+            
+            # Three-segment condition
+            cond_1 = i < d
+            cond_2 = (i >= d) & (i < H - s)
+            
+            # Segment (1): all 1
+            w1 = torch.ones_like(i)
+            
+            # Segment (2): exponential decay
+            c_i = (H - s - i) / (H - s - d + 1)
+            w2 = torch.exp(c_i) - 1
+            w2 = c_i * w2 / (math.e - 1)
+            
+            # Segment (3): all 0
+            w3 = torch.zeros_like(i)
+            
+            # Combine segments
+            w = torch.where(cond_1, w1, torch.where(cond_2, w2, w3))
+            
+            # Create diagonal matrix
+            W = torch.diag(w)
+            return W.unsqueeze(0)  # Add batch dimension,
+
+        diag_w = make_w(d, s, device)  # shape: [1, action_horizon, action_horizon]
+
+        # 4. 初始化采样状态
+        dt = torch.tensor(-1.0 / num_steps, dtype=torch.float32, device=device)
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+        # 5. 主采样循环
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+
+            # 5.1 定义计算 a_1_prime 的闭包函数
+            def compute_a_1_prime(x_t_input: torch.Tensor) -> torch.Tensor:
+                """
+                计算 a_1_prime = x_t - time * v_t
+                这是一个纯函数，用于 vjp 计算
+                """
+                v_t_value = self.denoise_step(
+                    state, 
+                    prefix_pad_masks, 
+                    past_key_values, 
+                    x_t_input, 
+                    expanded_time
+                )
+                return x_t_input - expanded_time.view(-1, 1, 1) * v_t_value
+
+            # 5.2 计算 v_t 和 a_1_prime (用于误差计算)
+            v_t = self.denoise_step(
+                state, prefix_pad_masks, past_key_values, x_t, expanded_time
+            )
+            a_1_prime_current = x_t - expanded_time.view(-1, 1, 1) * v_t
+
+            # 5.3 计算加权误差
+            e = prev_action_slice - a_1_prime_current
+            e_weighted = torch.matmul(diag_w, e)
+
+            # 5.4 使用 torch.func.vjp 计算精确梯度
+            # vjp 返回 (函数值, vjp函数)
+            _, vjp_func = vjp(compute_a_1_prime, x_t)
+            # 计算梯度: grad = vjp_func(e_weighted)[0]
+            grad_a_1_prime_x_t = vjp_func(e_weighted)[0]
+
+            # 5.5 计算引导系数
+            r_t = time * time / (time * time + (1 - time) * (1 - time) + 1e-8)
+            guidance_coeff = time / ((1 - time) * r_t * r_t + 1e-6)
+            max_coeff = torch.tensor(beta, device=device, dtype=torch.float32)
+            guidance_coeff = torch.min(guidance_coeff, max_coeff)
+
+            # 5.6 更新 x_t
+            x_t = x_t + dt * (v_t - guidance_coeff * grad_a_1_prime_x_t)
+            
+            # 5.7 更新时间
+            time = time + dt
+        print("guided_inference_compilable")
+        return x_t

@@ -18,9 +18,16 @@ class Args:
 
     num_episodes: int = 1
     max_episode_steps: int = 10000
+    
+    use_rtc: bool = True
+    s: int = 25
+    d: int = 15
+    fps: int = 50
 
 
 def main(args: Args) -> None:
+    
+    
     ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
         host=args.host,
         port=args.port,
@@ -34,10 +41,14 @@ def main(args: Args) -> None:
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,
                 action_horizon=args.action_horizon,
+                is_rtc=args.use_rtc,
+                s=args.s,
+                d=args.d,
+                fps=args.fps,
             )
         ),
         subscribers=[],
-        max_hz=50,
+        max_hz=args.fps,
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
     )

@@ -10,3 +10,6 @@ class BasePolicy(abc.ABC):
     def reset(self) -> None:
         """Reset the policy to its initial state."""
         pass
+    @abc.abstractmethod
+    def make_example(self) -> Dict:
+        """Make an example observation for the policy."""

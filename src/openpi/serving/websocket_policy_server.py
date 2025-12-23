@@ -55,10 +55,21 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
-
+                data = msgpack_numpy.unpackb(await websocket.recv())
+            
+                obs = data.get("obs", None)  
+                prev_action = data.get("prev_action", None)     
+                use_rtc = data.get("use_rtc", False)
+                noise = data.get("noise", None)
+             
+                
                 infer_time = time.monotonic()
-                action = self._policy.infer(obs)
+                action = self._policy.infer(
+                    obs=obs,
+                    prev_action=prev_action,
+                    use_rtc=use_rtc,
+                    noise=noise,
+                )
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {
@@ -67,7 +78,7 @@ class WebsocketPolicyServer:
                 if prev_total_time is not None:
                     # We can only record the last total time since we also want to include the send time.
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
-
+          
                 await websocket.send(packer.pack(action))
                 prev_total_time = time.monotonic() - start_time
 
@@ -82,7 +93,17 @@ class WebsocketPolicyServer:
                 )
                 raise
 
+    def _warmup(self) -> None:
+        """Warm up policy by compiling for the fixed batch_size.
 
+        Since we always pad batches to batch_size, we only need to compile once.
+        This avoids JIT compilation delays during inference.
+        """
+        logger.info("Warming up policy...")
+        observation = self._policy.make_example()
+
+        # Warm up with full batch_size (we always pad to this size)
+        self._policy.infer(obs=observation, prev_action=None)
 def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
     if request.path == "/healthz":
         return connection.respond(http.HTTPStatus.OK, "OK\n")

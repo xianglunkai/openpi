@@ -20,7 +20,23 @@ from openpi.shared import nnx_utils
 
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
+import enum
+from openpi.policies.aloha_policy import make_aloha_example
+from openpi.policies.droid_policy import make_droid_example
+from openpi.policies.libero_policy import make_libero_example
+from openpi.policies.cobot_policy import make_cobot_example
 
+
+class EnvMode(enum.Enum):
+    """Supported environments."""
+
+    ALOHA = "aloha"
+    ALOHA_SIM = "aloha_sim"
+    DROID = "droid"
+    LIBERO = "libero"
+    COBOT = "cobot"
+    COBOT_REALTIME = "cobot_realtime"
+    
 class Policy(BasePolicy):
     def __init__(
         self,
@@ -59,13 +75,22 @@ class Policy(BasePolicy):
             self._model = self._model.to(pytorch_device)
             self._model.eval()
             self._sample_actions = model.sample_actions
+            self._guided_inference = model.guided_inference
         else:
             # JAX model setup
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            self._guided_inference = nnx_utils.module_jit(model.guided_inference)
             self._rng = rng or jax.random.key(0)
 
     @override
-    def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+    def infer(
+        self, 
+        obs: dict, 
+        *, 
+        prev_action: np.ndarray | None = None,
+        use_rtc: bool = False,
+        noise: np.ndarray | None = None,
+    ) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -89,26 +114,77 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        
+        if use_rtc:
+            if prev_action is None:
+                # First RTC call: fall back to normal sampling (but with RTC parameters).
+                origin_actions = self._sample_actions(
+                    sample_rng_or_pytorch_device,
+                    observation,
+                    **sample_kwargs,
+                )
+            else:
+                # Subsequent RTC call: use guided_inference. This API returns only actions,
+                # so we construct a simple timing dict here.
+                if self._is_pytorch_model:
+                    prev_action = torch.from_numpy(prev_action.copy()).unsqueeze(0).to(self._pytorch_device)
+                else:
+                    prev_action = jnp.asarray(prev_action)[np.newaxis, ...]
+                    
+                origin_actions = self._guided_inference(
+                    sample_rng_or_pytorch_device,
+                    prev_action = prev_action,
+                    observation = observation,
+                    **sample_kwargs,
+                )
+                
+        else:
+            # Non-RTC path: standard sampling with full sample_kwargs (including s/d/noise).
+            origin_actions = self._sample_actions(
+                sample_rng_or_pytorch_device,
+                observation,
+                **sample_kwargs,
+            )
+          
+            
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": origin_actions,
+            "origin_actions": origin_actions,
         }
+        
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
 
+        origin_actions_backup = outputs.get("origin_actions")
+        
         outputs = self._output_transform(outputs)
+        if "origin_actions" not in outputs and origin_actions_backup is not None:
+            outputs["origin_actions"] = origin_actions_backup
+        
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
+       
         return outputs
 
     @property
     def metadata(self) -> dict[str, Any]:
         return self._metadata
+    def make_example(self) -> dict:
+        assert "env" in self._metadata, "Environment not set in metadata"
+        env = EnvMode(self._metadata["env"])
+        if env == EnvMode.ALOHA:
+            return make_aloha_example()
+        if env == EnvMode.DROID:
+            return make_droid_example()
+        if env in [EnvMode.COBOT, EnvMode.COBOT_REALTIME]:
+            return make_cobot_example()
 
+        raise ValueError(f"Unknown environment: {env}")
 
 class PolicyRecorder(_base_policy.BasePolicy):
     """Records the policy's behavior to disk."""

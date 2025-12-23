@@ -7,7 +7,7 @@ import websockets.sync.client
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
-
+import numpy as np
 
 class WebsocketClientPolicy(_base_policy.BasePolicy):
     """Implements the Policy interface by communicating with a server over websocket.
@@ -44,8 +44,18 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 time.sleep(5)
 
     @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
-        data = self._packer.pack(obs)
+    def infer(
+        self,
+        obs: Dict,
+        prev_action: np.ndarray | None = None,
+        use_rtc: bool = True,
+    ) -> Dict:  # noqa: UP006
+        data = {
+            "prev_action": prev_action,
+            "use_rtc": use_rtc,
+        }
+        data.update(obs)
+        data = self._packer.pack(data)
         self._ws.send(data)
         response = self._ws.recv()
         if isinstance(response, str):
@@ -56,3 +66,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
     @override
     def reset(self) -> None:
         pass
+    
+    @override
+    def make_example(self) -> Dict:
+        return None
