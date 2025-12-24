@@ -86,7 +86,6 @@ class Policy(BasePolicy):
     def infer(
         self, 
         obs: dict, 
-        *, 
         prev_action: np.ndarray | None = None,
         use_rtc: bool = False,
         noise: np.ndarray | None = None,

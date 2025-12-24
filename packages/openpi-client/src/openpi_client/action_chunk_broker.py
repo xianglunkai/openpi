@@ -59,14 +59,14 @@ class ActionChunkBroker(_base_policy.BasePolicy):
             try:
                 if self._cur_step == self._s:
                     self._background_running = True
-                    ts = time.monotonic()
+                    # ts = time.monotonic()
                     self._background_results = self._policy.infer(
                         obs = self._obs, 
                         prev_action=self._last_origin_actions, 
                         use_rtc=self._is_rtc)
-                    tf = time.monotonic()
+                    # tf = time.monotonic()
                     # update infer_delay
-                    self._infer_delay = np.ceil((tf - ts) * self.fps)
+                    # self._infer_delay = np.ceil((tf - ts) * self.fps)
                     self._background_running = False
                 else:
                     self._stop_event.wait(0.005)
@@ -104,6 +104,7 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                 self._last_results = {"actions": self._last_results["actions"]}
                 self._infer_delay = np.ceil((tf - ts) * self.fps)
                 self._cur_step = 0
+                print("_last_results is None!")
 
             results = tree.map_structure(lambda x: x[self._cur_step, ...], self._last_results)
             self._obs = obs
@@ -163,6 +164,7 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         self._last_origin_actions = None
         self._background_results = None
         self._cur_step = 0
+        print()
 
     @override
     def make_example(self) -> Dict:

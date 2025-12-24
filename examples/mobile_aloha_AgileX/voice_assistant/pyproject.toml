@@ -1,0 +1,35 @@
+[project]
+name = "voice-assistant"
+version = "0.1.0"
+description = "Voice Assistant for Aloha Robot"
+requires-python = ">=3.9,<3.12"
+dependencies = [
+    # 音频处理
+    "pyaudio>=0.2.11",
+    "numpy>=1.21.0",
+    
+    # 语音识别
+    "openai-whisper",
+    
+    # 文本转语音
+    "TTS==0.22.0",
+    "cutlet",
+    "fugashi", 
+    "unidic",
+    "transformers==4.34.1",
+    "pygame>=2.1.0",
+    
+    # OpenAI API
+    "openai",
+    
+    # Redis
+    "redis",
+    
+    # 其他工具
+    "requests",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+

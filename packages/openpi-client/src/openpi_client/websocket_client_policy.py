@@ -48,13 +48,13 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         self,
         obs: Dict,
         prev_action: np.ndarray | None = None,
-        use_rtc: bool = True,
+        use_rtc: bool = False,
     ) -> Dict:  # noqa: UP006
         data = {
+            "obs": obs,
             "prev_action": prev_action,
             "use_rtc": use_rtc,
         }
-        data.update(obs)
         data = self._packer.pack(data)
         self._ws.send(data)
         response = self._ws.recv()

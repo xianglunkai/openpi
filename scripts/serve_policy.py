@@ -18,6 +18,8 @@ class EnvMode(enum.Enum):
     ALOHA_SIM = "aloha_sim"
     DROID = "droid"
     LIBERO = "libero"
+    COBOT = "cobot"
+    COBOT_REALTIME = "cobot_realtime"
 
 
 @dataclasses.dataclass
@@ -90,7 +92,7 @@ def create_policy(args: Args) -> _policy.Policy:
     match args.policy:
         case Checkpoint():
             return _policy_config.create_trained_policy(
-                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt
+                _config.get_config(args.policy.config), args.policy.dir, default_prompt=args.default_prompt,  use_triton_optimized=(args.env == EnvMode.COBOT_REALTIME),
             )
         case Default():
             return create_default_policy(args.env, default_prompt=args.default_prompt)
