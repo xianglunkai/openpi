@@ -36,7 +36,9 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         
         self._infer_delay:int  = d
         self._is_rtc = is_rtc
-        
+        # lock to protect shared state between main thread and background thread
+        self._lock = threading.Lock()
+
         if self._is_rtc:
             self._stop_event = threading.Event()
             self._infer_thread = None
@@ -57,18 +59,37 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     def _background_infer(self):
         while not self._stop_event.is_set():
             try:
-                if self._cur_step == self._s:
-                    self._background_running = True
-                    # ts = time.monotonic()
-                    self._background_results = self._policy.infer(
-                        obs = self._obs, 
-                        prev_action=self._last_origin_actions, 
-                        use_rtc=self._is_rtc)
-                    # tf = time.monotonic()
-                    # update infer_delay
-                    # self._infer_delay = np.ceil((tf - ts) * self.fps)
-                    self._background_running = False
+                # Trigger if we've reached or passed the s threshold and a background
+                # result is not already available. Use >= to avoid missing the exact
+                # equality due to thread scheduling. Acquire a lock to snapshot
+                # the inputs and set the running flag, but do the heavy infer
+                # call outside the lock.
+                should_run = False
+                with self._lock:
+                    if (not self._background_running) and (self._background_results is None) and (self._cur_step >= self._s):
+                        # mark as running and snapshot inputs
+                        self._background_running = True
+                        should_run = True
+                        obs_snapshot = self._obs
+                        prev_snapshot = self._last_origin_actions
+
+                if should_run:
+                    try:
+                        # perform infer outside the lock (heavy operation)
+                        # ts = time.monotonic()
+                        bg_res = self._policy.infer(obs=obs_snapshot, prev_action=prev_snapshot, use_rtc=self._is_rtc)
+                        # tf = time.monotonic()
+                        # self._infer_delay = np.ceil((tf - ts) * self.fps)
+                    except Exception:
+                        # ensure we clear running flag on exception
+                        with self._lock:
+                            self._background_running = False
+                        raise
+                    with self._lock:
+                        self._background_results = bg_res
+                        self._background_running = False
                 else:
+                    # sleep a short while to avoid busy loop
                     self._stop_event.wait(0.005)
             except Exception as e:
                  if not self._stop_event.is_set():
@@ -104,25 +125,49 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                 self._last_results = {"actions": self._last_results["actions"]}
                 self._infer_delay = np.ceil((tf - ts) * self.fps)
                 self._cur_step = 0
-                print("_last_results is None!")
 
-            results = tree.map_structure(lambda x: x[self._cur_step, ...], self._last_results)
-            self._obs = obs
-            self._cur_step += 1
+            # slice current step results (guard against index errors)
+            try:
+                results = tree.map_structure(lambda x: x[self._cur_step, ...], self._last_results)
+            except Exception:
+                # if out-of-bounds for some reason, fallback to last available step
+                def safe_take(x):
+                    if isinstance(x, np.ndarray):
+                        return x[-1, ...]
+                    return x
 
-            # if current step equals s+d, wait for background inference to complete
-            if self._cur_step == self._s + self._d:
-                while self._background_running:
-                    time.sleep(0.005)
-                self._last_origin_actions = self._background_results["origin_actions"]
-                self._last_results = {"actions": self._background_results["actions"]}
-                self._cur_step -= self._s
+                results = tree.map_structure(safe_take, self._last_results)
+
+            # update observation and advance step (do this under lock to keep background thread consistent)
+            with self._lock:
+                self._obs = obs
+                self._cur_step += 1
+
+            # if we've reached or passed s+d, swap in background results if ready
+            do_swap = False
+            with self._lock:
+                if (self._background_results is not None) and (self._cur_step >= self._s + self._d) and (not self._background_running):
+                    do_swap = True
+                    bg_res = self._background_results
+                    # consume background result so it won't be reused
+                    self._background_results = None
+
+            if do_swap:
+                # apply swap (we already snapped bg_res under lock)
+                try:
+                    self._last_origin_actions = bg_res["origin_actions"]
+                    self._last_results = {"actions": bg_res["actions"]}
+                except Exception:
+                    # malformed background result; ignore swap
+                    pass
+                # roll back cur_step by s (do under lock)
+                with self._lock:
+                    self._cur_step = max(0, self._cur_step - self._s)
                 
                 
             now = time.perf_counter()  
             if self._infer_last_time != 0:
                 infer_interval = (now - self._infer_last_time)
-                print(f"RTC infer-delay: {self._infer_delay}step, infer_interval: {infer_interval}s")
                 
             self._infer_last_time = now
             return results
@@ -141,7 +186,7 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                 else:
                     return x
 
-            # self._last_results = {"actions": self._last_results["actions"]}
+
             results = tree.map_structure(slicer, self._last_results)
             self._cur_step += 1
 
