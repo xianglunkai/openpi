@@ -8,5 +8,8 @@
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
-    "cmake.sourceDirectory": "/home/xlk/work/openpi/third_party/aloha"
+    "cmake.sourceDirectory": "/home/xlk/work/openpi/third_party/aloha",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.pythonProjects": []
 }
