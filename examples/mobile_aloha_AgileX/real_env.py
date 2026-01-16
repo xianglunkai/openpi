@@ -57,13 +57,13 @@ class RealEnv:
             
                 self.left_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=5.0,
+                    cutoff_freq=3.0,
                     dt = 1.0/ self.args.publish_rate
                 )
                 
                 self.right_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=5.0,
+                    cutoff_freq=3.0,
                     dt = 1.0/ self.args.publish_rate
                 )
                 
@@ -76,7 +76,7 @@ class RealEnv:
             else:
                 self.left_action_joint_filter = MultiJointTDFilter(
                     num_joints=7,
-                    filt_r0=np.array([1,1,1,1,1,1,1]) * 100,  # 每个关节不同的速度因子
+                    filt_r0=np.array([1,1,1,1,1,1,1]) * 1000,  # 每个关节不同的速度因子
                     filt_n1=np.array([1,1,1,1,1,1,1]) * 5,  # 所有关节相同的参数
                     filt_n2=0.0,   # 所有关节相同的参数
                     dt = 1.0/ self.args.publish_rate
@@ -84,7 +84,7 @@ class RealEnv:
             
                 self.right_action_joint_filter = MultiJointTDFilter(
                     num_joints=7,
-                    filt_r0=np.array([1,1,1,1,1,1,1]) * 100,  # 每个关节不同的速度因子
+                    filt_r0=np.array([1,1,1,1,1,1,1]) * 1000,  # 每个关节不同的速度因子
                     filt_n1=np.array([1,1,1,1,1,1,1]) * 5,  # 所有关节相同的参数
                     filt_n2=0.0,   # 所有关节相同的参数
                     dt = 1.0/ self.args.publish_rate

@@ -160,9 +160,9 @@ class TDFilter:
         Returns:
             float: 1.0 (val > 0), -1.0 (val < 0), 0.0 (val == 0)
         """
-        if val > 0.0:
+        if val > 1e-6:
             return 1.0
-        elif val < 0.0:
+        elif val < -1e-6:
             return -1.0
         else:
             return 0.0

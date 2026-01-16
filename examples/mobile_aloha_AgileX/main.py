@@ -34,6 +34,9 @@ def main(args: Args) -> None:
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,
                 action_horizon=args.action_horizon,
+                use_smoothing=False,
+                polynomial_order=5,
+                preserve_boundaries=True
             )
         ),
         subscribers=[],
