@@ -10,200 +10,181 @@ from openpi_client import base_policy as _base_policy
 
 
 class ActionChunkBroker(_base_policy.BasePolicy):
-    """Wraps a policy to return action chunks one-at-a-time.
+    """Wraps a policy to return action chunks one-at-a-time with optional RTC (Real-Time Compute).
 
-    Assumes that the first dimension of all action fields is the chunk size.
-
-    A new inference call to the inner policy is only made when the current
-    list of chunks is exhausted.
+    Args:
+        policy: The inner policy to wrap
+        action_horizon: Number of steps in each action chunk
+        is_rtc: Enable real-time compute with background inference
+        s: Steps before triggering background inference (default: 25)
+        d: Tolerance steps for background inference (default: 10)
+        fps: Frame rate for timing calculations (default: 50)
     """
 
-    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int, is_rtc: bool = False, s: int = 25, d: int = 10, fps: int = 50,):
+    def __init__(self, policy: _base_policy.BasePolicy, action_horizon: int,
+                 is_rtc: bool = False, s: int = 25, d: int = 10, fps: int = 50):
         self._policy = policy
         self._action_horizon = action_horizon
-        self._cur_step: int = 0
-
+        self._cur_step = 0
         self._last_results: Dict[str, np.ndarray] | None = None
         self._last_origin_actions: np.ndarray | None = None
-        self._background_results: Dict[str, np.ndarray] | None = None
-        self._background_running: bool = False
-       
-        
         self._obs: Dict[str, np.ndarray] | None = None
-        self._s = s  # 25
-        self._d = d  # 10
-        self.fps = fps
-        
-        self._infer_delay:int  = d
+
+        # RTC parameters
         self._is_rtc = is_rtc
-        # lock to protect shared state between main thread and background thread
-        self._lock = threading.Lock()
+        self._s = s  # steps before triggering background inference
+        self._d = d  # tolerance steps
+        self.fps = fps
+        self._deadline = d / fps  # max inference time in seconds
+
+        # Thread state
+        self._background_results: Dict[str, np.ndarray] | None = None
+        self._background_running = False
 
         if self._is_rtc:
+            self._lock = threading.Lock()
             self._stop_event = threading.Event()
-            self._infer_thread = None
-            self._start_background_thread()
-        
-        self._infer_last_time = 0
-            
-    def _start_background_thread(self):
-        if self._infer_thread is None or not self._infer_thread.is_alive():
-            self._stop_event.clear()
             self._infer_thread = threading.Thread(
-                target=self._background_infer,
-                daemon=True,
-                name="BackgroundInferThread"
+                target=self._background_infer, daemon=True, name="BackgroundInferThread"
             )
             self._infer_thread.start()
-    
+
+            # Simple warmup with dummy data in background
+            threading.Thread(target=self._warmup_inference, daemon=True, name="WarmupThread").start()
+
     def _background_infer(self):
+        """Background thread that pre-computes next action chunks."""
         while not self._stop_event.is_set():
             try:
-                # Trigger if we've reached or passed the s threshold and a background
-                # result is not already available. Use >= to avoid missing the exact
-                # equality due to thread scheduling. Acquire a lock to snapshot
-                # the inputs and set the running flag, but do the heavy infer
-                # call outside the lock.
                 should_run = False
                 with self._lock:
-                    if (not self._background_running) and (self._background_results is None) and (self._cur_step >= self._s):
-                        # mark as running and snapshot inputs
+                    if (not self._background_running and
+                        self._background_results is None and
+                        self._cur_step >= self._s):
                         self._background_running = True
                         should_run = True
                         obs_snapshot = self._obs
                         prev_snapshot = self._last_origin_actions
 
                 if should_run:
-                    try:
-                        # perform infer outside the lock (heavy operation)
-                        # ts = time.monotonic()
-                        bg_res = self._policy.infer(obs=obs_snapshot, prev_action=prev_snapshot, use_rtc=self._is_rtc)
-                        # tf = time.monotonic()
-                        # self._infer_delay = np.ceil((tf - ts) * self.fps)
-                    except Exception:
-                        # ensure we clear running flag on exception
-                        with self._lock:
-                            self._background_running = False
-                        raise
+                    ts = time.monotonic()
+                    bg_res = self._policy.infer(obs=obs_snapshot, prev_action=prev_snapshot, use_rtc=True)
+                    infer_time = time.monotonic() - ts
+
                     with self._lock:
-                        self._background_results = bg_res
+                        # Discard stale results that exceed deadline
+                        if infer_time > self._deadline:
+                            print(f"Warning: Inference took {infer_time:.3f}s > deadline {self._deadline:.3f}s")
+                        else:
+                            self._background_results = bg_res
                         self._background_running = False
                 else:
-                    # sleep a short while to avoid busy loop
-                    self._stop_event.wait(0.005)
-            except Exception as e:
-                 if not self._stop_event.is_set():
+                    self._stop_event.wait(0.01)
+            except Exception:
+                if not self._stop_event.is_set():
                     import traceback
                     traceback.print_exc()
-    
+                with self._lock:
+                    self._background_running = False
+
+    def _warmup_inference(self):
+        """Perform warmup inference to avoid cold-start latency on first call."""
+        try:
+            dummy_example = self._policy.make_example()
+            if dummy_example is not None:
+                print("ActionChunkBroker: Performing warmup inference...")
+                ts = time.monotonic()
+                r = self._policy.infer(obs=dummy_example, prev_action=None, use_rtc=True)
+                actions = r["origin_actions"]
+                _ = self._policy.infer(obs=dummy_example, prev_action=actions, use_rtc=True)
+                warmup_time = time.monotonic() - ts
+                print(f"ActionChunkBroker: Warmup completed in {warmup_time:.3f}s")
+        except Exception as e:
+            print(f"ActionChunkBroker: Warmup failed - {e}")
+
     def __enter__(self):
-        """enter context"""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """exit context"""
         self.close()
-    
+
     def close(self):
-        """close safely"""
+        """Cleanly shutdown background thread."""
+        if not self._is_rtc:
+            return
+
         self._stop_event.set()
-        if self._infer_thread and self._infer_thread.is_alive():
+        if self._infer_thread.is_alive():
             self._infer_thread.join(timeout=1.0)
             if self._infer_thread.is_alive():
-                print("Warning: Background thread did not exit gracefully")      
-
+                print("Warning: Background thread did not exit gracefully")
 
     @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+    def infer(self, obs: Dict) -> Dict:
+        """Get action for current observation, using RTC if enabled."""
         if self._is_rtc:
-            # first call infer for cot start
-            if self._last_results is None:
-                ts = time.monotonic()
-                self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=True)
-                tf = time.monotonic()
-                self._last_origin_actions = self._last_results["origin_actions"]
-                self._last_results = {"actions": self._last_results["actions"]}
-                self._infer_delay = np.ceil((tf - ts) * self.fps)
-                self._cur_step = 0
-
-            # slice current step results (guard against index errors)
-            try:
-                results = tree.map_structure(lambda x: x[self._cur_step, ...], self._last_results)
-            except Exception:
-                # if out-of-bounds for some reason, fallback to last available step
-                def safe_take(x):
-                    if isinstance(x, np.ndarray):
-                        return x[-1, ...]
-                    return x
-
-                results = tree.map_structure(safe_take, self._last_results)
-
-            # update observation and advance step (do this under lock to keep background thread consistent)
-            with self._lock:
-                self._obs = obs
-                self._cur_step += 1
-
-            # if we've reached or passed s+d, swap in background results if ready
-            do_swap = False
-            with self._lock:
-                if (self._background_results is not None) and (self._cur_step >= self._s + self._d) and (not self._background_running):
-                    do_swap = True
-                    bg_res = self._background_results
-                    # consume background result so it won't be reused
-                    self._background_results = None
-
-            if do_swap:
-                # apply swap (we already snapped bg_res under lock)
-                try:
-                    self._last_origin_actions = bg_res["origin_actions"]
-                    self._last_results = {"actions": bg_res["actions"]}
-                except Exception:
-                    # malformed background result; ignore swap
-                    pass
-                # roll back cur_step by s (do under lock)
-                with self._lock:
-                    self._cur_step = max(0, self._cur_step - self._s)
-                
-                
-            now = time.perf_counter()  
-            if self._infer_last_time != 0:
-                infer_interval = (now - self._infer_last_time)
-                
-            self._infer_last_time = now
-            return results
-
+            return self._infer_rtc(obs)
         else:
-            if self._last_results is None:
-                ts = time.monotonic()
-                self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=False)
-                tf = time.monotonic()
-                self._infer_delay = np.ceil((tf - ts) * self.fps)
-                self._cur_step = 0
-                
-            def slicer(x):
-                if isinstance(x, np.ndarray):
-                    return x[self._cur_step, ...]
-                else:
-                    return x
+            return self._infer_normal(obs)
 
+    def _infer_rtc(self, obs: Dict) -> Dict:
+        """RTC mode: Use background inference to reduce latency."""
+        # First call: perform inference (warmup should have reduced latency)
+        if self._last_results is None:
+            self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=self._is_rtc)
+            self._last_origin_actions = self._last_results["origin_actions"]
+            self._last_results = {"actions": self._last_results["actions"]}
+            self._cur_step = 0
 
-            results = tree.map_structure(slicer, self._last_results)
+        # Get current action chunk
+        results = self._slice_results(self._last_results, self._cur_step)
+
+        # Update state under lock
+        with self._lock:
+            self._obs = obs
             self._cur_step += 1
+            
+            # Swap in background results when ready
+            ready = (self._background_results is not None and
+                     self._cur_step >= self._s + self._d and
+                     not self._background_running)
+            if ready:
+                self._last_origin_actions = self._background_results["origin_actions"]
+                self._last_results = {"actions": self._background_results["actions"]}
+                # Roll back step count
+                self._cur_step = max(0, self._cur_step - self._s)
+                self._background_results = None
 
-            if self._cur_step >= self._action_horizon:
-                self._last_results = None
-        
-            now = time.perf_counter()  
-            if self._infer_last_time != 0:
-                infer_interval = (now - self._infer_last_time)
-                print(f"No RTC infer-delay: {self._infer_delay}step, infer_interval: {infer_interval}s")
-                
-            self._infer_last_time = now
-    
-            return results
+        return results
+
+    def _infer_normal(self, obs: Dict) -> Dict:
+        """Normal mode: Simple action chunking without RTC."""
+        if self._last_results is None:
+            self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=False)
+            self._cur_step = 0
+
+        results = self._slice_results(self._last_results, self._cur_step)
+        self._cur_step += 1
+
+        if self._cur_step >= self._action_horizon:
+            self._last_results = None
+
+        return results
+
+    def _slice_results(self, results: Dict, step: int) -> Dict:
+        """Slice action at given step, with fallback for index errors."""
+        try:
+            return tree.map_structure(lambda x: x[step, ...], results)
+        except Exception:
+            return tree.map_structure(
+                lambda x: x[-1, ...] if isinstance(x, np.ndarray) else x,
+                results
+            )
+
 
     @override
     def reset(self) -> None:
+        """Reset broker and policy state."""
         self._policy.reset()
         self._last_results = None
         self._last_origin_actions = None
