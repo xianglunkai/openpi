@@ -57,13 +57,13 @@ class RealEnv:
             
                 self.left_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=3.0,
+                    cutoff_freq=1,
                     dt = 1.0/ self.args.publish_rate
                 )
                 
                 self.right_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=3.0,
+                    cutoff_freq=1,
                     dt = 1.0/ self.args.publish_rate
                 )
                 

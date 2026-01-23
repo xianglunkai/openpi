@@ -34,7 +34,7 @@ def main(args: Args) -> None:
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,
                 action_horizon=args.action_horizon,
-                use_smoothing=False,
+                use_smoothing=True,
                 polynomial_order=5,
                 preserve_boundaries=True
             )
@@ -43,8 +43,9 @@ def main(args: Args) -> None:
         max_hz=50,
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
+        use_action_interpolation=True,
+        robot_fps=500,
     )
-
     runtime.run()
 
 
