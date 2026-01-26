@@ -65,7 +65,7 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                         should_run = True
                         obs_snapshot = self._obs
                         prev_snapshot = self._last_origin_actions
-
+           
                 if should_run:
                     ts = time.monotonic()
                     bg_res = self._policy.infer(obs=obs_snapshot, prev_action=prev_snapshot, use_rtc=True)
@@ -75,8 +75,7 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                         # Discard stale results that exceed deadline
                         if infer_time > self._deadline:
                             print(f"Warning: Inference took {infer_time:.3f}s > deadline {self._deadline:.3f}s")
-                        else:
-                            self._background_results = bg_res
+                        self._background_results = bg_res
                         self._background_running = False
                 else:
                     self._stop_event.wait(0.01)
@@ -131,19 +130,26 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         """RTC mode: Use background inference to reduce latency."""
         # First call: perform inference (warmup should have reduced latency)
         if self._last_results is None:
-            self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=self._is_rtc)
+            init_actions = self._policy.infer(obs=obs, prev_action=None, use_rtc=self._is_rtc)
+            self._last_results = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
             self._last_origin_actions = self._last_results["origin_actions"]
             self._last_results = {"actions": self._last_results["actions"]}
             self._cur_step = 0
 
         # Get current action chunk
-        results = self._slice_results(self._last_results, self._cur_step)
+        def slicer(x):
+            if isinstance(x, np.ndarray):
+                return x[self._cur_step, ...]
+            else:
+                return x
+
+        results = tree.map_structure(slicer, self._last_results)
 
         # Update state under lock
         with self._lock:
             self._obs = obs
             self._cur_step += 1
-            
+           
             # Swap in background results when ready
             ready = (self._background_results is not None and
                      self._cur_step >= self._s + self._d and
@@ -160,26 +166,25 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     def _infer_normal(self, obs: Dict) -> Dict:
         """Normal mode: Simple action chunking without RTC."""
         if self._last_results is None:
+            t0 = time.time()
             self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=False)
             self._cur_step = 0
+            tf = time.time()
+            print(f"_infer_normal: take time{(tf - t0)*1000}ms")
 
-        results = self._slice_results(self._last_results, self._cur_step)
+        def slicer(x):
+            if isinstance(x, np.ndarray):
+                return x[self._cur_step, ...]
+            else:
+                return x
+
+        results = tree.map_structure(slicer, self._last_results)
         self._cur_step += 1
 
         if self._cur_step >= self._action_horizon:
             self._last_results = None
 
         return results
-
-    def _slice_results(self, results: Dict, step: int) -> Dict:
-        """Slice action at given step, with fallback for index errors."""
-        try:
-            return tree.map_structure(lambda x: x[step, ...], results)
-        except Exception:
-            return tree.map_structure(
-                lambda x: x[-1, ...] if isinstance(x, np.ndarray) else x,
-                results
-            )
 
 
     @override
@@ -190,7 +195,6 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         self._last_origin_actions = None
         self._background_results = None
         self._cur_step = 0
-        print()
 
     @override
     def make_example(self) -> Dict:

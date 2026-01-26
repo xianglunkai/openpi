@@ -19,9 +19,9 @@ class Args:
     num_episodes: int = 1
     max_episode_steps: int = 10000
     
-    use_rtc: bool = False
+    use_rtc: bool = True   
     s: int = 25
-    d: int = 10
+    d: int = 12
     fps: int = 50
 
 

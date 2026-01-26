@@ -220,10 +220,10 @@ class Pi0(_model.BaseModel):
         prev_action: _model.Actions,
         observation: _model.Observation,
         *,
-        num_steps: int | at.Int[at.Array, ""] = 10,       
+        num_steps: int | at.Int[at.Array, ""] = 7,       
         s: int = 25,
-        d: int = 10,
-        beta: float = 8.0,
+        d: int = 12,
+        beta: float = 10.0,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -327,8 +327,6 @@ class Pi0(_model.BaseModel):
             e = jnp.matmul(diag_W, e)
             #Compute vector-Jacobian product
             grad_a_1_prime_x_t = f_vjp((e, jnp.zeros_like(v_t)))
-            # jax.debug.print("grad_a_1_prime_x_t 0 shape: {grad_a_1_prime_x_t_shape}", grad_a_1_prime_x_t_shape=grad_a_1_prime_x_t[0].shape)
-            # jax.debug.print("grad_a_1_prime_x_t 1 shape: {grad_a_1_prime_x_t_shape}", grad_a_1_prime_x_t_shape=grad_a_1_prime_x_t[1].shape)
             r_t = time * time / (time * time + (1 - time) * (1 - time))
 
             a_2_prime = x_t + dt * (v_t - jax.lax.min(beta, time / ((1 - time) * r_t * r_t + 1e-6)) * grad_a_1_prime_x_t[0])
