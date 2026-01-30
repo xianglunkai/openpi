@@ -21,7 +21,7 @@ class Runtime:
         num_episodes: int = 1,
         max_episode_steps: int = 0,
         use_action_interpolation: bool = False,
-        robot_fps: int = 50,
+        multiplier: int = 1,
     ) -> None:
         self._environment = environment
         self._agent = agent
@@ -34,7 +34,7 @@ class Runtime:
         self._in_episode = False
         self._episode_steps = 0
         self._agent_steps = 0
-        self._interpolator = ActionInterpolator(robot_fps) if use_action_interpolation else None
+        self._interpolator = ActionInterpolator(multiplier) if use_action_interpolation else None
 
     def run(self) -> None:
         """Runs the runtime loop continuously until stop() is called or the environment is done."""
@@ -61,56 +61,64 @@ class Runtime:
         self._agent.reset()
         if self._interpolator:
             self._interpolator.reset()
+          
         for subscriber in self._subscribers:
             subscriber.on_episode_start()
 
         self._in_episode = True
         # self._episode_steps = 0
         self._agent_steps = 0  # Track agent inference steps
-        agent_step_time = 1 / self._max_hz if self._max_hz > 0 else 0
-        robot_step_time = 1 / self._interpolator.robot_fps if self._interpolator else agent_step_time
+      
+        if self._interpolator:
+            control_interval = self._interpolator.get_control_interval(self._max_hz)
+        else:
+            control_interval = 1 / self._max_hz if self._max_hz > 0 else 0
+        
         last_step_time = time.time()
-        last_agent_time = time.time()
 
         while self._in_episode:
-            # Determine if we need to get new action from agent
-            current_time = time.time()
-            time_since_last_agent = current_time - last_agent_time
-
+       
             # Get new action at agent frequency
             action = None
-            if time_since_last_agent >= agent_step_time:
+                
+            # Update interpolator with new action
+            if self._interpolator:
+                if self._interpolator.needs_new_action():
+                    observation = self._environment.get_observation()
+                    action = self._agent.get_action(observation)
+                    self._interpolator.add(action["actions"])
+                    self._agent_steps += 1
+            else:
                 observation = self._environment.get_observation()
                 action = self._agent.get_action(observation)
-
-                # Update interpolator with new action
-                if self._interpolator:
-                    self._interpolator.update(action["actions"])
-
-                last_agent_time = current_time
                 self._agent_steps += 1
 
-                # Notify subscribers with agent action
-                for subscriber in self._subscribers:
-                    subscriber.on_step(observation, action)
-
+           
             # Apply interpolated action at robot frequency
             if self._interpolator:
-                interpolated_action, _ = self._interpolator.get_interpolated_action()
+                interpolated_action = self._interpolator.get()
                 if interpolated_action is not None:
                     action_to_apply = {"actions": interpolated_action}
                     self._environment.apply_action(action_to_apply)
+                  
             else:
                 if action is not None:
+                    t0 = time.perf_counter()
                     self._environment.apply_action(action)
+                    tf = time.perf_counter()
+            
+            # Notify subscribers with agent action
+            for subscriber in self._subscribers:
+                subscriber.on_step(observation, action)
 
             # self._episode_steps += 1
 
             # Sleep to maintain robot control frequency
             now = time.time()
             dt = now - last_step_time
-            if dt < robot_step_time:
-                time.sleep(robot_step_time - dt)
+        
+            if dt < control_interval:
+                time.sleep(control_interval - dt)
                 last_step_time = time.time()
             else:
                 last_step_time = now
@@ -131,54 +139,94 @@ class Runtime:
 
 
 class ActionInterpolator:
-    """Interpolate between RTC actions for smoother robot control with velocity estimation."""
-    
-    def __init__(self, robot_fps: int):
-        self.robot_fps = robot_fps
-        self.prev_action = None
-        self.curr_action = None
-        self.prev_time: float = 0
-        self.curr_time: float = 0
-        self.last_interpolated = None
-        
-    def update(self, new_action) -> None:
-        self.prev_action = self.curr_action
-        self.prev_time = self.curr_time
-        self.curr_action = new_action
-        self.curr_time = time.perf_counter()
-        
-    def get_interpolated_action(self) -> tuple:
-        """Returns (interpolated_position, estimated_velocity)"""
-        if self.curr_action is None:
-            return None, None
-        if self.prev_action is None:
-            self.last_interpolated = self.curr_action.copy()
-            return self.curr_action, np.zeros_like(self.curr_action)
+    """Interpolates between consecutive actions for smoother control.
 
-        # Time-based interpolation
-        current_time = time.perf_counter()
-        dt_actions = self.curr_time - self.prev_time
-        if dt_actions <= 0:
-            dt_actions = 1.0 / self.robot_fps  # Fallback
+    When enabled with multiplier N, produces N actions per policy action
+    by linearly interpolating between the previous and current action.
 
-        t = (current_time - self.prev_time) / dt_actions
-        t = max(0.0, min(t, 1.25))  # Allow slight extrapolation
+    Example with multiplier=3:
+        prev_action -> [1/3 interpolated, 2/3 interpolated, current_action]
 
-        interpolated = self.prev_action + t * (self.curr_action - self.prev_action)
+    This effectively multiplies the control rate for smoother motion.
 
-        # Estimate velocity
-        dt_robot = 1.0 / self.robot_fps
-        if self.last_interpolated is not None:
-            velocity = (interpolated - self.last_interpolated) / dt_robot
-        else:
-            velocity = (self.curr_action - self.prev_action) / dt_actions
+    Usage:
+        interpolator = ActionInterpolator(multiplier=2)  # 2x control rate
 
-        self.last_interpolated = interpolated.copy()
-        return interpolated, velocity
-    
+        # In control loop:
+        if interpolator.needs_new_action():
+            new_action = queue.get()
+            if new_action:
+                interpolator.add(new_action.cpu())
+
+        action = interpolator.get()
+        if action:
+            robot.send_action(action)
+    """
+
+    def __init__(self, multiplier: int = 1):
+        """Initialize the interpolator.
+
+        Args:
+            multiplier: Control rate multiplier (1 = no interpolation, 2 = 2x, 3 = 3x, etc.)
+        """
+        if multiplier < 1:
+            raise ValueError(f"multiplier must be >= 1, got {multiplier}")
+        self.multiplier = multiplier
+        self._prev = None
+        self._buffer: list = []
+        self._idx = 0
+
+    @property
+    def enabled(self) -> bool:
+        """Whether interpolation is active (multiplier > 1)."""
+        return self.multiplier > 1
+
     def reset(self):
-        self.prev_action = None
-        self.curr_action = None
-        self.prev_time = 0
-        self.curr_time = 0
-        self.last_interpolated = None
+        """Reset interpolation state (call between episodes)."""
+        self._prev = None
+        self._buffer = []
+        self._idx = 0
+
+    def needs_new_action(self) -> bool:
+        """Check if a new action is needed from the queue."""
+        return self._idx >= len(self._buffer)
+
+    def add(self, action) -> None:
+        """Add a new action and compute interpolated sequence.
+
+        Args:
+            action: New action tensor from policy/queue (already on CPU).
+        """
+        if self.multiplier > 1 and self._prev is not None:
+            self._buffer = []
+            for i in range(1, self.multiplier + 1):
+                t = i / self.multiplier
+                interp = self._prev + t * (action - self._prev)
+                self._buffer.append(interp)
+        else:
+            self._buffer = [action]
+        self._prev = action
+        self._idx = 0
+
+    def get(self):
+        """Get the next interpolated action.
+
+        Returns:
+            Next action tensor, or None if buffer is exhausted.
+        """
+        if self._idx >= len(self._buffer):
+            return None
+        action = self._buffer[self._idx]
+        self._idx += 1
+        return action
+
+    def get_control_interval(self, fps: float) -> float:
+        """Get the control interval based on interpolation multiplier.
+
+        Args:
+            fps: Base frames per second.
+
+        Returns:
+            Control interval in seconds (divided by multiplier).
+        """
+        return 1.0 / (fps * self.multiplier)

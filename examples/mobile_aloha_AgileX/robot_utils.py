@@ -105,7 +105,7 @@ class RosOperator:
         self.robot_base_publisher.publish(vel_msg)
 
     def puppet_arm_publish_continuous(self, left, right):
-        rate = rospy.Rate(self.args.publish_rate)
+        rate = rospy.Rate(50)
         left_arm = None
         right_arm = None
         while True and not rospy.is_shutdown():
@@ -479,7 +479,7 @@ def get_arguments():
     args.robot_base_topic = '/odom'
     args.robot_base_cmd_topic = '/cmd_vel'
     args.use_robot_base = False
-    args.publish_rate = 50
+    args.publish_rate = 300
     
     args.ctrl_freq = 25
 

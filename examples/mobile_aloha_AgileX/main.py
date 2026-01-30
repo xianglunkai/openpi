@@ -8,7 +8,7 @@ from openpi_client.runtime.agents import policy_agent as _policy_agent
 import tyro
 
 from examples.mobile_aloha_AgileX import env as _env
-
+from examples.mobile_aloha_AgileX import robot_utils
 
 @dataclasses.dataclass
 class Args:
@@ -26,7 +26,7 @@ def main(args: Args) -> None:
         port=args.port,
     )
     logging.info(f"Server metadata: {ws_client_policy.get_server_metadata()}")
-
+    robot_control_args =robot_utils.get_arguments()
     metadata = ws_client_policy.get_server_metadata()
     runtime = _runtime.Runtime(
         environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose")),
@@ -40,11 +40,11 @@ def main(args: Args) -> None:
             )
         ),
         subscribers=[],
-        max_hz=50,
+        max_hz=robot_control_args.publish_rate/10,
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
         use_action_interpolation=True,
-        robot_fps=500,
+        multiplier = 10,
     )
     runtime.run()
 
