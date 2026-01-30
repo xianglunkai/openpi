@@ -57,13 +57,13 @@ class RealEnv:
             
                 self.left_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=1,
+                    cutoff_freq=3,
                     dt = 1.0/ self.args.publish_rate
                 )
                 
                 self.right_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=1,
+                    cutoff_freq=3,
                     dt = 1.0/ self.args.publish_rate
                 )
                 
@@ -229,11 +229,11 @@ class RealEnv:
             vel_action_target = np.array(vel_action, dtype=float)
         
         # ! useful for pour water
-        left_arm_target[6] =  left_arm_target[6].copy()
-        right_arm_target[6] = right_arm_target[6].copy()
+        # left_arm_target[6] =  left_arm_target[6].copy()
+        # right_arm_target[6] = right_arm_target[6].copy()
         
-        # left_arm_target[6] =  left_arm_target[6].copy() - 0.005
-        # right_arm_target[6] = right_arm_target[6].copy() - 0.005
+        left_arm_target[6] =  left_arm_target[6].copy() - 0.005
+        right_arm_target[6] = right_arm_target[6].copy() - 0.005
       
         #! useful for adjust bottle task
         # left_arm_target[6] = tanh_smooth_map(left_arm_target[6].copy())   # Left arm gripper
