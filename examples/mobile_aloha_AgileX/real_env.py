@@ -198,12 +198,12 @@ class RealEnv:
                 self.ros_operator.robot_base_publish([0, 0])
 
         # 给学习框架返回 FIRST 时间步
-        return dm_env.TimeStep(
-            step_type  = dm_env.StepType.FIRST,
-            reward     = self.get_reward(),
-            discount   = None,
-            observation= self.get_observation()
-        )
+        # return dm_env.TimeStep(
+        #     step_type  = dm_env.StepType.FIRST,
+        #     reward     = self.get_reward(),
+        #     discount   = None,
+        #     observation= self.get_observation()
+        # )
 
     def step(self, action):
         """
@@ -277,12 +277,12 @@ class RealEnv:
 
 
         # 5) 返回新的 dm_env.TimeStep
-        return dm_env.TimeStep(
-                step_type  = dm_env.StepType.MID,
-                reward     = self.get_reward(),
-                discount   = None,
-                observation= self.get_observation()
-        )
+        # return dm_env.TimeStep(
+        #         step_type  = dm_env.StepType.MID,
+        #         reward     = self.get_reward(),
+        #         discount   = None,
+        #         observation= self.get_observation()
+        # )
 
 def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True) -> RealEnv:
     return RealEnv(init_node, reset_position=reset_position, setup_robots=setup_robots)

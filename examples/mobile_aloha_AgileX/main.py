@@ -8,7 +8,7 @@ from openpi_client.runtime.agents import policy_agent as _policy_agent
 import tyro
 
 from examples.mobile_aloha_AgileX import env as _env
-
+from examples.mobile_aloha_AgileX import robot_utils
 
 @dataclasses.dataclass
 class Args:
@@ -22,17 +22,18 @@ class Args:
     use_rtc: bool = True   
     s: int = 25
     d: int = 12
-    fps: int = 50
+    multiplier: int = 10
+ 
 
 
 def main(args: Args) -> None:
-    
     
     ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
         host=args.host,
         port=args.port,
     )
     logging.info(f"Server metadata: {ws_client_policy.get_server_metadata()}")
+    robot_args = robot_utils.get_arguments()
 
     metadata = ws_client_policy.get_server_metadata()
     runtime = _runtime.Runtime(
@@ -44,13 +45,15 @@ def main(args: Args) -> None:
                 is_rtc=args.use_rtc,
                 s=args.s,
                 d=args.d,
-                fps=args.fps,
+                fps=robot_args.publish_rate/ args.multiplier,
             )
         ),
         subscribers=[],
-        max_hz=args.fps,
+        max_hz=robot_args.publish_rate/args.multiplier,
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
+        use_action_interpolation = True,
+        multiplier = args.multiplier,
     )
 
     runtime.run()

@@ -49,9 +49,6 @@ class ActionChunkBroker(_base_policy.BasePolicy):
             )
             self._infer_thread.start()
 
-            # Simple warmup with dummy data in background
-            threading.Thread(target=self._warmup_inference, daemon=True, name="WarmupThread").start()
-
     def _background_infer(self):
         """Background thread that pre-computes next action chunks."""
         while not self._stop_event.is_set():
@@ -86,20 +83,6 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                 with self._lock:
                     self._background_running = False
 
-    def _warmup_inference(self):
-        """Perform warmup inference to avoid cold-start latency on first call."""
-        try:
-            dummy_example = self._policy.make_example()
-            if dummy_example is not None:
-                print("ActionChunkBroker: Performing warmup inference...")
-                ts = time.monotonic()
-                r = self._policy.infer(obs=dummy_example, prev_action=None, use_rtc=True)
-                actions = r["origin_actions"]
-                _ = self._policy.infer(obs=dummy_example, prev_action=actions, use_rtc=True)
-                warmup_time = time.monotonic() - ts
-                print(f"ActionChunkBroker: Warmup completed in {warmup_time:.3f}s")
-        except Exception as e:
-            print(f"ActionChunkBroker: Warmup failed - {e}")
 
     def __enter__(self):
         return self
@@ -131,7 +114,8 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         # First call: perform inference (warmup should have reduced latency)
         if self._last_results is None:
             init_actions = self._policy.infer(obs=obs, prev_action=None, use_rtc=self._is_rtc)
-            self._last_results = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
+            second_actions = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
+            self._last_results = self._policy.infer(obs=obs, prev_action= second_actions["origin_actions"], use_rtc=self._is_rtc)
             self._last_origin_actions = self._last_results["origin_actions"]
             self._last_results = {"actions": self._last_results["actions"]}
             self._cur_step = 0
@@ -166,11 +150,11 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     def _infer_normal(self, obs: Dict) -> Dict:
         """Normal mode: Simple action chunking without RTC."""
         if self._last_results is None:
-            t0 = time.time()
+            # t0 = time.time()
             self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=False)
             self._cur_step = 0
-            tf = time.time()
-            print(f"_infer_normal: take time{(tf - t0)*1000}ms")
+            # tf = time.time()
+            # print(f"_infer_normal: take time{(tf - t0)*1000}ms")
 
         def slicer(x):
             if isinstance(x, np.ndarray):

@@ -21,11 +21,10 @@ class AlohaRealEnvironment(_environment.Environment):
         self._render_height = render_height
         self._render_width = render_width
 
-        self._ts = None
 
     @override
     def reset(self) -> None:
-        self._ts = self._env.reset()
+        self._env.reset()
 
     @override
     def is_episode_complete(self) -> bool:
@@ -33,10 +32,8 @@ class AlohaRealEnvironment(_environment.Environment):
 
     @override
     def get_observation(self) -> dict:
-        if self._ts is None:
-            raise RuntimeError("Timestep is not set. Call reset() first.")
-
-        obs = self._ts.observation
+    
+        obs = self._env.get_observation()
         for k in list(obs["images"].keys()):
             if "_depth" in k:
                 del obs["images"][k]
@@ -54,4 +51,4 @@ class AlohaRealEnvironment(_environment.Environment):
 
     @override
     def apply_action(self, action: dict) -> None:
-        self._ts = self._env.step(action["actions"])
+        self._env.step(action["actions"])
