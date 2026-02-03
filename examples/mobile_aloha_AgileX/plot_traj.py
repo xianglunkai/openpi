@@ -14,7 +14,7 @@ class JointActionVisualizer:
     显示14个关节的原始指令、滤波后指令和实际反馈位置
     """
     
-    def __init__(self, history_length=200, update_interval=100):
+    def __init__(self, history_length=1000, update_interval=100):
         """
         初始化可视化器
         
