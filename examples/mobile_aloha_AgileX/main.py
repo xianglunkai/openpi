@@ -40,11 +40,11 @@ def main(args: Args) -> None:
             )
         ),
         subscribers=[],
-        max_hz=robot_control_args.publish_rate/10,
+        max_hz=robot_control_args.publish_rate/6,
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
         use_action_interpolation=True,
-        multiplier = 10,
+        multiplier = 6,
     )
     runtime.run()
 

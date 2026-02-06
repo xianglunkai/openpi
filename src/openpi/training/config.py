@@ -1318,15 +1318,15 @@ _CONFIGS = [
     ),
     
      TrainConfig(
-        name="pi05_cobot_fold_cloth",
+        name="pi05_fold_clothes40",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotDataConfig(
-            repo_id="lerobot_fold_cloth_action_from_slave_20260113_160241",
+            repo_id="pi05_fold_clothes40",
             assets=AssetsConfig(
                 assets_dir="/workspace/openpi/assets/pi05_cobot_fold_cloth",
-                asset_id="lerobot_fold_cloth_action_from_slave_20260113_160241",
+                asset_id="lerobot_fold_clothes40",
             ),
-            default_prompt="Please fold the clothes on the desktop!",
+            default_prompt="Please fold the clothes on the desktop carefully",
             repack_transforms=_transforms.Group(
                 inputs=[
                     _transforms.RepackTransform(
