@@ -4,7 +4,9 @@ import logging
 from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.runtime import runtime as _runtime
+from openpi_client.runtime import runtime_rtc as _runtime_rtc
 from openpi_client.runtime.agents import policy_agent as _policy_agent
+from openpi_client.runtime.runtime_rtc import RTCConfig, RTCAttentionSchedule, RuntimeRTC
 import tyro
 
 from examples.mobile_aloha_AgileX import env as _env
@@ -14,15 +16,15 @@ from examples.mobile_aloha_AgileX import robot_utils
 class Args:
     host: str = "0.0.0.0"
     port: int = 8000
-    action_horizon: int = 50
+    action_horizon: int = 30
 
     num_episodes: int = 1
-    max_episode_steps: int = 10000
+    max_episode_time_s: int = 180
     
-    use_rtc: bool = True   
+    use_rtc: bool = False  
     s: int = 25
     d: int = 12
-    multiplier: int = 10
+    multiplier: int = 4
  
 
 
@@ -51,7 +53,7 @@ def main(args: Args) -> None:
         subscribers=[],
         max_hz=robot_args.publish_rate/args.multiplier,
         num_episodes=args.num_episodes,
-        max_episode_steps=args.max_episode_steps,
+        max_episode_time_s=args.max_episode_time_s,
         use_action_interpolation = True,
         multiplier = args.multiplier,
     )

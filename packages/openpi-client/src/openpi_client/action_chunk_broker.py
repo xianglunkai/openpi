@@ -40,6 +40,9 @@ class ActionChunkBroker(_base_policy.BasePolicy):
         # Thread state
         self._background_results: Dict[str, np.ndarray] | None = None
         self._background_running = False
+        
+        # warmup
+        self._warmup = True
 
         if self._is_rtc:
             self._lock = threading.Lock()
@@ -112,13 +115,15 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     def _infer_rtc(self, obs: Dict) -> Dict:
         """RTC mode: Use background inference to reduce latency."""
         # First call: perform inference (warmup should have reduced latency)
-        if self._last_results is None:
+        if self._warmup:
             init_actions = self._policy.infer(obs=obs, prev_action=None, use_rtc=self._is_rtc)
             second_actions = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
-            self._last_results = self._policy.infer(obs=obs, prev_action= second_actions["origin_actions"], use_rtc=self._is_rtc)
-            self._last_origin_actions = self._last_results["origin_actions"]
-            self._last_results = {"actions": self._last_results["actions"]}
-            self._cur_step = 0
+            self._warmup = False
+            return None
+            # self._last_results = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
+            # self._last_origin_actions = self._last_results["origin_actions"]
+            # self._last_results = {"actions": self._last_results["actions"]}
+            # self._cur_step = 0
 
         # Get current action chunk
         def slicer(x):
@@ -126,9 +131,9 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                 return x[self._cur_step, ...]
             else:
                 return x
-
+        
         results = tree.map_structure(slicer, self._last_results)
-
+        
         # Update state under lock
         with self._lock:
             self._obs = obs
@@ -150,12 +155,9 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     def _infer_normal(self, obs: Dict) -> Dict:
         """Normal mode: Simple action chunking without RTC."""
         if self._last_results is None:
-            # t0 = time.time()
             self._last_results = self._policy.infer(obs=obs, prev_action=None, use_rtc=False)
             self._cur_step = 0
-            # tf = time.time()
-            # print(f"_infer_normal: take time{(tf - t0)*1000}ms")
-
+         
         def slicer(x):
             if isinstance(x, np.ndarray):
                 return x[self._cur_step, ...]

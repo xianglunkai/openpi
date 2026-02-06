@@ -115,28 +115,22 @@ class Policy(BasePolicy):
         start_time = time.monotonic()
         
         if use_rtc:
-            if prev_action is None:
-                # First RTC call: fall back to normal sampling (but with RTC parameters).
-                origin_actions = self._sample_actions(
-                    sample_rng_or_pytorch_device,
-                    observation,
-                    **sample_kwargs,
-                )
-            else:
-                # Subsequent RTC call: use guided_inference. This API returns only actions,
-                # so we construct a simple timing dict here.
+         
+            # Subsequent RTC call: use guided_inference. This API returns only actions,
+            # so we construct a simple timing dict here.
+            if prev_action is not None:
                 if self._is_pytorch_model:
                     prev_action = torch.from_numpy(prev_action.copy()).unsqueeze(0).to(self._pytorch_device)
                 else:
                     prev_action = jnp.asarray(prev_action)[np.newaxis, ...]
-                    
-                origin_actions = self._guided_inference(
-                    sample_rng_or_pytorch_device,
-                    prev_action = prev_action,
-                    observation = observation,
-                    **sample_kwargs,
-                )
                 
+            origin_actions = self._guided_inference(
+                sample_rng_or_pytorch_device,
+                prev_action = prev_action,
+                observation = observation,
+                **sample_kwargs,
+            )
+            
         else:
             # Non-RTC path: standard sampling with full sample_kwargs (including s/d/noise).
             origin_actions = self._sample_actions(

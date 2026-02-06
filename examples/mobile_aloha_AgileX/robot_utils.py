@@ -479,7 +479,7 @@ def get_arguments():
     args.robot_base_topic = '/odom_raw'
     args.robot_base_cmd_topic = '/cmd_vel'
     args.use_robot_base = False
-    args.publish_rate = 500
+    args.publish_rate = 200
     
     args.ctrl_freq = 25
 
