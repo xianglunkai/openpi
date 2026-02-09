@@ -38,7 +38,7 @@ class RealEnv:
                                 "cam_left_wrist": (480x640x3),  # h, w, c, dtype='uint8'
                                 "cam_right_wrist": (480x640x3)} # h, w, c, dtype='uint8'
     """
-    def __init__(self, init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True):
+    def __init__(self, init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True, control_rate_hz=50):
         self._reset_position = reset_position[:6] if reset_position else DEFAULT_RESET_POSITION
         self._reset_position_left0= [-0.00133514404296875, 0.00209808349609375, 0.01583099365234375, -0.032616615295410156, -0.00286102294921875, 0.00095367431640625, 0.09]
         self._reset_position_right0 = [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
@@ -58,20 +58,20 @@ class RealEnv:
                 self.left_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
                     cutoff_freq=3,
-                    dt = 1.0/ self.args.publish_rate
+                    dt = 1.0 / control_rate_hz
                 )
                 
                 self.right_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
                     cutoff_freq=3,
-                    dt = 1.0/ self.args.publish_rate
+                    dt = 1.0/ control_rate_hz
                 )
                 
                 if self.use_robot_base:
                     self.velocity_filter = MultiJointLowPassFilter(
                         num_joints=2,
                         cutoff_freq=1,
-                        dt = 1.0/ self.args.publish_rate
+                        dt = 1.0/ control_rate_hz
                     )
             else:
                 self.left_action_joint_filter = MultiJointTDFilter(
@@ -79,7 +79,7 @@ class RealEnv:
                     filt_r0=np.array([1,1,1,1,1,1,1]) * 1000,  # 每个关节不同的速度因子
                     filt_n1=np.array([1,1,1,1,1,1,1]) * 5,  # 所有关节相同的参数
                     filt_n2=0.0,   # 所有关节相同的参数
-                    dt = 1.0/ self.args.publish_rate
+                    dt = 1.0/ control_rate_hz
                 )
             
                 self.right_action_joint_filter = MultiJointTDFilter(
@@ -87,7 +87,7 @@ class RealEnv:
                     filt_r0=np.array([1,1,1,1,1,1,1]) * 1000,  # 每个关节不同的速度因子
                     filt_n1=np.array([1,1,1,1,1,1,1]) * 5,  # 所有关节相同的参数
                     filt_n2=0.0,   # 所有关节相同的参数
-                    dt = 1.0/ self.args.publish_rate
+                    dt = 1.0/ control_rate_hz
                 )
                 
                 if self.use_robot_base:
@@ -96,7 +96,7 @@ class RealEnv:
                         filt_r0=np.array([1,1]) * 100,
                         filt_n1=np.array([1,1]) * 5,
                         filt_n2=0.0,
-                        dt = 1.0/ self.args.publish_rate
+                        dt = 1.0/ control_rate_hz
                     )
             
         self.raw_action_publisher = rospy.Publisher("/joint_commands/raw", Float64MultiArray, queue_size=100)
@@ -229,11 +229,11 @@ class RealEnv:
             vel_action_target = np.array(vel_action, dtype=float)
         
         # ! useful for pour water
-        # left_arm_target[6] =  left_arm_target[6].copy()
-        # right_arm_target[6] = right_arm_target[6].copy()
+        left_arm_target[6] =  left_arm_target[6].copy()
+        right_arm_target[6] = right_arm_target[6].copy()
         
-        left_arm_target[6] =  left_arm_target[6].copy() - 0.005
-        right_arm_target[6] = right_arm_target[6].copy() - 0.005
+        left_arm_target[6] =  left_arm_target[6].copy() - 0.0035
+        right_arm_target[6] = right_arm_target[6].copy() - 0.0035
       
         #! useful for adjust bottle task
         # left_arm_target[6] = tanh_smooth_map(left_arm_target[6].copy())   # Left arm gripper
@@ -287,8 +287,8 @@ class RealEnv:
         #         observation= self.get_observation()
         # )
 
-def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True) -> RealEnv:
-    return RealEnv(init_node, reset_position=reset_position, setup_robots=setup_robots)
+def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True, control_rate_hz=50) -> RealEnv:
+    return RealEnv(init_node, reset_position=reset_position, setup_robots=setup_robots, control_rate_hz=control_rate_hz)
 
 
 def tanh_smooth_map(x, threshold=0.05, width=0.01, low_output=0.0, high_output=0.1):

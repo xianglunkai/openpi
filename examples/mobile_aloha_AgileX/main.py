@@ -18,6 +18,10 @@ class Args:
 
     num_episodes: int = 1
     max_episode_steps: int = 10000
+    
+    multiplier: int = 5
+    control_rate_hz = 250
+    use_action_interpolation:bool =  True
 
 
 def main(args: Args) -> None:
@@ -26,25 +30,28 @@ def main(args: Args) -> None:
         port=args.port,
     )
     logging.info(f"Server metadata: {ws_client_policy.get_server_metadata()}")
-    robot_control_args =robot_utils.get_arguments()
+  
     metadata = ws_client_policy.get_server_metadata()
+    
+    control_freq_hz = args.control_rate_hz if args.use_action_interpolation else args.control_rate_hz / args.multiplier
+    
     runtime = _runtime.Runtime(
-        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose")),
+        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_rate_hz = control_freq_hz),
         agent=_policy_agent.PolicyAgent(
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,
                 action_horizon=args.action_horizon,
-                use_smoothing=True,
+                use_smoothing=False,
                 polynomial_order=5,
                 preserve_boundaries=True
             )
         ),
         subscribers=[],
-        max_hz=robot_control_args.publish_rate/6,
+        max_hz=control_freq_hz,
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
-        use_action_interpolation=True,
-        multiplier = 6,
+        use_action_interpolation=args.use_action_interpolation,
+        multiplier = args.multiplier,
     )
     runtime.run()
 

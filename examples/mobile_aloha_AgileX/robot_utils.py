@@ -30,7 +30,7 @@ import cv2
 
 # Get the observation from the ROS topic
 def get_ros_observation(args,ros_operator):
-    rate = rospy.Rate(args.publish_rate)
+    rate = rospy.Rate(200)
     print_flag = True
 
     while True and not rospy.is_shutdown():
@@ -479,7 +479,6 @@ def get_arguments():
     args.robot_base_topic = '/odom'
     args.robot_base_cmd_topic = '/cmd_vel'
     args.use_robot_base = False
-    args.publish_rate = 300
     
     args.ctrl_freq = 25
 
