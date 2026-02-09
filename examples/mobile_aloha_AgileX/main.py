@@ -21,12 +21,12 @@ class Args:
     num_episodes: int = 1
     max_episode_time_s: int = 180
     
-    use_rtc: bool = True  
+    use_rtc: bool = False  
     s: int = 20
     d: int = 10
     multiplier: int = 5
     control_rate_hz: int = 250
-    use_action_interpolation: bool = False
+    use_action_interpolation: bool = True
  
 
 

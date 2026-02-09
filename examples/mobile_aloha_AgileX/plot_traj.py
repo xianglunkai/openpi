@@ -230,7 +230,7 @@ class JointActionVisualizer:
                 if all_times:
                     # 确保使用当前时间作为参考点
                     max_display_time = max(all_times)
-                    min_display_time = max(0, max_display_time - 15)  # 显示最近10秒
+                    min_display_time = max(0, max_display_time - 10)  # 显示最近10秒
                     self.axes[i].set_xlim(min_display_time, max_display_time)
                 
                 updated_lines.extend([line_raw, line_filtered, line_actual])
