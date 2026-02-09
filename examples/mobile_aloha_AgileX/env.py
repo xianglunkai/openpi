@@ -16,8 +16,9 @@ class AlohaRealEnvironment(_environment.Environment):
         reset_position: Optional[List[float]] = None,  # noqa: UP006,UP007
         render_height: int = 224,
         render_width: int = 224,
+        control_freq_hz: int = 50
     ) -> None:
-        self._env = _real_env.make_real_env(init_node=True, reset_position=reset_position)
+        self._env = _real_env.make_real_env(init_node=True, reset_position=reset_position, control_freq_hz=control_freq_hz)
         self._render_height = render_height
         self._render_width = render_width
 

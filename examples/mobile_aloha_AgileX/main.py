@@ -24,7 +24,9 @@ class Args:
     use_rtc: bool = True  
     s: int = 20
     d: int = 10
-    multiplier: int = 4
+    multiplier: int = 5
+    control_rate_hz: int = 250
+    use_action_interpolation: bool = True
  
 
 
@@ -35,11 +37,12 @@ def main(args: Args) -> None:
         port=args.port,
     )
     logging.info(f"Server metadata: {ws_client_policy.get_server_metadata()}")
-    robot_args = robot_utils.get_arguments()
+
+    control_freq_hz = args.control_rate_hz if args.use_action_interpolation else args.control_rate_hz / args.multiplier
 
     metadata = ws_client_policy.get_server_metadata()
     runtime = _runtime.Runtime(
-        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose")),
+        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_freq_hz=control_freq_hz),
         agent=_policy_agent.PolicyAgent(
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,
@@ -47,14 +50,13 @@ def main(args: Args) -> None:
                 is_rtc=args.use_rtc,
                 s=args.s,
                 d=args.d,
-                fps=robot_args.publish_rate/ args.multiplier,
             )
         ),
         subscribers=[],
-        max_hz=robot_args.publish_rate/args.multiplier,
+        max_hz=control_freq_hz,
         num_episodes=args.num_episodes,
         max_episode_time_s=args.max_episode_time_s,
-        use_action_interpolation = False,
+        use_action_interpolation = args.use_action_interpolation,
         multiplier = args.multiplier,
     )
 
