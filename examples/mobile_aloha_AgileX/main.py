@@ -26,7 +26,7 @@ class Args:
     d: int = 10
     multiplier: int = 5
     control_rate_hz: int = 250
-    use_action_interpolation: bool = True
+    use_action_interpolation: bool = False
  
 
 
