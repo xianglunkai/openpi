@@ -32,17 +32,14 @@ class ActionChunkBroker(_base_policy.BasePolicy):
 
         # RTC parameters
         self._is_rtc = is_rtc
-        self._s = s  # steps before triggering background inference
-        self._d = d  # tolerance steps
+        self._smin = s # minimal inference delay time steps
+        self._s = s  #  real time number of actions executed since last inference started
+        self._d = d  #  real time number of steps for inference
         self.fps = fps
-        self._deadline = d / fps  # max inference time in seconds
-
-        # Thread state
-        self._background_results: Dict[str, np.ndarray] | None = None
-        self._background_running = False
-        
+        self._deadline = d  # max inference time steps
+     
         # warmup
-        self._warmup = True
+        self._warmup = False
 
         if self._is_rtc:
             self._lock = threading.Lock()
@@ -58,33 +55,39 @@ class ActionChunkBroker(_base_policy.BasePolicy):
             try:
                 should_run = False
                 with self._lock:
-                    if (not self._background_running and
-                        self._background_results is None and
-                        self._cur_step >= self._s):
-                        self._background_running = True
+                    if (self._cur_step >= self._smin):
                         should_run = True
-                        obs_snapshot = self._obs
-                        prev_snapshot = self._last_origin_actions
+                        # s is the number of actions executed since last inference started
+                        self._s = self._cur_step
+                        # Store the current observation
+                        obs_snapshot = self._obs.copy()
+                        # Remove the actions that have already been executed
+                        prev_snapshot = self._last_origin_actions.copy()
+                        # print(f"1. self._cur_step: {self._cur_step}, self._s: {self._s }, self._d: {self._d }")
            
                 if should_run:
-                    ts = time.monotonic()
-                    bg_res = self._policy.infer(obs=obs_snapshot, prev_action=prev_snapshot, use_rtc=True)
-                    infer_time = time.monotonic() - ts
-
+                    new_actions = self._policy.infer(obs=obs_snapshot, prev_action=prev_snapshot, use_rtc=True)
+            
                     with self._lock:
-                        # Discard stale results that exceed deadline
-                        if infer_time > self._deadline:
-                            print(f"Warning: Inference took {infer_time:.3f}s > deadline {self._deadline:.3f}s")
-                        self._background_results = bg_res
-                        self._background_running = False
+                        # Swap to the new chunk as soon as it is available
+                        self._last_origin_actions = new_actions["origin_actions"].copy()
+                        self._last_results = new_actions.copy()
+                        # Reset t so that it indexes into A new
+                        self._cur_step = max(0, self._cur_step - self._s)
+                        self._d = self._cur_step
+                        # print(f"2. self._cur_step: {self._cur_step}, self._s: {self._s }, self._d: {self._d }")
+
+                    
+                     # Discard stale results that exceed deadline
+                    if self._d > self._deadline:
+                        print(f"Warning: Inference took {self._d} steps > deadline {self._deadline} steps")
                 else:
-                    self._stop_event.wait(0.01)
+                    time.sleep(0.01)        
+           
             except Exception:
                 if not self._stop_event.is_set():
                     import traceback
                     traceback.print_exc()
-                with self._lock:
-                    self._background_running = False
 
 
     def __enter__(self):
@@ -115,41 +118,29 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     def _infer_rtc(self, obs: Dict) -> Dict:
         """RTC mode: Use background inference to reduce latency."""
         # First call: perform inference (warmup should have reduced latency)
-        if self._warmup:
+        if not self._warmup:
             init_actions = self._policy.infer(obs=obs, prev_action=None, use_rtc=self._is_rtc)
-            second_actions = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
-            self._warmup = False
-            return None
-            # self._last_results = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
-            # self._last_origin_actions = self._last_results["origin_actions"]
+            self._last_results = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
+            self._last_origin_actions = self._last_results["origin_actions"]
             # self._last_results = {"actions": self._last_results["actions"]}
-            # self._cur_step = 0
+            self._cur_step = 0
+            self._warmup = True
 
-        # Get current action chunk
-        def slicer(x):
-            if isinstance(x, np.ndarray):
-                return x[self._cur_step, ...]
-            else:
-                return x
-        
-        results = tree.map_structure(slicer, self._last_results)
+
+       
         
         # Update state under lock
         with self._lock:
+            # Get current action chunk
+            def slicer(x):
+                if isinstance(x, np.ndarray):
+                    return x[self._cur_step, ...]
+                else:
+                    return x
+        
+            results = tree.map_structure(slicer, self._last_results)
             self._obs = obs
             self._cur_step += 1
-           
-            # Swap in background results when ready
-            ready = (self._background_results is not None and
-                     self._cur_step >= self._s + self._d and
-                     not self._background_running)
-            if ready:
-                self._last_origin_actions = self._background_results["origin_actions"]
-                self._last_results = {"actions": self._background_results["actions"]}
-                # Roll back step count
-                self._cur_step = max(0, self._cur_step - self._s)
-                self._background_results = None
-
         return results
 
     def _infer_normal(self, obs: Dict) -> Dict:

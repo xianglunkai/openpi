@@ -16,14 +16,14 @@ from examples.mobile_aloha_AgileX import robot_utils
 class Args:
     host: str = "0.0.0.0"
     port: int = 8000
-    action_horizon: int = 30
+    action_horizon: int = 50
 
     num_episodes: int = 1
     max_episode_time_s: int = 180
     
-    use_rtc: bool = False  
-    s: int = 25
-    d: int = 12
+    use_rtc: bool = True  
+    s: int = 20
+    d: int = 10
     multiplier: int = 4
  
 
@@ -54,7 +54,7 @@ def main(args: Args) -> None:
         max_hz=robot_args.publish_rate/args.multiplier,
         num_episodes=args.num_episodes,
         max_episode_time_s=args.max_episode_time_s,
-        use_action_interpolation = True,
+        use_action_interpolation = False,
         multiplier = args.multiplier,
     )
 
