@@ -103,9 +103,7 @@ class Runtime:
                   
             else:
                 if action is not None:
-                    t0 = time.perf_counter()
                     self._environment.apply_action(action)
-                    tf = time.perf_counter()
             
             # Notify subscribers with agent action
             for subscriber in self._subscribers:
@@ -116,7 +114,7 @@ class Runtime:
             # Sleep to maintain robot control frequency
             now = time.time()
             dt = now - last_step_time
-        
+            print(f"inference takes time {dt * 1000}ms > control_interval :{control_interval * 1000}ms")
             if dt < control_interval:
                 time.sleep(control_interval - dt)
                 last_step_time = time.time()
