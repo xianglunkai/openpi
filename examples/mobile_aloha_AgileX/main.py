@@ -25,7 +25,7 @@ class Args:
     s: int = 20
     d: int = 10
     multiplier: int = 5
-    control_rate_hz: int = 250
+    inference_fps: int = 50
     use_action_interpolation: bool = False
  
 def main(args: Args) -> None:
@@ -36,7 +36,7 @@ def main(args: Args) -> None:
     )
     logging.info(f"Server metadata: {ws_client_policy.get_server_metadata()}")
 
-    control_freq_hz = args.control_rate_hz if args.use_action_interpolation else args.control_rate_hz / args.multiplier
+    control_freq_hz = args.inference_fps * args.multiplier if args.use_action_interpolation else args.inference_fps
 
     metadata = ws_client_policy.get_server_metadata()
     runtime = _runtime.Runtime(
@@ -51,7 +51,7 @@ def main(args: Args) -> None:
             )
         ),
         subscribers=[],
-        max_hz=control_freq_hz,
+        max_hz=args.inference_fps,
         num_episodes=args.num_episodes,
         max_episode_time_s=args.max_episode_time_s,
         use_action_interpolation = args.use_action_interpolation,
