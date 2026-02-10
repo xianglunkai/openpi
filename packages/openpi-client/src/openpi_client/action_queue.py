@@ -74,7 +74,7 @@ class ActionQueue:
 
             action = self.queue[self.last_index]
             self.last_index += 1
-            return action.clone()
+            return action.copy()  # Return a copy to prevent external modifications
 
     def qsize(self) -> int:
         """Get the number of remaining actions in the queue.

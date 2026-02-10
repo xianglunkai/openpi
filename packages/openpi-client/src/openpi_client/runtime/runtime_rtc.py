@@ -29,13 +29,12 @@ class RuntimeRTC:
         environment: _environment.Environment,
         policy: _base_policy.BasePolicy,
         subscribers: List[_subscriber.Subscriber],
-        fps: float = 30.0,
+        fps: float = 50.0,
         num_episodes: int = 1,
-        max_episode_steps: int = 0,
+        max_episode_time_s: int = 0,
         use_action_interpolation: bool = False,
-        interpolation_multiplier: int = 1,
+        multiplier: int = 1,
         rtc_config: Optional[RTCConfig] = None,
-        task: str = "",
         action_queue_size_to_get_new_actions: int = 30,
     ) -> None:
         # Basic parameters
@@ -44,10 +43,9 @@ class RuntimeRTC:
         self._subscribers = subscribers
         self._fps = fps
         self._num_episodes = num_episodes
-        self._max_episode_steps = max_episode_steps
+        self._max_episode_time_s = max_episode_time_s
         self._use_action_interpolation = use_action_interpolation
-        self._interpolation_multiplier = interpolation_multiplier
-        self._task = task
+        self._interpolation_multiplier = multiplier
         self._action_queue_size_to_get_new_actions = action_queue_size_to_get_new_actions
         
         # RTC configuration (default if not provided)
@@ -64,7 +62,7 @@ class RuntimeRTC:
         self._latency_tracker = LatencyTracker(maxlen=100)
         
         # Interpolator for smooth control
-        self._interpolator = ActionInterpolator(interpolation_multiplier) if use_action_interpolation else None
+        self._interpolator = ActionInterpolator(multiplier) if use_action_interpolation else None
         
         # Statistics
         self._episode_steps = 0
@@ -236,7 +234,6 @@ class RuntimeRTC:
                     
                     if self._inference_warmup_steps <= 3:
                         self._inference_warmup_steps += 1
-                        print(f"result: {result}")
                         continue
                     
                     # Extract actions from result
@@ -278,7 +275,8 @@ class RuntimeRTC:
                             f"[GetActionThread] Inference {self._inference_count}: "
                             f"time={new_latency*1000:.1f}ms, "
                             f"delay={new_delay} steps, "
-                            f"queue_size={self._action_queue.qsize()}"
+                            f"queue_size={self._action_queue.qsize()}",
+                            f"number of 7 actions = {actions[:,0:7]}"
                         )
                 else:
                     # Small sleep to prevent busy waiting

@@ -1,5 +1,6 @@
 import logging
 import math
+import numpy as np
 
 import torch
 from torch import Tensor
@@ -9,8 +10,10 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+from openpi.models_pytorch.rtc.rtc_processor import RTCProcessor
+from openpi.policies.rtc_processor import RTCConfig
   
-from torch.func import vjp
+
 
 def get_safe_dtype(target_dtype, device_type):
     """Get a safe dtype for the given device type."""
@@ -111,10 +114,15 @@ class PI0Pytorch(nn.Module):
 
         torch.set_float32_matmul_precision("high")
         self.sample_actions = torch.compile(self.sample_actions, mode="max-autotune")
-        self.guided_inference = torch.compile(self.guided_inference, mode="max-autotune")
+        # self.guided_inference = torch.compile(self.guided_inference, mode="max-autotune")
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
+        
+        
+        # Initialize RTC processor
+        rtc_config = getattr(config, 'rtc_config', None)
+        self.init_rtc_processor(rtc_config)
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
@@ -124,6 +132,27 @@ class PI0Pytorch(nn.Module):
                 raise ValueError(msg)
         except ImportError:
             raise ValueError(msg) from None
+
+    def init_rtc_processor(self, rtc_config: RTCConfig = None):
+        """Initialize the RTC processor with the given configuration.
+
+        Args:
+            rtc_config: RTCConfig instance or None. If None, creates a default config with enabled=True.
+        """
+        if rtc_config is None:
+            # Create default RTC config similar to JAX version
+            rtc_config = RTCConfig(
+                enabled=True,
+                prefix_attention_schedule=RTCConfig.prefix_attention_schedule.LINEAR,
+                max_guidance_weight=10.0,
+                execution_horizon=25,
+            )
+
+        self.rtc_processor = RTCProcessor(rtc_config=rtc_config)
+        logging.info(f"Initialized RTC processor: enabled={rtc_config.enabled}, "
+                    f"execution_horizon={rtc_config.execution_horizon}, "
+                    f"max_guidance_weight={rtc_config.max_guidance_weight}, "
+                    f"prefix_attention_schedule={rtc_config.prefix_attention_schedule}")
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""
@@ -463,19 +492,9 @@ class PI0Pytorch(nn.Module):
         return self.action_out_proj(suffix_out)
 
     @torch.no_grad()
-    def guided_inference(
-        self,
-        device,
-        prev_action,
-        observation,
-        noise=None,
-        num_steps=10,
-        s=30,
-        d=10,
-        beta=8.0,
-    ) -> Tensor:
-        """Do RTC-guided inference with guidance from previous actions."""
+    def guided_inference(self, device, observation, noise=None, num_steps=10, prev_actions=None, s=25, d=10, beta=10.0) -> Tensor:
         bsize = observation.state.shape[0]
+
         if noise is None:
             actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
@@ -498,100 +517,63 @@ class PI0Pytorch(nn.Module):
             use_cache=True,
         )
 
+        # Extract RTC parameters from kwargs
+        prev_chunk_left_over = prev_actions
+        inference_delay = d
+        execution_horizon = s if s is not None else self.rtc_processor.rtc_config.execution_horizon
+     
+        # Pad prev_chunk_left_over to match action_horizon and action_dim if provided
+        if prev_chunk_left_over is not None:
+            # Convert to tensor if it's a numpy array
+            if isinstance(prev_chunk_left_over, np.ndarray):
+                prev_chunk_left_over = torch.from_numpy(prev_chunk_left_over).to(device)
+
+            # prev_chunk_left_over shape: (batch, time, action_dim)
+            time_pad = self.config.action_horizon - prev_chunk_left_over.shape[1]
+            action_dim_pad = self.config.action_dim - prev_chunk_left_over.shape[2]
+            if time_pad > 0 or action_dim_pad > 0:
+                prev_chunk_left_over = torch.nn.functional.pad(
+                    prev_chunk_left_over,
+                    (0, action_dim_pad, 0, time_pad, 0, 0),  # (left, right) for each dim from right to left
+                )
+                logging.info(f"Padded prev_chunk_left_over to shape: {prev_chunk_left_over.shape}")
+
         dt = -1.0 / num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
-        # Prepare previous action slice for guidance
-        # Get prev_action from s-th step to the end, then pad s steps with zeros
-        prev_action_slice = prev_action[:, s:, :]  # shape: [bsize, action_horizon-s, action_dim]
-        zero_actions = torch.zeros((bsize, s, self.config.action_dim), device=device, dtype=prev_action_slice.dtype)
-        prev_action_slice = torch.cat([prev_action_slice, zero_actions], dim=1)  # shape: [bsize, action_horizon, action_dim]
-
-        # Create weight matrix W
-        def make_w(d, s, device):
-            """Generate the weight vector W ∈ R^H and create diagonal matrix."""
-            H = self.config.action_horizon
-            i = torch.arange(H, device=device, dtype=torch.float32)
-            
-            # Three-segment condition
-            cond_1 = i < d
-            cond_2 = (i >= d) & (i < H - s)
-            
-            # Segment (1): all 1
-            w1 = torch.ones_like(i)
-            
-            # Segment (2): exponential decay
-            c_i = (H - s - i) / (H - s - d + 1)
-            w2 = torch.exp(c_i) - 1
-            w2 = c_i * w2 / (math.e - 1)
-            
-            # Segment (3): all 0
-            w3 = torch.zeros_like(i)
-            
-            # Combine segments
-            w = torch.where(cond_1, w1, torch.where(cond_2, w2, w3))
-            
-            # Create diagonal matrix
-            W = torch.diag(w)
-            return W.unsqueeze(0)  # Add batch dimension
-
-        # Create W matrix
-        diag_w = make_w(d, s, device)  # shape: [1, action_horizon, action_horizon]
+        # Reset tracker for new inference run
+        self.rtc_processor.tracker.reset()
 
         x_t = noise
         time = torch.tensor(1.0, dtype=torch.float32, device=device)
-        
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
-            
-            # Enable gradient computation for this step
-            with torch.enable_grad():
-                # Create a copy of x_t that requires gradients
-                x_t_grad = x_t.detach().clone().requires_grad_(True)
-                
-                # Compute a_1_prime and v_t
-                v_t = self.denoise_step(state, prefix_pad_masks, past_key_values, x_t_grad, expanded_time)
-                a_1_prime = x_t_grad - time * v_t
-                
-                # Compute guidance error
-                e = prev_action_slice - a_1_prime  # shape: [bsize, action_horizon, action_dim]
-                
-                # Apply weight matrix W to error
-                e_weighted = torch.matmul(diag_w, e)  # shape: [bsize, action_horizon, action_dim]
-                
-                # Compute gradient of a_1_prime w.r.t x_t
-                grad_a_1_prime_x_t = torch.autograd.grad(
-                    outputs=a_1_prime,
-                    inputs=x_t_grad,
-                    grad_outputs=e_weighted,
-                    retain_graph=False,
-                    create_graph=False,
-                )[0]
-                
-                # Clean up gradient computation
-                x_t_grad.requires_grad_(False)
-            
-            # Compute guidance coefficient following the RTCProcessor formulation.
-            # Use tensor ops only (avoid .item()) and guard against divide-by-zero.
-            # tau = 1 - time
-            tau = 1.0 - time
-            # squared_one_minus_tau is time**2 (since 1 - tau == time)
-            time_sq = time * time
-            tau_sq = tau * tau
 
-            # inv_r2 = (time^2 + tau^2) / (time^2)  (add eps to denom)
-            inv_r2 = (time_sq + tau_sq) / (time_sq + 1e-12)
+            # Partial call of the function, using lambda to wrap denoise_step
+            # Pass x_t as positional argument since it could have different naming in different models
+            denoise_step_partial_call = lambda input_x_t: self.denoise_step(
+                state=state,
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_key_values,
+                x_t=input_x_t,
+                timestep=expanded_time,
+            )
 
-            # c = time / tau  (add eps to denom)
-            c = (time) / (tau + 1e-12)
+            if self.rtc_processor.rtc_config.enabled and prev_chunk_left_over is not None:
+                v_t = self.rtc_processor.denoise_step(
+                    x_t=x_t,
+                    prev_chunk_left_over=prev_chunk_left_over,
+                    inference_delay=inference_delay,
+                    time=time,
+                    original_denoise_step_partial=denoise_step_partial_call,
+                    execution_horizon=execution_horizon,
+                    beta=beta,
+                )
+            else:
+                v_t = denoise_step_partial_call(x_t)
 
-            guidance_coeff = c * inv_r2
-            # nan/inf safety and clamp to beta
-            guidance_coeff = torch.nan_to_num(guidance_coeff, posinf=beta)
-            guidance_coeff = torch.minimum(guidance_coeff, torch.tensor(beta, device=device, dtype=guidance_coeff.dtype))
-            
-            # Update x_t using RTC algorithm
-            x_t = x_t + dt * (v_t - guidance_coeff * grad_a_1_prime_x_t)
+            # Euler step - use new tensor assignment instead of in-place operation
+            x_t = x_t + dt * v_t
             time += dt
         return x_t
     

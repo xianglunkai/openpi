@@ -124,9 +124,6 @@ class ActionChunkBroker(_base_policy.BasePolicy):
             self._cur_step = 0
             self._warmup = True
 
-
-       
-        
         # Update state under lock
         with self._lock:
             # Get current action chunk
