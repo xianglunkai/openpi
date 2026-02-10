@@ -2,6 +2,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import tree
+import time
 from typing_extensions import override
 
 from openpi_client import base_policy as _base_policy
@@ -128,7 +129,10 @@ class ActionChunkBroker(_base_policy.BasePolicy):
     @override
     def infer(self, obs: Dict) -> Dict:  # noqa: UP006
         if self._last_results is None:
+            t0 = time.perf_counter()
             self._last_results = self._policy.infer(obs)
+            tf = time.perf_counter()
+            print(f"inference take time {(tf - t0) * 1000 }ms")
 
             # Apply smoothing to action chunks if enabled
             if self._use_smoothing:

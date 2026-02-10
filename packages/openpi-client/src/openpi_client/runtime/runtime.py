@@ -114,7 +114,7 @@ class Runtime:
             # Sleep to maintain robot control frequency
             now = time.time()
             dt = now - last_step_time
-            print(f"inference takes time {dt * 1000}ms > control_interval :{control_interval * 1000}ms")
+            # print(f"inference takes time {dt * 1000}ms > control_interval :{control_interval * 1000}ms")
             if dt < control_interval:
                 time.sleep(control_interval - dt)
                 last_step_time = time.time()

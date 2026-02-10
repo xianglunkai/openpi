@@ -19,8 +19,8 @@ class Args:
     num_episodes: int = 1
     max_episode_steps: int = 10000
     
-    multiplier: int = 5
-    control_rate_hz = 250
+    multiplier: int = 4
+    inference_fps: int = 50
     use_action_interpolation:bool =  True
 
 
@@ -33,7 +33,7 @@ def main(args: Args) -> None:
   
     metadata = ws_client_policy.get_server_metadata()
     
-    control_freq_hz = args.control_rate_hz if args.use_action_interpolation else args.control_rate_hz / args.multiplier
+    control_freq_hz = args.inference_fps * args.multiplier if args.use_action_interpolation else args.inference_fps
     
     runtime = _runtime.Runtime(
         environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_rate_hz = control_freq_hz),
@@ -47,7 +47,7 @@ def main(args: Args) -> None:
             )
         ),
         subscribers=[],
-        max_hz=control_freq_hz,
+        max_hz=args.inference_fps,
         num_episodes=args.num_episodes,
         max_episode_steps=args.max_episode_steps,
         use_action_interpolation=args.use_action_interpolation,
