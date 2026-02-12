@@ -110,7 +110,7 @@ class Runtime:
             now = time.time()
             dt = now - last_step_time
             
-            # print(f"runtime: dt= {dt * 1000}ms")
+            print(f"runtime: dt= {dt * 1000}ms")
         
             if dt < control_interval:
                 time.sleep(control_interval - dt)

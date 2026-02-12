@@ -61,7 +61,7 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                         obs_snapshot = self._obs.copy()
                         # Remove the actions that have already been executed
                         prev_snapshot = self._last_origin_actions.copy()
-                        # print(f"1. self._cur_step: {self._cur_step}, self._s: {self._s }, self._d: {self._d }")
+                        print(f"1. self._cur_step: {self._cur_step}, self._s: {self._s }, self._d: {self._d }")
            
                 if should_run:
                     new_actions = self._policy.infer(obs=obs_snapshot, prev_action=prev_snapshot, use_rtc=True)
@@ -73,7 +73,7 @@ class ActionChunkBroker(_base_policy.BasePolicy):
                         # Reset t so that it indexes into A new
                         self._cur_step = max(0, self._cur_step - self._s)
                         self._d = self._cur_step
-                        # print(f"2. self._cur_step: {self._cur_step}, self._s: {self._s }, self._d: {self._d }")
+                        print(f"2. self._cur_step: {self._cur_step}, self._s: {self._s }, self._d: {self._d }")
 
                     
                      # Discard stale results that exceed deadline
@@ -120,7 +120,6 @@ class ActionChunkBroker(_base_policy.BasePolicy):
             init_actions = self._policy.infer(obs=obs, prev_action=None, use_rtc=self._is_rtc)
             self._last_results = self._policy.infer(obs=obs, prev_action= init_actions["origin_actions"], use_rtc=self._is_rtc)
             self._last_origin_actions = self._last_results["origin_actions"]
-            # self._last_results = {"actions": self._last_results["actions"]}
             self._cur_step = 0
             self._warmup = True
 

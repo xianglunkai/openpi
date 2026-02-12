@@ -22,11 +22,11 @@ class Args:
     max_episode_time_s: int = 180
     
     use_rtc: bool = True  
-    s: int = 20
+    s: int = 25
     d: int = 10
-    multiplier: int = 5
-    inference_fps: int = 50
-    use_action_interpolation: bool = False
+    multiplier: int = 4
+    inference_fps: int = 30
+    use_action_interpolation: bool = True
  
 def main(args: Args) -> None:
     

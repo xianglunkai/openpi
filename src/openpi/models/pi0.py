@@ -238,7 +238,7 @@ class Pi0(_model.BaseModel):
         observation: _model.Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,       
-        s: int = 20,
+        s: int = 25,
         d: int = 10,
         beta: float = 10.0,
     ) -> _model.Actions:

@@ -147,7 +147,7 @@ class RTCProcessor:
 
         if execution_horizon is None:
             execution_horizon = self.rtc_config.execution_horizon
-
+        
         # If the previous action chunk is to short then it doesn't make sense to use long execution horizon
         # because there is nothing to merge
         if execution_horizon > prev_chunk_left_over.shape[1]:
@@ -175,8 +175,8 @@ class RTCProcessor:
         )
 
         with torch.enable_grad():
-            v_t = original_denoise_step_partial(x_t)
             x_t.requires_grad_(True)
+            v_t = original_denoise_step_partial(x_t)
 
             x1_t = x_t - time * v_t  # noqa: N806
             err = (prev_chunk_left_over - x1_t) * weights

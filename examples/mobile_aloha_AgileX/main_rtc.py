@@ -22,13 +22,13 @@ class Args:
     max_episode_time_s: int = 180
     
     use_rtc: bool = True  
-    s: int = 20
+    s: int = 25
     d: int = 10
-    multiplier: int = 5
-    inference_fps: int = 50
+    multiplier: int = 4
+    inference_fps: int = 30
     use_action_interpolation: bool = False
     
-    action_queue_size_to_get_new_actions: int = 30
+    action_queue_size_to_get_new_actions: int = 35
  
 def main(args: Args) -> None:
     
@@ -44,8 +44,9 @@ def main(args: Args) -> None:
     
     rtc_config = RTCConfig(
         enabled=args.use_rtc,
-        prefix_attention_schedule=RTCAttentionSchedule.LINEAR,
+        prefix_attention_schedule=RTCAttentionSchedule.EXP,
         execution_horizon=args.s,
+        debug=True,
     )
     
     runtime = _runtime_rtc.RuntimeRTC(

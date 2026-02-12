@@ -143,7 +143,7 @@ class PI0Pytorch(nn.Module):
             # Create default RTC config similar to JAX version
             rtc_config = RTCConfig(
                 enabled=True,
-                prefix_attention_schedule=RTCConfig.prefix_attention_schedule.LINEAR,
+                prefix_attention_schedule=RTCConfig.prefix_attention_schedule.EXP,
                 max_guidance_weight=10.0,
                 execution_horizon=25,
             )
@@ -492,7 +492,7 @@ class PI0Pytorch(nn.Module):
         return self.action_out_proj(suffix_out)
 
     @torch.no_grad()
-    def guided_inference(self, device, observation, noise=None, num_steps=10, prev_actions=None, s=25, d=10, beta=10.0) -> Tensor:
+    def guided_inference(self, device, observation, noise=None, num_steps=10, prev_action=None, s=25, d=10, beta=10.0) -> Tensor:
         bsize = observation.state.shape[0]
 
         if noise is None:
@@ -518,26 +518,10 @@ class PI0Pytorch(nn.Module):
         )
 
         # Extract RTC parameters from kwargs
-        prev_chunk_left_over = prev_actions
+        prev_chunk_left_over = prev_action
         inference_delay = d
         execution_horizon = s if s is not None else self.rtc_processor.rtc_config.execution_horizon
-     
-        # Pad prev_chunk_left_over to match action_horizon and action_dim if provided
-        if prev_chunk_left_over is not None:
-            # Convert to tensor if it's a numpy array
-            if isinstance(prev_chunk_left_over, np.ndarray):
-                prev_chunk_left_over = torch.from_numpy(prev_chunk_left_over).to(device)
-
-            # prev_chunk_left_over shape: (batch, time, action_dim)
-            time_pad = self.config.action_horizon - prev_chunk_left_over.shape[1]
-            action_dim_pad = self.config.action_dim - prev_chunk_left_over.shape[2]
-            if time_pad > 0 or action_dim_pad > 0:
-                prev_chunk_left_over = torch.nn.functional.pad(
-                    prev_chunk_left_over,
-                    (0, action_dim_pad, 0, time_pad, 0, 0),  # (left, right) for each dim from right to left
-                )
-                logging.info(f"Padded prev_chunk_left_over to shape: {prev_chunk_left_over.shape}")
-
+      
         dt = -1.0 / num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 

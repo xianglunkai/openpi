@@ -70,6 +70,7 @@ class RuntimeRTC:
         self._total_control_time = 0
         self._inference_count = 0
         
+        
         # State tracking
         self._inference_warmup_steps = 0
     
@@ -100,7 +101,7 @@ class RuntimeRTC:
     
     def _run_episode(self, episode_idx: int) -> None:
         """Run a single episode."""
-        logging.info(f"Starting episode {episode_idx + 1}...")
+        print(f"Starting episode {episode_idx + 1}...")
         
         # Reset environment and policy
         self._environment.reset()
@@ -120,6 +121,7 @@ class RuntimeRTC:
         self._total_control_time = 0
         self._inference_count = 0
         self._inference_warmup_steps = 0
+        start_time = time.perf_counter()
         
         # Notify subscribers
         for subscriber in self._subscribers:
@@ -149,24 +151,21 @@ class RuntimeRTC:
             while self._episode_active.is_set() and not self._shutdown_event.is_set():
                 # Check episode completion conditions
                 if self._environment.is_episode_complete():
-                    logging.info("Environment marked episode as complete")
+                    print("Environment marked episode as complete")
+                    self._episode_active.clear()
+                    break
+                
+                now = time.perf_counter()
+                if (now - start_time)  > self._max_episode_time_s:
+                    self._episode_steps += 1
+                    print("Runtime deadline arrived!")
                     self._episode_active.clear()
                     break
                     
-                if self._max_episode_steps > 0 and self._episode_steps >= self._max_episode_steps:
-                    logging.info(f"Reached max episode steps: {self._max_episode_steps}")
-                    self._episode_active.clear()
-                    break
-                
-                # Log queue status periodically
-                if self._episode_steps % 50 == 0:
-                    queue_size = self._action_queue.qsize()
-                    logging.info(f"[MAIN] Step {self._episode_steps}, Queue size: {queue_size}")
-                
                 time.sleep(0.1)
                 
         except KeyboardInterrupt:
-            logging.info("Episode interrupted by user")
+            print("Episode interrupted by user")
             self._episode_active.clear()
             self._shutdown_event.set()
         
@@ -178,7 +177,7 @@ class RuntimeRTC:
         for subscriber in self._subscribers:
             subscriber.on_episode_end()
         
-        logging.info(f"Episode {episode_idx + 1} completed. Steps: {self._episode_steps}")
+        print(f"Episode {episode_idx + 1} completed. Steps: {self._episode_steps}")
     
     def _get_action_worker(self):
         """Worker thread that gets observations and runs policy inference.
@@ -189,7 +188,7 @@ class RuntimeRTC:
         3. Uses unified policy.infer() interface with use_rtc parameter
         4. Merges new actions into queue using ActionQueue.merge()
         """
-        logging.info("[GetActionThread] Starting...")
+        print("[GetActionThread] Starting...")
         
         # Calculate time per step
         time_per_step = 1.0 / self._fps
@@ -240,7 +239,7 @@ class RuntimeRTC:
                     # Note: policy should return dict with at least "actions"
                     # For RTC, it should also return "origin_actions"
                     if "actions" not in result:
-                        logging.error("Policy inference result missing 'actions' key")
+                        print("Policy inference result missing 'actions' key")
                         precise_sleep(0.1)
                         continue
                     
@@ -271,27 +270,26 @@ class RuntimeRTC:
                     
                     # Log inference details (debug level)
                     if self._rtc_config.debug and self._inference_count % 10 == 0:
-                        logging.debug(
+                        print(
                             f"[GetActionThread] Inference {self._inference_count}: "
                             f"time={new_latency*1000:.1f}ms, "
                             f"delay={new_delay} steps, "
                             f"queue_size={self._action_queue.qsize()}",
-                            f"number of 7 actions = {actions[:,0:7]}"
                         )
                 else:
                     # Small sleep to prevent busy waiting
                     precise_sleep(0.01)
                 
             except Exception as e:
-                logging.error(f"[GetActionThread] Error: {e}", exc_info=True)
+                print(f"[GetActionThread] Error: {e}", exc_info=True)
                 if not self._shutdown_event.is_set():
                     precise_sleep(0.1)
         
-        logging.info("[GetActionThread] Exiting...")
+        print("[GetActionThread] Exiting...")
     
     def _actor_control_worker(self):
         """Worker thread that gets actions from queue and sends to environment."""
-        logging.info("[ActorControlThread] Starting...")
+        print("[ActorControlThread] Starting...")
         
         # Calculate control interval
         if self._interpolator:
@@ -301,11 +299,10 @@ class RuntimeRTC:
         
     
         step_count = 0
-        
+      
         while self._episode_active.is_set() and not self._shutdown_event.is_set():
             try:
                 start_time = time.perf_counter()
-                
                 # Get action for interpolation/execution
                 action_to_apply = None
                 
@@ -336,63 +333,62 @@ class RuntimeRTC:
                         observation = self._environment.get_observation()
                         subscriber.on_step(observation, action_to_apply)
                     
-                    self._episode_steps += 1
                     step_count += 1
                 
                 dt = time.perf_counter() - start_time
                 self._total_control_time += dt
-                
+                # print(f"[ActorControlThread] control time: {dt * 1000}ms")
                 # Sleep to maintain control frequency
                 sleep_time = control_interval - dt
                 precise_sleep(max(0, sleep_time - 0.001))  # Small buffer
          
                 
             except Exception as e:
-                logging.error(f"[ActorControlThread] Error: {e}", exc_info=True)
+                print(f"[ActorControlThread] Error: {e}", exc_info=True)
                 if not self._shutdown_event.is_set():
                     precise_sleep(0.1)
         
-        logging.info(f"[ActorControlThread] Exiting. Executed {step_count} steps.")
+        print(f"[ActorControlThread] Exiting. Executed {step_count} steps.")
     
     def _log_statistics(self):
         """Log runtime statistics."""
-        logging.info("=" * 50)
-        logging.info("Runtime Statistics")
-        logging.info("=" * 50)
+        print("=" * 50)
+        print("Runtime Statistics")
+        print("=" * 50)
         
         # Inference statistics
         if self._inference_count > 0:
             avg_inference_time = self._total_inference_time / self._inference_count
-            logging.info(f"Inference Statistics:")
-            logging.info(f"  Average inference time: {avg_inference_time*1000:.2f}ms")
-            logging.info(f"  Total inferences: {self._inference_count}")
+            print(f"Inference Statistics:")
+            print(f"  Average inference time: {avg_inference_time*1000:.2f}ms")
+            print(f"  Total inferences: {self._inference_count}")
             
             if self._rtc_config.enabled:
                 p95_latency = self._latency_tracker.p95()
                 max_latency = self._latency_tracker.max()
-                logging.info(f"  P95 inference latency: {p95_latency*1000:.2f}ms")
-                logging.info(f"  Max inference latency: {max_latency*1000:.2f}ms")
+                print(f"  P95 inference latency: {p95_latency*1000:.2f}ms")
+                print(f"  Max inference latency: {max_latency*1000:.2f}ms")
         
         # Control statistics
         if self._episode_steps > 0:
             avg_control_time = self._total_control_time / self._episode_steps
             effective_fps = self._episode_steps / self._total_control_time if self._total_control_time > 0 else 0
             
-            logging.info(f"Control Statistics:")
-            logging.info(f"  Average control loop time: {avg_control_time*1000:.2f}ms")
-            logging.info(f"  Total steps executed: {self._episode_steps}")
-            logging.info(f"  Effective FPS: {effective_fps:.1f} (target: {self._fps})")
+            print(f"Control Statistics:")
+            print(f"  Average control loop time: {avg_control_time*1000:.2f}ms")
+            print(f"  Total steps executed: {self._episode_steps}")
+            print(f"  Effective FPS: {effective_fps:.1f} (target: {self._fps})")
         
         # Configuration summary
-        logging.info(f"Configuration:")
-        logging.info(f"  RTC enabled: {self._rtc_config.enabled}")
+        print(f"Configuration:")
+        print(f"  RTC enabled: {self._rtc_config.enabled}")
         if self._rtc_config.enabled:
-            logging.info(f"  Execution horizon: {self._rtc_config.execution_horizon}")
-            logging.info(f"  Prefix attention: {self._rtc_config.prefix_attention_schedule.value}")
+            print(f"  Execution horizon: {self._rtc_config.execution_horizon}")
+            print(f"  Prefix attention: {self._rtc_config.prefix_attention_schedule.value}")
             if self._rtc_config.max_guidance_weight:
-                logging.info(f"  Max guidance weight: {self._rtc_config.max_guidance_weight}")
+                print(f"  Max guidance weight: {self._rtc_config.max_guidance_weight}")
         
-        logging.info("=" * 50)
+        print("=" * 50)
     
     @property
     def episode_steps(self) -> int:
