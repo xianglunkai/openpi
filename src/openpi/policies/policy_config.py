@@ -89,6 +89,7 @@ def create_trained_policy(
             *data_config.model_transforms.outputs,
             transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
             *data_config.data_transforms.outputs,
+            transforms.OptimizeActionsQP(dt=0.03333, w_data=1.0, w_acc=10.0, w_jerk=100.0, fix_ends=False, verbose=False),
             *repack_transforms.outputs,
         ],
         sample_kwargs=sample_kwargs,

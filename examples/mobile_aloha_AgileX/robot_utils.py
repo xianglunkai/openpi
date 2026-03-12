@@ -484,7 +484,7 @@ def get_arguments():
 
     args.chunk_size = 64
     args.arm_steps_length = [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.02]
-    args.use_actions_filter = True
+    args.use_actions_filter = False
     args.filter_alg_type = 'low_pass'  # td or low_pass
 
     args.use_actions_interpolation = False

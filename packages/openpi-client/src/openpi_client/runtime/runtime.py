@@ -110,12 +110,12 @@ class Runtime:
             now = time.time()
             dt = now - last_step_time
             
-            print(f"runtime: dt= {dt * 1000}ms")
-        
             if dt < control_interval:
                 time.sleep(control_interval - dt)
                 last_step_time = time.time()
             else:
+                # If the step took longer than the control interval, skip sleeping
+                print(f"Step took {dt:.3f}s which exceeds control interval of {control_interval:.3f}s. Consider reducing agent frequency")
                 last_step_time = now
 
             # Check episode completion

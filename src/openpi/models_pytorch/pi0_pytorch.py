@@ -146,6 +146,8 @@ class PI0Pytorch(nn.Module):
                 prefix_attention_schedule=RTCConfig.prefix_attention_schedule.EXP,
                 max_guidance_weight=10.0,
                 execution_horizon=25,
+                full_trajectory_alignment=False,
+                sigma_d = 1.0,
             )
 
         self.rtc_processor = RTCProcessor(rtc_config=rtc_config)

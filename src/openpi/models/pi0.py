@@ -241,6 +241,7 @@ class Pi0(_model.BaseModel):
         s: int = 25,
         d: int = 10,
         beta: float = 10.0,
+        sigma: float = 0.2,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -347,8 +348,8 @@ class Pi0(_model.BaseModel):
             #Compute vector-Jacobian product
             grad_a_1_prime_x_t = f_vjp((e, jnp.zeros_like(v_t)))
             
-        
-            inv_r2 = (time**2 + (1 - time) ** 2) / (time ** 2)
+            prior_variance = sigma ** 2
+            inv_r2 = (time ** 2 + ((1 - time) ** 2) * prior_variance) / ((time ** 2) * prior_variance)
             c = jnp.nan_to_num(time / (1 - time), posinf=beta)
             guidance_weight = jnp.nan_to_num(c * inv_r2, posinf = beta)
             guidance_weight = jnp.minimum(guidance_weight, beta)

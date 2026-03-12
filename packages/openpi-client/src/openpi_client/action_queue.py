@@ -49,7 +49,7 @@ class ActionQueue:
         last_index (int): Current consumption index in the queue.
     """
 
-    def __init__(self, cfg: RTCConfig):
+    def __init__(self, enabled: bool):
         """Initialize the action queue.
 
         Args:
@@ -59,7 +59,7 @@ class ActionQueue:
         self.original_queue = None  # Original actions for RTC
         self.lock = Lock()
         self.last_index = 0
-        self.cfg = cfg
+        self.enabled = enabled
 
     def get(self) ->  np.ndarray | None:
         """Get the next action from the queue.
@@ -144,7 +144,7 @@ class ActionQueue:
         with self.lock:
             self._check_delays(real_delay, action_index_before_inference)
 
-            if self.cfg.enabled:
+            if self.enabled:
                 self._replace_actions_queue(original_actions, processed_actions, real_delay)
                 return
 

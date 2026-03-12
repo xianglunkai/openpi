@@ -190,6 +190,9 @@ class RTCProcessor:
                 grad_outputs = err.clone().detach()
                 correction = torch.autograd.grad(x1_t, x_t, grad_outputs, retain_graph=False)[0]
 
+        # Alex Soare optimization: Use num_flow_matching_steps as max_guidance_weight if not set
+        # Reference: https://alexander-soare.github.io/robotics/2025/08/05/smooth-as-butter-robot-policies.html
+        # The number of flow matching steps can be used as a clipping parameter without hyperparameter tuning
         max_guidance_weight = self.rtc_config.max_guidance_weight
         if max_guidance_weight is None:
             max_guidance_weight = beta
@@ -198,7 +201,10 @@ class RTCProcessor:
 
         tau_tensor = torch.as_tensor(tau)
         squared_one_minus_tau = (1 - tau_tensor) ** 2
-        inv_r2 = (squared_one_minus_tau + tau_tensor**2) / (squared_one_minus_tau)
+        prior_variance = torch.as_tensor(self.rtc_config.sigma_d**2)
+        inv_r2 = (squared_one_minus_tau + tau_tensor**2 * prior_variance) / (
+            squared_one_minus_tau * prior_variance
+        )
         c = torch.nan_to_num((1 - tau_tensor) / tau_tensor, posinf=max_guidance_weight)
         guidance_weight = torch.nan_to_num(c * inv_r2, posinf=max_guidance_weight)
         guidance_weight = torch.minimum(guidance_weight, max_guidance_weight)
@@ -223,6 +229,9 @@ class RTCProcessor:
         # Remove the batch dimension if it was added
         if squeezed:
             result = result.squeeze(0)
+            correction = correction.squeeze(0)
+            x1_t = x1_t.squeeze(0)
+            err = err.squeeze(0)
 
         return result
 

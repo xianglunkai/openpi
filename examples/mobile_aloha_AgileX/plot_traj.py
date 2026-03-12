@@ -7,20 +7,26 @@ from collections import deque
 import rospy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
+import os
+from datetime import datetime
+
 
 class JointActionVisualizer:
     """
     实时关节动作可视化类 - 基于位置索引，不依赖关节名称
     显示14个关节的原始指令、滤波后指令和实际反馈位置
+    支持定时自动保存图表快照
     """
     
-    def __init__(self, history_length=1000, update_interval=100):
+    def __init__(self, history_length=1000, update_interval=100, auto_save_interval=30, save_dir="./visualizer_screenshots"):
         """
         初始化可视化器
         
         Args:
             history_length: 历史数据保存长度
             update_interval: 图表更新间隔(ms)
+            auto_save_interval: 自动保存间隔(秒)，默认30秒，设为0则禁用
+            save_dir: 自动保存图片的目录
         """
         # 初始化ROS节点（如果尚未初始化）
         try:
@@ -59,11 +65,27 @@ class JointActionVisualizer:
             'Right Wrist 1', 'Right Wrist 2', 'Right Wrist 3', 'Right Gripper'
         ]
         
+        # 自动保存相关配置
+        self.auto_save_interval = auto_save_interval
+        self.save_dir = save_dir
+        self.save_counter = 0
+        self.auto_save_thread = None
+        self.stop_auto_save = threading.Event()
+        
+        # 创建保存目录
+        if self.auto_save_interval > 0:
+            os.makedirs(self.save_dir, exist_ok=True)
+            print(f"Auto-save enabled: every {auto_save_interval}s to '{save_dir}'")
+        
         # 设置ROS订阅器
         self.setup_subscribers()
         
         # 绘图设置
         self.setup_plots(update_interval)
+        
+        # 启动自动保存线程（如果启用）
+        if self.auto_save_interval > 0:
+            self.start_auto_save()
         
         print("Joint Action Visualizer initialized with ROS topic subscription")
         print("Subscribed to topics:")
@@ -83,8 +105,6 @@ class JointActionVisualizer:
         
         # 订阅实际关节位置
         rospy.Subscriber("/puppet/joint_left", JointState, self.puppet_arm_left_callback)
-        
-        
         rospy.Subscriber("/puppet/joint_right", JointState, self.puppet_arm_right_callback)
     
     def raw_command_callback(self, msg):
@@ -230,15 +250,56 @@ class JointActionVisualizer:
                 if all_times:
                     # 确保使用当前时间作为参考点
                     max_display_time = max(all_times)
-                    min_display_time = max(0, max_display_time - 10)  # 显示最近10秒
+                    min_display_time = max(0, max_display_time - 30)  # 显示最近30秒
                     self.axes[i].set_xlim(min_display_time, max_display_time)
                 
                 updated_lines.extend([line_raw, line_filtered, line_actual])
             self.fig.canvas.draw_idle()  # 强制刷新
             return updated_lines
     
+    def start_auto_save(self):
+        """启动自动保存线程"""
+        def auto_save_loop():
+            while not self.stop_auto_save.is_set():
+                time.sleep(self.auto_save_interval)
+                if not self.stop_auto_save.is_set():
+                    self.save_snapshot()
+        
+        self.auto_save_thread = threading.Thread(target=auto_save_loop, daemon=True)
+        self.auto_save_thread.start()
+        print(f"Auto-save thread started (interval: {self.auto_save_interval}s)")
+    
+    def save_snapshot(self, filename=None):
+        """
+        保存当前图表快照
+        
+        Args:
+            filename: 可选，自定义文件名。为None则自动生成带时间戳的文件名
+        """
+        try:
+            with self.lock:
+                # 生成文件名
+                if filename is None:
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    filename = f"joint_snapshot_{timestamp}_{self.save_counter:04d}.png"
+                    self.save_counter += 1
+                
+                filepath = os.path.join(self.save_dir, filename)
+                
+                # 保存图片，使用更高的DPI以获得更好的质量
+                self.fig.savefig(filepath, dpi=150, bbox_inches='tight', facecolor='white')
+                print(f"[Auto-save] Snapshot saved: {filepath}")
+                
+        except Exception as e:
+            print(f"[Auto-save] Error saving snapshot: {e}")
+    
     def on_close(self, event):
         """处理窗口关闭事件"""
+        # 停止自动保存线程
+        self.stop_auto_save.set()
+        if self.auto_save_thread and self.auto_save_thread.is_alive():
+            self.auto_save_thread.join(timeout=1.0)
+        
         try:
             self.animation.event_source.stop()
         except:
@@ -259,10 +320,16 @@ class JointActionVisualizer:
         self.thread.start()
         return self
 
+
 # 使用示例
 if __name__ == "__main__":
-    # 创建可视化器
-    visualizer = JointActionVisualizer()
+    # 创建可视化器，启用30秒自动保存
+    visualizer = JointActionVisualizer(
+        history_length=1000,
+        update_interval=100,
+        auto_save_interval=30,  # 每30秒自动保存
+        save_dir="./joint_screenshots"  # 保存目录
+    )
     
     # 显示图表（阻塞式）
     visualizer.show()

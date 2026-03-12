@@ -58,7 +58,7 @@ class RuntimeRTC:
         self._episode_active = threading.Event()
         
         # Infrastructure components
-        self._action_queue = ActionQueue(cfg=rtc_config)
+        self._action_queue = ActionQueue(enabled=self._rtc_config.enabled)
         self._latency_tracker = LatencyTracker(maxlen=100)
         
         # Interpolator for smooth control
@@ -108,7 +108,7 @@ class RuntimeRTC:
         self._policy.reset()
         
         # Reset infrastructure
-        self._action_queue = ActionQueue(cfg=self._rtc_config)  # Create new queue
+        self._action_queue = ActionQueue(enabled=self._rtc_config.enabled)  # Create new queue
         self._latency_tracker.reset()
         
         # Reset interpolator
@@ -121,7 +121,7 @@ class RuntimeRTC:
         self._total_control_time = 0
         self._inference_count = 0
         self._inference_warmup_steps = 0
-        start_time = time.perf_counter()
+      
         
         # Notify subscribers
         for subscriber in self._subscribers:
@@ -147,27 +147,25 @@ class RuntimeRTC:
         actor_control_thread.start()
         
         # Main thread monitors episode completion
-        try:
-            while self._episode_active.is_set() and not self._shutdown_event.is_set():
-                # Check episode completion conditions
-                if self._environment.is_episode_complete():
-                    print("Environment marked episode as complete")
-                    self._episode_active.clear()
-                    break
+        start_time = time.perf_counter()
+        while self._episode_active.is_set() and not self._shutdown_event.is_set():
+            time.sleep(10)
+            # Check episode completion conditions
+            if self._environment.is_episode_complete():
+                print("Environment marked episode as complete")
+                self._episode_active.clear()
+                break
+            
+            now = time.perf_counter()
+            if (now - start_time)  > self._max_episode_time_s:
+                self._episode_steps += 1
+                print("Runtime deadline arrived!")
+                self._episode_active.clear()
+                break
                 
-                now = time.perf_counter()
-                if (now - start_time)  > self._max_episode_time_s:
-                    self._episode_steps += 1
-                    print("Runtime deadline arrived!")
-                    self._episode_active.clear()
-                    break
-                    
-                time.sleep(0.1)
-                
-        except KeyboardInterrupt:
-            print("Episode interrupted by user")
-            self._episode_active.clear()
-            self._shutdown_event.set()
+           
+        self._episode_active.clear()
+        self._shutdown_event.set()
         
         # Wait for threads to finish
         get_action_thread.join(timeout=2.0)
@@ -244,9 +242,11 @@ class RuntimeRTC:
                         continue
                     
                     actions = result["actions"]
+                  
                     
                     # Ensure actions are 2D (time_steps, action_dim)
                     if len(actions.shape) == 1:
+                        print(f"[GetActionThread] Inference result received. Actions shape: {actions.shape}")
                         actions = actions[np.newaxis, ...]
                     
                     # Get original actions for RTC (default to actions if not provided)
@@ -269,7 +269,7 @@ class RuntimeRTC:
                     )
                     
                     # Log inference details (debug level)
-                    if self._rtc_config.debug and self._inference_count % 10 == 0:
+                    if self._inference_count % 10 == 0:
                         print(
                             f"[GetActionThread] Inference {self._inference_count}: "
                             f"time={new_latency*1000:.1f}ms, "
@@ -281,7 +281,7 @@ class RuntimeRTC:
                     precise_sleep(0.01)
                 
             except Exception as e:
-                print(f"[GetActionThread] Error: {e}", exc_info=True)
+                logging.exception(f"[GetActionThread] Error: {e}")
                 if not self._shutdown_event.is_set():
                     precise_sleep(0.1)
         
@@ -337,14 +337,18 @@ class RuntimeRTC:
                 
                 dt = time.perf_counter() - start_time
                 self._total_control_time += dt
-                # print(f"[ActorControlThread] control time: {dt * 1000}ms")
+        
                 # Sleep to maintain control frequency
                 sleep_time = control_interval - dt
-                precise_sleep(max(0, sleep_time - 0.001))  # Small buffer
+                if sleep_time > 0:
+                    precise_sleep(sleep_time)
+                else:
+                    # If sleep_time is negative or zero, we don't sleep to avoid over-compensating
+                    print(f"[ActorControlThread] Warning: control loop is taking longer ({dt*1000:.1f}ms) than control interval ({control_interval*1000:.1f}ms). Skipping sleep.")
          
                 
             except Exception as e:
-                print(f"[ActorControlThread] Error: {e}", exc_info=True)
+                logging.exception(f"[ActorControlThread] Error: {e}")
                 if not self._shutdown_event.is_set():
                     precise_sleep(0.1)
         

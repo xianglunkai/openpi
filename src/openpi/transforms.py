@@ -337,6 +337,147 @@ class PadStatesAndActions(DataTransformFn):
         return data
 
 
+@dataclasses.dataclass(frozen=True)
+class OptimizeActionsQP(DataTransformFn):
+    """A data-transform that smooths action trajectories using a small QP.
+
+    This transform operates on numpy arrays (or array-like) and does not depend
+    on PyTorch. It requires `osqp` and `scipy` to be installed. It solves per-
+    channel QPs of the form::
+
+        0.5*w_data*||x-a||^2 + 0.5*w_acc*||D2 x||^2 + 0.5*w_jerk*||D3 x||^2
+
+    with optional velocity/acceleration bounds and optional fixed endpoints.
+
+    Args mirror the standalone function: dt, vel_limits, acc_limits, w_data,
+    w_acc, w_jerk, fix_ends, eps, verbose.
+    """
+
+    dt: float = 1.0
+    vel_limits: tuple[float, float] | None = None
+    acc_limits: tuple[float, float] | None = None
+    w_data: float = 1.0
+    w_acc: float = 1.0
+    w_jerk: float = 0.0
+    fix_ends: bool = False
+    eps: float = 1e-6
+    verbose: bool = False
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data:
+            return data
+
+        try:
+            import osqp
+            from scipy import sparse
+            import numpy as np
+        except Exception as e:
+            raise ImportError("OptimizeActionsQP requires osqp and scipy.sparse. Install them to use this transform.") from e
+
+        actions = np.asarray(data["actions"])
+        # Expect shape (B, T, A)
+        if actions.ndim != 3:
+            actions = actions[np.newaxis, ...]  # Add batch dimension
+           
+
+        B, T, A_dim = actions.shape
+
+        if self.verbose:
+            print(f"QP smoothing: w_data={self.w_data}, w_acc={self.w_acc}, w_jerk={self.w_jerk}, fix_ends={self.fix_ends}")
+
+        # Build difference matrices
+        I = sparse.eye(T, format="csc")
+        if T >= 3:
+            D2 = sparse.diags([1, -2, 1], [0, 1, 2], shape=(T - 2, T), format="csc")
+        else:
+            D2 = sparse.csc_matrix((0, T), dtype=float)
+        if T >= 4:
+            D3 = sparse.diags([1, -3, 3, -1], [0, 1, 2, 3], shape=(T - 3, T), format="csc")
+        else:
+            D3 = sparse.csc_matrix((0, T), dtype=float)
+
+        # Hessian
+        P = self.w_data * I
+        if self.w_acc != 0 and T >= 3:
+            P = P + self.w_acc * (D2.T @ D2)
+        if self.w_jerk != 0 and T >= 4:
+            P = P + self.w_jerk * (D3.T @ D3)
+        P = P + self.eps * I
+        P = P.astype(np.float64)
+
+        out = np.empty_like(actions, dtype=actions.dtype)
+
+        # Precompute raw difference matrices (without dt scaling) for constraints
+        A_vel_raw = None
+        if self.vel_limits is not None and T >= 2:
+            A_vel_raw = sparse.diags([-1, 1], [0, 1], shape=(T - 1, T), format="csc")
+        A_acc_raw = None
+        if self.acc_limits is not None and T >= 3:
+            A_acc_raw = sparse.diags([1, -2, 1], [0, 1, 2], shape=(T - 2, T), format="csc")
+
+        # Flatten per (batch,channel)
+        for b in range(B):
+            for a in range(A_dim):
+                an = actions[b, :, a].astype(np.float64)
+                q = (-self.w_data * an).astype(np.float64)
+
+                # Build constraint matrix A and bounds l,u
+                A_list = []
+                l_list = []
+                u_list = []
+
+                if self.fix_ends:
+                    A_eq = sparse.vstack([
+                        sparse.eye(1, T, format="csc"),
+                        sparse.eye(1, T, format="csc", k=T - 1),
+                    ])
+                    A_list.append(A_eq)
+                    l_list.extend([an[0], an[-1]])
+                    u_list.extend([an[0], an[-1]])
+
+                if A_vel_raw is not None:
+                    vmin, vmax = self.vel_limits
+                    A_vel_scaled = A_vel_raw / self.dt
+                    A_list.append(A_vel_scaled)
+                    l_list.extend([vmin * self.dt] * (T - 1))
+                    u_list.extend([vmax * self.dt] * (T - 1))
+
+                if A_acc_raw is not None:
+                    amin, amax = self.acc_limits
+                    A_acc_scaled = A_acc_raw / (self.dt ** 2)
+                    A_list.append(A_acc_scaled)
+                    l_list.extend([amin * (self.dt ** 2)] * (T - 2))
+                    u_list.extend([amax * (self.dt ** 2)] * (T - 2))
+
+                if len(A_list) > 1:
+                    A_constraint = sparse.vstack(A_list).tocsc()
+                else:
+                    A_constraint = A_list[0] if A_list else sparse.csc_matrix((0, T), dtype=np.float64)
+                l = np.array(l_list, dtype=np.float64) if l_list else np.array([], dtype=np.float64)
+                u = np.array(u_list, dtype=np.float64) if u_list else np.array([], dtype=np.float64)
+
+                try:
+                    prob = osqp.OSQP()
+                    prob.setup(P=P, q=q, A=A_constraint, l=l, u=u, verbose=False, polish=False, eps_abs=1e-4, eps_rel=1e-4, max_iter=100)
+                    res = prob.solve()
+                    status = res.info.status
+                    if status in ("solved", "solved_inaccurate", "solved_relaxed") and res.x is not None:
+                        xn = res.x
+                    else:
+                        xn = an
+                        if self.verbose:
+                            print(f"OSQP failed for b={b},a={a}, status={status}")
+                except Exception:
+                    if self.verbose:
+                        print(f"OSQP exception for b={b},a={a}, falling back to original")
+                    xn = an
+
+                out[b, :, a] = xn.astype(actions.dtype)
+
+        data["actions"] = out[0, ...]  # Remove batch dimension if it was added
+        return data
+
+
 def flatten_dict(tree: at.PyTree) -> dict:
     """Flatten a nested dictionary. Uses '/' as the separator."""
     return traverse_util.flatten_dict(tree, sep="/")
@@ -458,3 +599,171 @@ def _assert_quantile_stats(norm_stats: at.PyTree[NormStats]) -> None:
             raise ValueError(
                 f"quantile stats must be provided if use_quantile_norm is True. Key {k} is missing q01 or q99."
             )
+
+
+def optimize_actions_qp(
+    actions,
+    dt: float = 1.0,
+    vel_limits: tuple[float, float] | None = None,
+    acc_limits: tuple[float, float] | None = None,
+    w_data: float = 1.0,
+    w_acc: float = 1.0,
+    w_jerk: float = 0.0,
+    fix_ends: bool = True,
+    eps: float = 1e-6,
+    verbose: bool = False,
+):
+    """Solve a QP to smooth action trajectories using OSQP + SciPy + PyTorch.
+
+    Args:
+        actions: torch.Tensor of shape (B, T, A).
+        dt: timestep (seconds) used to scale velocity/acc constraints.
+        vel_limits: (vmin, vmax) per-second limits or None.
+        acc_limits: (amin, amax) per-second^2 limits or None.
+        w_data, w_acc, w_jerk: weights for data/acc/jerk terms.
+        fix_ends: if True, enforce first/last value equal to original.
+        eps: small term to make Hessian PD.
+        verbose: print solver diagnostics.
+
+    Returns:
+        torch.Tensor with same shape/device/dtype as input.
+
+    Note: this function imports heavy dependencies lazily and raises ImportError
+    with a clear message if they are not available.
+    """
+    try:
+        import torch
+        import osqp
+        from scipy import sparse
+        import numpy as _np
+    except Exception as e:  # pragma: no cover - dependency availability
+        raise ImportError("optimize_actions_qp requires torch, osqp and scipy.sparse") from e
+
+    device = actions.device
+    dtype = actions.dtype
+    B, T, A_dim = actions.shape
+
+    if verbose:
+        print(f"QP with constraints: w_data={w_data}, w_acc={w_acc}, w_jerk={w_jerk}, fix_ends={fix_ends}")
+        if vel_limits:
+            print(f"  velocity limits: {vel_limits[0]:.3f} to {vel_limits[1]:.3f} (per sec)")
+        if acc_limits:
+            print(f"  acceleration limits: {acc_limits[0]:.3f} to {acc_limits[1]:.3f} (per sec^2)")
+
+    # Build difference matrices
+    I = sparse.eye(T, format="csc")
+    if T >= 3:
+        D2 = sparse.diags([1, -2, 1], [0, 1, 2], shape=(T - 2, T), format="csc")
+    else:
+        D2 = sparse.csc_matrix((0, T), dtype=float)
+    if T >= 4:
+        D3 = sparse.diags([1, -3, 3, -1], [0, 1, 2, 3], shape=(T - 3, T), format="csc")
+    else:
+        D3 = sparse.csc_matrix((0, T), dtype=float)
+
+    # Hessian
+    P = w_data * I
+    if w_acc != 0 and T >= 3:
+        P = P + w_acc * (D2.T @ D2)
+    if w_jerk != 0 and T >= 4:
+        P = P + w_jerk * (D3.T @ D3)
+    P = P + eps * I  # ensure positive definite
+    P = P.astype(_np.float64)
+
+    out = torch.empty_like(actions, dtype=dtype)
+    N = B * A_dim
+    a_flat = actions.permute(0, 2, 1).contiguous().view(N, T).cpu().numpy()
+
+    # Precompute raw difference matrices (without dt scaling) for constraints
+    A_vel_raw = None
+    if vel_limits is not None and T >= 2:
+        A_vel_raw = sparse.diags([-1, 1], [0, 1], shape=(T - 1, T), format="csc")
+    A_acc_raw = None
+    if acc_limits is not None and T >= 3:
+        A_acc_raw = sparse.diags([1, -2, 1], [0, 1, 2], shape=(T - 2, T), format="csc")
+
+    for n in range(N):
+        an = a_flat[n].astype(_np.float64)
+        if verbose:
+            print(f"\n=== Trajectory {n}/{N} ===")
+            print(f"  Original range: [{an.min():.4f}, {an.max():.4f}]")
+            print(f"  First/last: {an[0]:.4f}, {an[-1]:.4f}")
+
+        q = (-w_data * an).astype(_np.float64)
+
+        # Build constraint matrix A and bounds l,u
+        A_list = []
+        l_list = []
+        u_list = []
+
+        if fix_ends:
+            A_eq = sparse.vstack([
+                sparse.eye(1, T, format="csc"),
+                sparse.eye(1, T, format="csc", k=T - 1),
+            ])
+            A_list.append(A_eq)
+            l_list.extend([an[0], an[-1]])
+            u_list.extend([an[0], an[-1]])
+
+        if A_vel_raw is not None:
+            vmin, vmax = vel_limits
+            # (x[i+1]-x[i])/dt ∈ [vmin, vmax] → (x[i+1]-x[i]) ∈ [vmin*dt, vmax*dt]
+            A_vel_scaled = A_vel_raw / dt
+            A_list.append(A_vel_scaled)
+            l_list.extend([vmin * dt] * (T - 1))
+            u_list.extend([vmax * dt] * (T - 1))
+
+        if A_acc_raw is not None:
+            amin, amax = acc_limits
+            # (x[i+2]-2x[i+1]+x[i])/dt^2 ∈ [amin, amax] → raw second diff ∈ [amin*dt^2, amax*dt^2]
+            A_acc_scaled = A_acc_raw / (dt ** 2)
+            A_list.append(A_acc_scaled)
+            l_list.extend([amin * (dt ** 2)] * (T - 2))
+            u_list.extend([amax * (dt ** 2)] * (T - 2))
+
+        if len(A_list) > 1:
+            A_constraint = sparse.vstack(A_list).tocsc()
+        else:
+            A_constraint = A_list[0] if A_list else sparse.csc_matrix((0, T), dtype=_np.float64)
+        l = _np.array(l_list, dtype=_np.float64) if l_list else _np.array([], dtype=_np.float64)
+        u = _np.array(u_list, dtype=_np.float64) if u_list else _np.array([], dtype=_np.float64)
+
+        if verbose and A_constraint.shape[0] > 0:
+            print(f"  Constraint matrix shape: {A_constraint.shape}")
+            print(f"  First few l: {l[:4]}, first few u: {u[:4]}")
+
+        # Solve
+        prob = osqp.OSQP()
+        prob.setup(P=P, q=q, A=A_constraint, l=l, u=u, verbose=False, polish=False, eps_abs=1e-4, eps_rel=1e-4, max_iter=100)
+        res = prob.solve()
+
+        status = res.info.status
+        if verbose:
+            print(f"  OSQP status: {status}")
+
+        if status in ("solved", "solved_inaccurate", "solved_relaxed") and res.x is not None:
+            xn = res.x
+            if verbose:
+                print(f"  Solution range: [{xn.min():.4f}, {xn.max():.4f}]")
+                print(f"  First few values: {xn[:8]}")
+
+                # Compute smoothness metrics
+                dx = _np.diff(xn)
+                d2x = _np.diff(dx)
+                dx_orig = _np.diff(an)
+                d2x_orig = _np.diff(dx_orig)
+
+                print(f"  Mean |dx| (smoothed): {_np.mean(_np.abs(dx)):.4f}, original: {_np.mean(_np.abs(dx_orig)):.4f}")
+                print(f"  Mean |d2x| (smoothed): {_np.mean(_np.abs(d2x)):.4f}, original: {_np.mean(_np.abs(d2x_orig)):.4f}")
+                print(f"  Max |dx| (smoothed): {_np.max(_np.abs(dx)):.4f}, original: {_np.max(_np.abs(dx_orig)):.4f}")
+        else:
+            if verbose:
+                print("  OSQP failed, falling back to original.")
+            xn = an
+
+        # Write to output
+        b = n // A_dim
+        a = n % A_dim
+        out[b, :, a] = torch.from_numpy(xn).to(dtype)
+
+    return out.to(device)
