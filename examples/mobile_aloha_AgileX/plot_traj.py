@@ -18,7 +18,7 @@ class JointActionVisualizer:
     支持定时自动保存图表快照
     """
     
-    def __init__(self, history_length=1000, update_interval=100, auto_save_interval=30, save_dir="./visualizer_screenshots"):
+    def __init__(self, history_length=1000, update_interval=100, auto_save_interval=60, save_dir="./visualizer_screenshots"):
         """
         初始化可视化器
         
@@ -185,9 +185,9 @@ class JointActionVisualizer:
             ax.set_ylabel('Position (rad/mm)')
 
             # 曲线样式优化
-            line_raw, = ax.plot([], [], 'r-', label='Raw Cmd', linewidth=2.0, alpha=0.8)
-            line_filtered, = ax.plot([], [], 'g--', label='Filtered Cmd', linewidth=2.0)
-            line_actual, = ax.plot([], [], 'b-', label='Actual Pos', linewidth=2.5)
+            line_raw, = ax.plot([], [], 'r-', label='Raw Cmd', linewidth=1.5, alpha=0.8)
+            line_filtered, = ax.plot([], [], 'g--', label='Filtered Cmd', linewidth=1.5)
+            line_actual, = ax.plot([], [], 'b-', label='Actual Pos', linewidth=1.0)
             self.lines.append((line_raw, line_filtered, line_actual))
 
             if i == 0:

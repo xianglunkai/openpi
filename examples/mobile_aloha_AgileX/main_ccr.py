@@ -4,9 +4,9 @@ import logging
 from openpi_client import action_chunk_broker
 from openpi_client import websocket_client_policy as _websocket_client_policy
 from openpi_client.runtime import runtime as _runtime
-from openpi_client.runtime import runtime_rtc as _runtime_rtc
+from openpi_client.runtime import runtime_ccr as _runtime_ccr
 from openpi_client.runtime.agents import policy_agent as _policy_agent
-from openpi_client.runtime.runtime_rtc import RTCConfig, RTCAttentionSchedule, RuntimeRTC
+
 import tyro
 
 from examples.mobile_aloha_AgileX import env as _env
@@ -22,15 +22,14 @@ class Args:
     num_episodes: int = 1
     max_episode_time_s: int = 180
     
-    # RTC parameters
-    use_rtc: bool = False  
-    execution_horizon: int = 25
-    action_queue_size_to_get_new_actions: int = 15
+    # CCR parameters 
+    action_horizon: int = 30
+    action_queue_size_to_get_new_actions: int = 12
    
     # Action interpolation parameters
     inference_fps: int = 30
     use_action_interpolation: bool = True
-    multiplier: int = 3
+    multiplier: int = 2
     
    
  
@@ -46,14 +45,9 @@ def main(args: Args) -> None:
 
     metadata = ws_client_policy.get_server_metadata()
     
-    rtc_config = RTCConfig(
-        enabled=args.use_rtc,
-        prefix_attention_schedule=RTCAttentionSchedule.EXP,
-        execution_horizon=args.execution_horizon,
-        debug=True,
-    )
+
     
-    runtime = _runtime_rtc.RuntimeRTC(
+    runtime = _runtime_ccr.RuntimeCCR(
         environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_freq_hz=control_freq_hz),
         policy=ws_client_policy,
         subscribers=[],
@@ -62,7 +56,6 @@ def main(args: Args) -> None:
         max_episode_time_s=args.max_episode_time_s,
         use_action_interpolation = args.use_action_interpolation,
         multiplier = args.multiplier,
-        rtc_config=rtc_config,
         action_queue_size_to_get_new_actions=args.action_queue_size_to_get_new_actions,
     )
 
