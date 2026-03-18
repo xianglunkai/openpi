@@ -250,7 +250,7 @@ class JointActionVisualizer:
                 if all_times:
                     # 确保使用当前时间作为参考点
                     max_display_time = max(all_times)
-                    min_display_time = max(0, max_display_time - 30)  # 显示最近30秒
+                    min_display_time = max(0, max_display_time - 10)  # 显示最近30秒
                     self.axes[i].set_xlim(min_display_time, max_display_time)
                 
                 updated_lines.extend([line_raw, line_filtered, line_actual])
@@ -327,7 +327,7 @@ if __name__ == "__main__":
     visualizer = JointActionVisualizer(
         history_length=1000,
         update_interval=100,
-        auto_save_interval=30,  # 每30秒自动保存
+        auto_save_interval=10,  # 每30秒自动保存
         save_dir="./joint_screenshots"  # 保存目录
     )
     

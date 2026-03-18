@@ -338,6 +338,8 @@ class RuntimeRTC:
                         subscriber.on_step(observation, action_to_apply)
                     
                     step_count += 1
+                else:
+                    print(f"[ActorControlThread] Warning: control lost action!")
                 
                 dt = time.perf_counter() - start_time
                 self._total_control_time += dt

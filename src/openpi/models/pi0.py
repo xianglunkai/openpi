@@ -239,7 +239,7 @@ class Pi0(_model.BaseModel):
         num_steps: int | at.Int[at.Array, ""] = 10,  
         prev_action: _model.Actions = None,  # shape (b, ah, ad)
         s: int = 25,
-        d: int = 10,
+        d: int = 8,
         beta: float = 10.0,
         sigma: float = 1.0,
     ) -> _model.Actions:
@@ -313,7 +313,7 @@ class Pi0(_model.BaseModel):
         diag_W = make_W(inference_delay, execution_horizon, action_horizon)
 
 
-        def func_a_1_prime(x_t, time):
+        def denoise_step(x_t, time):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
                 observation, x_t, jnp.broadcast_to(time, batch_size)
             )
@@ -340,17 +340,20 @@ class Pi0(_model.BaseModel):
             assert prefix_out is None
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-            return x_t - time * v_t, v_t
+            return v_t
 
         def step_rtc(carry):
             x_t, time = carry
-            (a_1_prime, v_t), f_vjp = jax.vjp(func_a_1_prime, x_t, time)
+        
+            v_t = denoise_step(x_t, time)
+            a_1_prime = x_t - time * v_t
 
             e = prev_chunk_left_over - a_1_prime
             e = jnp.matmul(diag_W, e)
             
             #Compute vector-Jacobian product
-            grad_a_1_prime_x_t = f_vjp((e, jnp.zeros_like(v_t)))
+            # grad_a_1_prime_x_t = f_vjp((e, jnp.zeros_like(v_t)))
+            grad_a_1_prime_x_t = e
             
             prior_variance = sigma ** 2
             inv_r2 = (time ** 2 + ((1 - time) ** 2) * prior_variance) / ((time ** 2) * prior_variance)
@@ -359,43 +362,12 @@ class Pi0(_model.BaseModel):
             guidance_weight = jnp.minimum(guidance_weight, beta)
             a_2_prime = x_t + dt * (v_t - guidance_weight * grad_a_1_prime_x_t[0])
            
-            # r_t = time * time / (time * time + (1 - time) * (1 - time))
-            # a_2_prime = x_t + dt * (v_t - jax.lax.min(beta, time / ((1 - time) * r_t * r_t + 1e-6)) * grad_a_1_prime_x_t[0])
-            
             return a_2_prime, time + dt
         
         
         def step_normal(carry):
             x_t, time = carry
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
-            )
-            # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
-            # other
-            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
-            # prefix tokens
-            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
-            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            assert full_attn_mask.shape == (
-                batch_size,
-                suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
-            )
-            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-
-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens],
-                mask=full_attn_mask,
-                positions=positions,
-                kv_cache=kv_cache,
-                adarms_cond=[None, adarms_cond],
-            )
-            assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            v_t = denoise_step(x_t, time)
 
             return x_t + dt * v_t, time + dt
         
