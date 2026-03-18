@@ -23,7 +23,6 @@ class Args:
     max_episode_time_s: int = 180
     
     # CCR parameters 
-    action_horizon: int = 30
     action_queue_size_to_get_new_actions: int = 12
    
     # Action interpolation parameters

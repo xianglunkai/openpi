@@ -14,6 +14,7 @@ from openpi_client.latency_tracker import LatencyTracker
 from openpi_client.action_interpolator import ActionInterpolator
 from openpi_client.time_utils import precise_sleep
 from openpi_client.bspline import optimize_actions_with_ccr
+from openpi_client.process import ProcessSignalHandler
 
 class RuntimeCCR:
     """Runtime with integrated RTC functionality using dual-thread architecture.
@@ -49,8 +50,9 @@ class RuntimeCCR:
         self._action_queue_size_to_get_new_actions = action_queue_size_to_get_new_actions
         
         # Thread synchronization
-        self._shutdown_event = threading.Event()
-        self._episode_active = threading.Event()
+        # Setup signal handler for graceful shutdown
+        self.signal_handler = ProcessSignalHandler(use_threads=True, display_pid=False)
+        self._shutdown_event = self.signal_handler.shutdown_event
         
         # Infrastructure components
         self._action_queue = ActionQueue(enabled=True)
@@ -79,9 +81,6 @@ class RuntimeCCR:
         
         # Log statistics
         self._log_statistics()
-        
-        # Signal shutdown
-        self._shutdown_event.set()
     
     def run_in_new_thread(self) -> threading.Thread:
         """Run the runtime in a new thread."""
@@ -92,7 +91,7 @@ class RuntimeCCR:
     def stop(self) -> None:
         """Stop the runtime gracefully."""
         self._shutdown_event.set()
-        self._episode_active.clear()
+       
     
     def _run_episode(self, episode_idx: int) -> None:
         """Run a single episode."""
@@ -124,7 +123,6 @@ class RuntimeCCR:
         
         # Start worker threads
         self._shutdown_event.clear()
-        self._episode_active.set()
         
         get_action_thread = threading.Thread(
             target=self._get_action_worker,
@@ -146,28 +144,32 @@ class RuntimeCCR:
         
         # Main thread monitors episode completion
         start_time = time.perf_counter()
-        while self._episode_active.is_set() and not self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set():
             time.sleep(10)
             # Check episode completion conditions
             if self._environment.is_episode_complete():
                 print("Environment marked episode as complete")
-                self._episode_active.clear()
                 break
             
             now = time.perf_counter()
             if (now - start_time)  > self._max_episode_time_s:
                 self._episode_steps += 1
-                print("Runtime deadline arrived!")
-                self._episode_active.clear()
                 break
                 
-           
-        self._episode_active.clear()
+        print(f"Episode {episode_idx + 1} duration reached or shutdown requested")
+
+        # Signal shutdown
         self._shutdown_event.set()
         
         # Wait for threads to finish
-        actor_control_thread.join(timeout=2.0)
-        get_action_thread.join(timeout=2.0)
+        if actor_control_thread and actor_control_thread.is_alive():
+            print("Waiting for action executor thread to finish...")
+            actor_control_thread.join()
+
+        if get_action_thread and get_action_thread.is_alive():
+            print("Waiting for chunk requester thread to finish...")
+            get_action_thread.join()
+        
         
         # Notify subscribers of episode end
         for subscriber in self._subscribers:
@@ -193,7 +195,7 @@ class RuntimeCCR:
         get_actions_threshold = self._action_queue_size_to_get_new_actions
   
         
-        while self._episode_active.is_set() and not self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set():
             try:
                 # Check if we need to get new actions
                 if self._action_queue.qsize() <= get_actions_threshold:
@@ -299,7 +301,7 @@ class RuntimeCCR:
     
         step_count = 0
       
-        while self._episode_active.is_set() and not self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set():
             try:
                 start_time = time.perf_counter()
                 # Get action for interpolation/execution
@@ -381,26 +383,12 @@ class RuntimeCCR:
             print(f"  Total steps executed: {self._episode_steps}")
             print(f"  Effective FPS: {effective_fps:.1f} (target: {self._fps})")
         
-        # Configuration summary
-        print(f"Configuration:")
-        print(f"  RTC enabled: {self._rtc_config.enabled}")
-        if self._rtc_config.enabled:
-            print(f"  Execution horizon: {self._rtc_config.execution_horizon}")
-            print(f"  Prefix attention: {self._rtc_config.prefix_attention_schedule.value}")
-            if self._rtc_config.max_guidance_weight:
-                print(f"  Max guidance weight: {self._rtc_config.max_guidance_weight}")
-        
         print("=" * 50)
     
     @property
     def episode_steps(self) -> int:
         """Get current episode step count."""
         return self._episode_steps
-    
-    @property
-    def is_running(self) -> bool:
-        """Check if runtime is currently running."""
-        return self._episode_active.is_set()
     
     @property
     def action_queue_size(self) -> int:

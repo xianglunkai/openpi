@@ -13,6 +13,7 @@ from openpi_client.action_queue import ActionQueue
 from openpi_client.latency_tracker import LatencyTracker
 from openpi_client.action_interpolator import ActionInterpolator
 from openpi_client.time_utils import precise_sleep
+from openpi_client.process import ProcessSignalHandler
 
 class RuntimeRTC:
     """Runtime with integrated RTC functionality using dual-thread architecture.
@@ -54,8 +55,9 @@ class RuntimeRTC:
         self._rtc_config = rtc_config
         
         # Thread synchronization
-        self._shutdown_event = threading.Event()
-        self._episode_active = threading.Event()
+        # Setup signal handler for graceful shutdown
+        self.signal_handler = ProcessSignalHandler(use_threads=True, display_pid=False)
+        self._shutdown_event = self.signal_handler.shutdown_event
         
         # Infrastructure components
         self._action_queue = ActionQueue(enabled=self._rtc_config.enabled)
@@ -97,7 +99,6 @@ class RuntimeRTC:
     def stop(self) -> None:
         """Stop the runtime gracefully."""
         self._shutdown_event.set()
-        self._episode_active.clear()
     
     def _run_episode(self, episode_idx: int) -> None:
         """Run a single episode."""
@@ -127,9 +128,8 @@ class RuntimeRTC:
         for subscriber in self._subscribers:
             subscriber.on_episode_start()
         
-        # Start worker threads
+               # Start worker threads
         self._shutdown_event.clear()
-        self._episode_active.set()
         
         get_action_thread = threading.Thread(
             target=self._get_action_worker,
@@ -144,32 +144,38 @@ class RuntimeRTC:
         )
         
         get_action_thread.start()
+        
+        time.sleep(3)
+        
         actor_control_thread.start()
         
         # Main thread monitors episode completion
         start_time = time.perf_counter()
-        while self._episode_active.is_set() and not self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set():
             time.sleep(10)
             # Check episode completion conditions
             if self._environment.is_episode_complete():
                 print("Environment marked episode as complete")
-                self._episode_active.clear()
                 break
             
             now = time.perf_counter()
             if (now - start_time)  > self._max_episode_time_s:
                 self._episode_steps += 1
-                print("Runtime deadline arrived!")
-                self._episode_active.clear()
                 break
                 
-           
-        self._episode_active.clear()
+        print(f"Episode {episode_idx + 1} duration reached or shutdown requested")
+
+        # Signal shutdown
         self._shutdown_event.set()
         
         # Wait for threads to finish
-        get_action_thread.join(timeout=2.0)
-        actor_control_thread.join(timeout=2.0)
+        if actor_control_thread and actor_control_thread.is_alive():
+            print("Waiting for action executor thread to finish...")
+            actor_control_thread.join()
+
+        if get_action_thread and get_action_thread.is_alive():
+            print("Waiting for chunk requester thread to finish...")
+            get_action_thread.join()
         
         # Notify subscribers of episode end
         for subscriber in self._subscribers:
@@ -202,7 +208,7 @@ class RuntimeRTC:
             get_actions_threshold = 0
         
         
-        while self._episode_active.is_set() and not self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set():
             try:
                 # Check if we need to get new actions
                 if self._action_queue.qsize() <= get_actions_threshold:
@@ -220,12 +226,12 @@ class RuntimeRTC:
                   
                     # Get observation from environment
                     obs = self._environment.get_observation()
-                    
-                
+                    if prev_actions is not None:
+                        obs["actions"] = prev_actions
+                 
                     # Unified infer interface - policy handles RTC internally
                     result = self._policy.infer(
                         obs=obs, 
-                        prev_action=prev_actions, 
                         use_rtc=self._rtc_config.enabled,
                     )
                     
@@ -238,7 +244,7 @@ class RuntimeRTC:
                     # For RTC, it should also return "origin_actions"
                     if "actions" not in result:
                         print("Policy inference result missing 'actions' key")
-                        precise_sleep(0.1)
+                        precise_sleep(0.01)
                         continue
                     
                     actions = result["actions"]
@@ -249,8 +255,6 @@ class RuntimeRTC:
                         print(f"[GetActionThread] Inference result received. Actions shape: {actions.shape}")
                         actions = actions[np.newaxis, ...]
                     
-                    # Get original actions for RTC (default to actions if not provided)
-                    original_actions = result.get("origin_actions", actions)
                     
                     # Update statistics
                     new_latency = time.perf_counter() - current_time
@@ -262,8 +266,8 @@ class RuntimeRTC:
                 
                     # Merge new actions into queue
                     self._action_queue.merge(
-                        original_actions=original_actions,
-                        processed_actions=actions,
+                        original_actions = actions,
+                        processed_actions = actions,
                         real_delay=new_delay,
                         action_index_before_inference=action_index_before_inference
                     )
@@ -300,7 +304,7 @@ class RuntimeRTC:
     
         step_count = 0
       
-        while self._episode_active.is_set() and not self._shutdown_event.is_set():
+        while not self._shutdown_event.is_set():
             try:
                 start_time = time.perf_counter()
                 # Get action for interpolation/execution
@@ -398,11 +402,6 @@ class RuntimeRTC:
     def episode_steps(self) -> int:
         """Get current episode step count."""
         return self._episode_steps
-    
-    @property
-    def is_running(self) -> bool:
-        """Check if runtime is currently running."""
-        return self._episode_active.is_set()
     
     @property
     def action_queue_size(self) -> int:

@@ -110,7 +110,10 @@ class Policy(BasePolicy):
             if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
-
+        
+        # Add prev_action to sample_kwargs if it exists and we're not using RTC (since for RTC it will be passed to guided_inference instead)
+        prev_action = inputs.get("actions") if ("actions" in inputs) else None
+        
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
         
@@ -120,10 +123,10 @@ class Policy(BasePolicy):
             # so we construct a simple timing dict here.
             if prev_action is not None:
                 if self._is_pytorch_model:
-                    prev_action = torch.from_numpy(prev_action.copy()).unsqueeze(0).to(self._pytorch_device)
+                    prev_action = torch.as_tensor(prev_action).to(self._pytorch_device)
                 else:
-                    prev_action = jnp.asarray(prev_action)[np.newaxis, ...]
-                
+                    prev_action = jnp.asarray(prev_action)
+        
             origin_actions = self._guided_inference(
                 sample_rng_or_pytorch_device,
                 prev_action = prev_action,

@@ -23,14 +23,14 @@ class Args:
     max_episode_time_s: int = 180
     
     # RTC parameters
-    use_rtc: bool = False  
+    use_rtc: bool = True  
     execution_horizon: int = 25
-    action_queue_size_to_get_new_actions: int = 15
+    action_queue_size_to_get_new_actions: int = 25
    
     # Action interpolation parameters
     inference_fps: int = 30
     use_action_interpolation: bool = True
-    multiplier: int = 3
+    multiplier: int = 2
     
    
  
