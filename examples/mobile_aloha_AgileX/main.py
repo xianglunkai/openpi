@@ -23,11 +23,6 @@ class Args:
     max_episode_time_s: int = 600
     action_horizon: int = 50
     
-    # RTC parameters
-    use_rtc: bool = False  
-    s: int = 25
-    d: int = 10
-    
     # Action interpolation parameters
     inference_fps: int = 30
     use_action_interpolation: bool = False
@@ -50,9 +45,6 @@ def main(args: Args) -> None:
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,
                 action_horizon=args.action_horizon,
-                is_rtc=args.use_rtc,
-                s=args.s,
-                d=args.d,
             )
         ),
         subscribers=[],

@@ -57,16 +57,13 @@ class WebsocketPolicyServer:
                 start_time = time.monotonic()
                 data = msgpack_numpy.unpackb(await websocket.recv())
             
-                obs = data.get("obs", None)  
-                prev_action = data.get("prev_action", None)     
+                obs = data.get("obs", None)     
                 use_rtc = data.get("use_rtc", False)
                 noise = data.get("noise", None)
              
-                
                 infer_time = time.monotonic()
                 action = self._policy.infer(
                     obs=obs,
-                    prev_action=prev_action,
                     use_rtc=use_rtc,
                     noise=noise,
                 )

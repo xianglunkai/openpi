@@ -234,32 +234,42 @@ class Pi0(_model.BaseModel):
     def guided_inference(
         self,
         rng: at.KeyArrayLike,
-        prev_action: _model.Actions,
         observation: _model.Observation,
         *,
-        num_steps: int | at.Int[at.Array, ""] = 10,       
+        num_steps: int | at.Int[at.Array, ""] = 10,  
+        prev_action: _model.Actions = None,  # shape (b, ah, ad)
         s: int = 25,
         d: int = 10,
         beta: float = 10.0,
-        sigma: float = 0.2,
+        sigma: float = 1.0,
     ) -> _model.Actions:
+        
         observation = _model.preprocess_observation(None, observation, train=False)
+        
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
         noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
         
-        if prev_action is not None:
-            # get prev_action from s-th step to the end, and then pad s steps with zeros
-            prev_action_slice = prev_action[:, s:, :]  # get prev_action from s-th step to the end
-            # jax.debug.print("prev_action_slice shape: {prev_action_slice_shape}", prev_action_slice_shape=prev_action_slice.shape)
-            # create s steps with zeros
-            zero_actions = jnp.zeros((batch_size, s, self.action_dim))
-            # concatenate prev_action_slice and zero_actions
-            prev_action_slice = jnp.concatenate([prev_action_slice, zero_actions], axis=1)
+        # first fill KV cache with a forward pass of the prefix
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
-        def make_W(d: int, s: int) -> jnp.ndarray:
+
+       # Extract RTC parameters from kwargs
+        inference_delay = d
+        execution_horizon = s
+        action_horizon = self.action_horizon
+        if prev_action is not None:
+            zero_actions = jnp.zeros((batch_size, action_horizon - prev_action.shape[1], self.action_dim))
+            prev_chunk_left_over = jnp.concatenate([prev_action, zero_actions], axis=1)
+            assert prev_chunk_left_over.shape[1] == action_horizon, "prev_action must have shape (b, ah, ad)"
+          
+      
+        def make_W(start: int, end: int, total: int) -> jnp.ndarray:
             """
             generate the weight vector W ∈ ℝ^H
             parameters
@@ -271,23 +281,21 @@ class Pi0(_model.BaseModel):
             ----
             W : jnp.ndarray, shape (H,)
             """
-            H = self.action_horizon
-            i = jnp.arange(H)           # 0,1,2,...,H-1
+            i = jnp.arange(total)           # 0,1,2,...,H-1
 
             # three-segment condition
-            cond_1 = i < d
-            cond_2 = (i >= d) & (i < H - s)
-            cond_3 = i >= H - s         # actually can be else
+            cond_1 = i < start              # first d tokens are all 1
+            cond_2 = (i >= start) & (i < end)   # middle s-d tokens decay exponentially
+            cond_3 = i >= end         # actually can be else
 
             # segment (1): all 1
             w1 = jnp.ones_like(i, dtype=float)
 
             # segment (2): exponential decay
-            c_i = (H - s - i) / (H - s - d + 1)
-            w2  = jnp.exp(c_i) - 1
-            w2  = c_i * w2 / (jnp.e - 1)      # (e^{c_i} - 1) / (e - 1)
+            c_i = (end - i) / (end - start + 1) # c_i goes from 1 to 0 as i goes from d to s
+            w2  = jnp.exp(c_i) - 1       # e^{c_i} - 1 goes from e-1 to 0 as c_i goes from 1 to 0
+            w2  = c_i * w2 / (jnp.e - 1) # (e^{c_i} - 1) / (e - 1)
          
-
             # segment (3): all 0
             w3 = jnp.zeros_like(i, dtype=float)
 
@@ -302,13 +310,8 @@ class Pi0(_model.BaseModel):
             return D_batch
 
         # create W
-        diag_W = make_W(d, s)
+        diag_W = make_W(inference_delay, execution_horizon, action_horizon)
 
-        # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
         def func_a_1_prime(x_t, time):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
@@ -343,8 +346,9 @@ class Pi0(_model.BaseModel):
             x_t, time = carry
             (a_1_prime, v_t), f_vjp = jax.vjp(func_a_1_prime, x_t, time)
 
-            e = prev_action_slice - a_1_prime
+            e = prev_chunk_left_over - a_1_prime
             e = jnp.matmul(diag_W, e)
+            
             #Compute vector-Jacobian product
             grad_a_1_prime_x_t = f_vjp((e, jnp.zeros_like(v_t)))
             
@@ -476,195 +480,3 @@ class Pi0(_model.BaseModel):
         return x_0
 
 
-
-    @override
-    def sample_actions_with_rtc(
-        self,
-        rng: at.KeyArrayLike,
-        observation: _model.Observation,
-        *,
-        num_steps: int | at.Int[at.Array, ""] = 10,
-        noise: at.Float[at.Array, "b ah ad"] | None = None,
-        **kwargs: Any,
-    ) -> _model.Actions | tuple[_model.Actions, dict]:
-
-        observation = _model.preprocess_observation(None, observation, train=False)
-        # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
-        # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
-        dt = -1.0 / num_steps
-        batch_size = observation.state.shape[0]
-        if noise is None:
-            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
-
-        # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-
-        inference_delay = kwargs.get("inference_delay")
-        prev_chunk_left_over = kwargs.get("prev_chunk_left_over")
-
-        rtc_is_enabled = self.rtc_processor is not None and self.rtc_processor.rtc_enabled()
-        logger.info(f"RTC check before scan: rtc_processor={self.rtc_processor is not None}, enabled={rtc_is_enabled}")
-
-        # For JAX compilation, we need to determine RTC path outside the compiled function
-        use_rtc = rtc_is_enabled and prev_chunk_left_over is not None
-
-        #  Make padding for prev_chunk_left_over to match the action_horizon and action_dim
-        # prev_chunk_left_over shape: (batch, time, action_dim)
-        # Pad the time dimension (axis 1) to match action_horizon
-        # Pad the action dimension (axis 2) to match self.action_dim
-        time_pad = self.action_horizon - prev_chunk_left_over.shape[1]
-        action_dim_pad = self.action_dim - prev_chunk_left_over.shape[2]
-        prev_chunk_left_over = jnp.pad(prev_chunk_left_over, ((0, 0), (0, time_pad), (0, action_dim_pad)))
-
-        # Debug prints before entering JAX-compiled loop
-        logger.info(f"RTC Config enabled: {self.rtc_processor is not None}")
-        if self.rtc_processor is not None:
-            logger.info(f"RTC processor details: enabled={self.rtc_processor.rtc_enabled()}, config={self.rtc_processor.rtc_config}")
-            logger.info(f"RTC execution_horizon from config: {self.rtc_processor.rtc_config.execution_horizon}")
-            logger.info(f"RTC prefix_attention_schedule: {self.rtc_processor.rtc_config.prefix_attention_schedule}")
-            logger.info(f"RTC max_guidance_weight: {self.rtc_processor.rtc_config.max_guidance_weight}")
-        logger.info(f"inference_delay: {inference_delay}")
-        logger.info(f"prev_chunk_left_over shape: {prev_chunk_left_over.shape if prev_chunk_left_over is not None else None}")
-        logger.info(f"action_horizon: {self.action_horizon}")
-        logger.info(f"action_dim: {self.action_dim}")
-
-        logger.info(f"use_rtc: {use_rtc}")  
-        logger.info(f"batch_size: {batch_size}")
-        def original_step_scan(carry):
-            x_t, time = carry
-            suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
-            )
-            # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
-            # other
-            suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-            # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
-            # prefix tokens
-            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-            # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
-            # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
-            full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-            assert full_attn_mask.shape == (
-                batch_size,
-                suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
-            )
-            # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-            positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-
-            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-                [None, suffix_tokens],
-                mask=full_attn_mask,
-                positions=positions,
-                kv_cache=kv_cache,
-                adarms_cond=[None, adarms_cond],
-            )
-            assert prefix_out is None
-            return self.action_out_proj(suffix_out[:, -self.action_horizon :])
-
-        def step_scan(carry, step_idx):
-            x_t, time = carry
-            if use_rtc:
-                # Use jax.debug.print for runtime logging (not just tracing)
-                jax.debug.print("=== Step {} - USING RTC PATH === at time={}", step_idx, time)
-
-                def pinv_corrected_velocity(x_t, y, time):
-                    jax.debug.print("  Step {}: time={}, x_t_norm={}", step_idx, time, jnp.linalg.norm(x_t))
-
-                    def denoiser(x_t):
-                        v_t = original_step_scan((x_t, time))
-                        # Remove batch dimension from outputs
-                        return (x_t - v_t * (1 - time)), v_t
-
-                    x_1, vjp_fun, v_t = jax.vjp(denoiser, x_t, has_aux=True)
-
-                    weights = self.rtc_processor.get_prefix_weights(
-                        inference_delay, self.rtc_processor.rtc_config.execution_horizon, self.action_horizon, self.rtc_processor.rtc_config.prefix_attention_schedule
-                    )
-
-                    weights = einops.repeat(weights, "c -> b c a", b=batch_size, a=self.action_dim)
-
-                    error = (y - x_1) * weights
-
-                    pinv_correction = vjp_fun(error)[0]
-                    # constants from paper
-                    # Handle numerical stability: at time=1.0, we get (1-time)=0 which causes 0*inf=NaN
-                    # The correct limit as t→1 is guidance_weight→0, so we replace NaN with 0
-                    inv_r2 = (time**2 + (1 - time) ** 2) / ((1 - time) ** 2)
-                    c = jnp.nan_to_num((1 - time) / time, posinf=self.rtc_processor.rtc_config.max_guidance_weight)
-                    guidance_weight = jnp.minimum(c * inv_r2, self.rtc_processor.rtc_config.max_guidance_weight)
-                    # Replace NaN with 0 (occurs at t=1 where guidance should be 0 anyway)
-                    guidance_weight = jnp.nan_to_num(guidance_weight, nan=0.0)
-
-                    jax.debug.print("Error {}: pinv_correction={}", error, pinv_correction)
-                    v_t_corrected = v_t - guidance_weight * pinv_correction
-
-                    jax.debug.print("  Guidance: weight={}, error_norm={}", guidance_weight, jnp.linalg.norm(error))
-
-                    # Return both velocity and tracking data
-                    return v_t_corrected, {
-                        "x_1": x_1,
-                        "v_t": v_t_corrected,
-                        "error": error,
-                        "weights": weights,
-                        "guidance_weight": guidance_weight,
-                        "pinv_correction": pinv_correction,
-                    }
-
-                v_t, step_tracking = pinv_corrected_velocity(x_t, prev_chunk_left_over, time)
-
-            else:
-                jax.debug.print("=== Step {} - USING NON-RTC PATH === at time={}", step_idx, time)
-
-                v_t = original_step_scan((x_t, time))
-
-                step_tracking = {
-                    "x_1": jnp.zeros_like(x_t),
-                    "v_t": v_t,
-                    "error": jnp.zeros_like(x_t),
-                    "weights": jnp.zeros((batch_size, self.action_horizon, self.action_dim)),
-                    "guidance_weight": jnp.zeros(()),
-                    "pinv_correction": jnp.zeros_like(x_t),
-                }
-
-            x_t = x_t - dt * v_t
-
-            # Add x_t, time, and step_idx to tracking
-            step_tracking["x_t"] = x_t
-            step_tracking["time"] = time
-            step_tracking["step_idx"] = step_idx
-
-            # Return updated carry and scan output
-            return (x_t, time + dt), step_tracking
-
-        # Create step indices array for scan
-        step_indices = jnp.arange(num_steps)
-        final_carry, tracking_history = jax.lax.scan(step_scan, (noise, 1.0), step_indices)
-
-        # Extract final x_t from carry
-        x_0 = final_carry[0]
-
-        # tracking_history now contains ALL steps (shape: (num_steps, ...))
-        # Each field in tracking_history dict has shape (num_steps, batch_size, ...)
-        logger.info(f"Collected tracking history for {num_steps} steps")
-        logger.info(f"tracking_history keys: {tracking_history.keys()}")
-        logger.info(f"Tracking history shapes:")
-        for key, value in tracking_history.items():
-            logger.info(f"  {key}: {value.shape}")
-
-        # Log summary of collected data
-        logger.info(f"Total denoise steps collected: {tracking_history['step_idx'].shape[0]}")
-        logger.info(f"Step indices range: {tracking_history['step_idx'][0]} to {tracking_history['step_idx'][-1]}")
-        logger.info(f"Time values: start={tracking_history['time'][0]:.4f}, end={tracking_history['time'][-1]:.4f}")
-
-        # Store tracking history in the tracker if available
-        if self.rtc_processor is not None and self.rtc_processor.tracker is not None:
-            self.rtc_processor.tracker.set_tracking_history(tracking_history)
-
-        # Always return both to avoid JAX tracer issues
-        # The caller can decide whether to use the tracking data
-        # tracking_history contains data from ALL denoising steps
-        return x_0, tracking_history

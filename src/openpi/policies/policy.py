@@ -86,7 +86,6 @@ class Policy(BasePolicy):
     def infer(
         self, 
         obs: dict, 
-        prev_action: np.ndarray | None = None,
         use_rtc: bool = False,
         noise: np.ndarray | None = None,
     ) -> dict:  # type: ignore[misc]
@@ -113,12 +112,12 @@ class Policy(BasePolicy):
         
         # Add prev_action to sample_kwargs if it exists and we're not using RTC (since for RTC it will be passed to guided_inference instead)
         prev_action = inputs.get("actions") if ("actions" in inputs) else None
+        inference_delay = inputs.get("inference_delay", 0)
         
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
         
         if use_rtc:
-         
             # Subsequent RTC call: use guided_inference. This API returns only actions,
             # so we construct a simple timing dict here.
             if prev_action is not None:
@@ -142,11 +141,9 @@ class Policy(BasePolicy):
                 **sample_kwargs,
             )
           
-            
         outputs = {
             "state": inputs["state"],
             "actions": origin_actions,
-            "origin_actions": origin_actions,
         }
         
         model_time = time.monotonic() - start_time
@@ -155,12 +152,8 @@ class Policy(BasePolicy):
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
 
-        origin_actions_backup = outputs.get("origin_actions")
-        
         outputs = self._output_transform(outputs)
-        if "origin_actions" not in outputs and origin_actions_backup is not None:
-            outputs["origin_actions"] = origin_actions_backup
-        
+    
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
