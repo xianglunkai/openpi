@@ -14,14 +14,14 @@ from examples.mobile_aloha_AgileX import robot_utils
 class Args:
     host: str = "0.0.0.0"
     port: int = 8000
-    action_horizon: int = 30
+    action_horizon: int = 50
 
     num_episodes: int = 1
     max_episode_steps: int = 10000
     
     multiplier: int = 1
     inference_fps: int = 30
-    use_action_interpolation:bool =  True
+    use_action_interpolation:bool =  False
 
 
 def main(args: Args) -> None:

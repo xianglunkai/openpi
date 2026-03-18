@@ -120,7 +120,8 @@ class Runtime:
                 last_step_time = time.time()
             else:
                 last_step_time = now
-                print(f"inference takes time {dt * 1000}ms > control_interval :{control_interval * 1000}ms")
+                  # If the step took longer than the control interval, skip sleeping
+                print(f"Step took {dt:.3f}s which exceeds control interval of {control_interval:.3f}s. Consider reducing agent frequency")
               
             # Check episode completion
             if self._environment.is_episode_complete() or (
