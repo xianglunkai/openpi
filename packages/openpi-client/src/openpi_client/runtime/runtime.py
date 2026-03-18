@@ -114,13 +114,14 @@ class Runtime:
             # Sleep to maintain robot control frequency
             now = time.time()
             dt = now - last_step_time
-            # print(f"inference takes time {dt * 1000}ms > control_interval :{control_interval * 1000}ms")
+            
             if dt < control_interval:
                 time.sleep(control_interval - dt)
                 last_step_time = time.time()
             else:
                 last_step_time = now
-
+                print(f"inference takes time {dt * 1000}ms > control_interval :{control_interval * 1000}ms")
+              
             # Check episode completion
             if self._environment.is_episode_complete() or (
                 self._max_episode_steps > 0 and self._agent_steps >= self._max_episode_steps
