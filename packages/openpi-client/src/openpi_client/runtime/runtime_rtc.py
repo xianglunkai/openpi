@@ -228,6 +228,7 @@ class RuntimeRTC:
                     obs = self._environment.get_observation()
                     if prev_actions is not None:
                         obs["actions"] = prev_actions
+                        # obs["inference_delay"] = inference_delay
                  
                     # Unified infer interface - policy handles RTC internally
                     result = self._policy.infer(
@@ -262,7 +263,7 @@ class RuntimeRTC:
                     self._total_inference_time += new_latency
                     self._inference_count += 1
                     
-                    self._latency_tracker.add(new_delay)
+                    self._latency_tracker.add(new_latency)
                 
                     # Merge new actions into queue
                     self._action_queue.merge(
@@ -282,7 +283,7 @@ class RuntimeRTC:
                         )
                 else:
                     # Small sleep to prevent busy waiting
-                    precise_sleep(0.01)
+                    precise_sleep(time_per_step)
                 
             except Exception as e:
                 logging.exception(f"[GetActionThread] Error: {e}")

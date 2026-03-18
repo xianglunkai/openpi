@@ -112,7 +112,7 @@ class Policy(BasePolicy):
         
         # Add prev_action to sample_kwargs if it exists and we're not using RTC (since for RTC it will be passed to guided_inference instead)
         prev_action = inputs.get("actions") if ("actions" in inputs) else None
-        inference_delay = inputs.get("inference_delay", 0)
+        # sample_kwargs["d"] = inputs.get("inference_delay", 0)
         
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()

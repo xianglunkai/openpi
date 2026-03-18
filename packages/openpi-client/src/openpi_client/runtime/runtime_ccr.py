@@ -259,7 +259,7 @@ class RuntimeCCR:
                     self._total_inference_time += new_latency
                     self._inference_count += 1
                     
-                    self._latency_tracker.add(new_delay)
+                    self._latency_tracker.add(new_latency)
                 
                     # Merge new actions into queue
                     self._action_queue.merge(
@@ -279,7 +279,7 @@ class RuntimeCCR:
                         )
                 else:
                     # Small sleep to prevent busy waiting
-                    precise_sleep(0.01)
+                    precise_sleep(time_per_step)
                 
             except Exception as e:
                 logging.exception(f"[GetActionThread] Error: {e}")

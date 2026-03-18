@@ -20,7 +20,7 @@ class Args:
     
     # Episode parameters
     num_episodes: int = 1
-    max_episode_time_s: int = 180
+    max_episode_time_s: int = 240
     
     # RTC parameters
     use_rtc: bool = True  
