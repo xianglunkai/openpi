@@ -23,12 +23,12 @@ class Args:
     max_episode_time_s: int = 180
     
     # CCR parameters 
-    action_queue_size_to_get_new_actions: int = 15
+    action_queue_size_to_get_new_actions: int = 25
    
     # Action interpolation parameters
     inference_fps: int = 30
     use_action_interpolation: bool = True
-    multiplier: int = 2
+    multiplier: int = 3
     
    
  

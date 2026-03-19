@@ -247,7 +247,7 @@ class RuntimeCCR:
                             executed_actions=prev_actions.copy(),
                             k=3,
                             n_ctrl=10, # total number of control points (including fixed and free)
-                            n_prefix= inference_delay, # number of fixed control points at the start (execution horizon + 1)
+                            n_prefix= inference_delay+1, # number of fixed control points at the start (execution horizon + 1)
                             n_free=4, # number of free control points (not fixed by execution horizon)
                             last_pt_weight=0.05,
                         )  

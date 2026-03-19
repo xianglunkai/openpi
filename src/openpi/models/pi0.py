@@ -241,7 +241,7 @@ class Pi0(_model.BaseModel):
         s: int = 25,
         d: int = 10,
         beta: float = 10.0,
-        sigma: float = 1.0,
+        sigma: float = 0.2,
     ) -> _model.Actions:
         
         observation = _model.preprocess_observation(None, observation, train=False)
