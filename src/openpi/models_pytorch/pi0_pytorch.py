@@ -493,7 +493,7 @@ class PI0Pytorch(nn.Module):
         return self.action_out_proj(suffix_out)
 
     @torch.no_grad()
-    def guided_inference(self, device, observation, noise=None, num_steps=10, prev_action=None, s=25, d=10, beta=10.0) -> Tensor:
+    def guided_inference(self, device, observation, noise=None, num_steps=10, prev_action=None, s=25, d=10, beta=10.0) -> Tensor: # # for 50hz d = 14
         bsize = observation.state.shape[0]
 
         if noise is None:

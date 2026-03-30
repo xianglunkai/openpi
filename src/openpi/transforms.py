@@ -362,7 +362,7 @@ class OptimizeActionsQP(DataTransformFn):
     acc_limits: tuple[float, float] | None = None
     w_data: float = 1.0
     w_acc: float = 1.0
-    w_jerk: float = 0.0
+    w_jerk: float = 1.0
     fix_ends: bool = False
     eps: float = 1e-6
     verbose: bool = False
@@ -441,14 +441,14 @@ class OptimizeActionsQP(DataTransformFn):
 
                 if A_vel_raw is not None:
                     vmin, vmax = self.vel_limits
-                    A_vel_scaled = A_vel_raw / self.dt
+                    A_vel_scaled = A_vel_raw
                     A_list.append(A_vel_scaled)
                     l_list.extend([vmin * self.dt] * (T - 1))
                     u_list.extend([vmax * self.dt] * (T - 1))
 
                 if A_acc_raw is not None:
                     amin, amax = self.acc_limits
-                    A_acc_scaled = A_acc_raw / (self.dt ** 2)
+                    A_acc_scaled = A_acc_raw
                     A_list.append(A_acc_scaled)
                     l_list.extend([amin * (self.dt ** 2)] * (T - 2))
                     u_list.extend([amax * (self.dt ** 2)] * (T - 2))

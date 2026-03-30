@@ -28,7 +28,7 @@ class Args:
     # Action interpolation parameters
     inference_fps: int = 30
     use_action_interpolation: bool = True
-    multiplier: int = 3
+    multiplier: int = 2
     
    
  
