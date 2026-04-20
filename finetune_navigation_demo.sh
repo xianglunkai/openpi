@@ -11,6 +11,11 @@ export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
 
+export JAX_COORDINATOR_ADDRESS="localhost:1234"
+export JAX_PROCESS_INDEX=0
+export JAX_NUM_PROCESSES=1
+export NCCL_NVLS_ENABLE=0 # very important!
+
 export TORCH_NCCL_ENABLE_MONITORING=0  # disable watchdog
 
 export CUDA_VISIBLE_DEVICES=4,5,6,7
