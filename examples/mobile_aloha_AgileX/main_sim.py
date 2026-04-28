@@ -53,6 +53,10 @@ class Args:
     # avoids GL context / threading issues and is useful for headless tests.
     env_no_physical_images: bool = False
     
+    
+    # Use single arm
+    use_single_arm: bool = False
+    
    
 def main(args: Args) -> None:
     
@@ -78,6 +82,7 @@ def main(args: Args) -> None:
         zmq_monitor=args.env_zmq,
         zmq_endpoint=args.env_zmq_endpoint,
         use_physical_images=not args.env_no_physical_images,
+        use_single_arm=args.use_single_arm,
     )
 
     runtime = _runtime_rtc.RuntimeRTC(

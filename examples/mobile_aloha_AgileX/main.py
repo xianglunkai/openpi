@@ -27,6 +27,9 @@ class Args:
     inference_fps: int = 30
     use_action_interpolation: bool = False
     multiplier: int = 1
+    
+    # Use single arm
+    use_single_arm: bool = True
  
 def main(args: Args) -> None:
     
@@ -40,7 +43,7 @@ def main(args: Args) -> None:
 
     metadata = ws_client_policy.get_server_metadata()
     runtime = _runtime.Runtime(
-        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_freq_hz=control_freq_hz),
+        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_freq_hz=control_freq_hz, use_single_arm=args.use_single_arm),
         agent=_policy_agent.PolicyAgent(
             policy=action_chunk_broker.ActionChunkBroker(
                 policy=ws_client_policy,

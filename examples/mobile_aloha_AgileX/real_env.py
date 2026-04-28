@@ -13,6 +13,9 @@ from std_msgs.msg import Float64MultiArray
 # This is the reset position that is used by the standard Aloha runtime.
 DEFAULT_RESET_POSITION = [0, -0.96, 1.16, 0, -0.3, 0]
 
+# global variable to set single arm name, default to "left"
+SINGLE_ARM_NAME = "right"  # or "left"
+
 from examples.mobile_aloha_AgileX.td_filter import MultiJointTDFilter, MultiJointLowPassFilter
 
 class RealEnv:
@@ -38,12 +41,16 @@ class RealEnv:
                                 "cam_left_wrist": (480x640x3),  # h, w, c, dtype='uint8'
                                 "cam_right_wrist": (480x640x3)} # h, w, c, dtype='uint8'
     """
-    def __init__(self, init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True, control_freq_hz):
+    def __init__(self, init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True, control_freq_hz: float = 50.0, use_single_arm: bool = False):
         self._reset_position = reset_position[:6] if reset_position else DEFAULT_RESET_POSITION
         self._reset_position_left0= [-0.00133514404296875, 0.00209808349609375, 0.01583099365234375, -0.032616615295410156, -0.00286102294921875, 0.00095367431640625, 0.09]
         self._reset_position_right0 = [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
 
-       
+        self.use_single_arm = use_single_arm
+        if use_single_arm:
+            self.single_arm_ = SINGLE_ARM_NAME
+        else:
+            self.single_arm_ = None
         self.args =robot_utils.get_arguments()
         self.use_robot_base =  self.args.use_robot_base
         self.ros_operator = robot_utils.RosOperator(self.args)
@@ -57,20 +64,20 @@ class RealEnv:
             
                 self.left_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=3,
+                    cutoff_freq=1.5,
                     dt = 1.0/ control_freq_hz
                 )
                 
                 self.right_action_joint_filter = MultiJointLowPassFilter(
                     num_joints=7,
-                    cutoff_freq=3,
+                    cutoff_freq=1.5,
                     dt = 1.0/ control_freq_hz
                 )
                 
                 if self.use_robot_base:
                     self.velocity_filter = MultiJointLowPassFilter(
                         num_joints=2,
-                        cutoff_freq=1,
+                        cutoff_freq=1.5,
                         dt = 1.0/ control_freq_hz
                     )
             else:
@@ -170,6 +177,20 @@ class RealEnv:
         # obs["effort"] = effort
         obs["images"] = images
         # print("3")
+        
+        
+        if self.use_single_arm:
+            if self.single_arm_ == "left":
+                obs["qpos"] = obs["qpos"][:7]
+                # obs["qvel"] = obs["qvel"][:7]
+                # obs["effort"] = obs["effort"][:7]
+                obs["images"] = {"cam_high": obs["images"]["cam_high"], "cam_left_wrist": obs["images"]["cam_left_wrist"]}
+            else:
+                obs["qpos"] = obs["qpos"][7:14]
+                # obs["qvel"] = obs["qvel"][7:14]
+                # obs["effort"] = obs["effort"][7:14]
+                obs["images"] = {"cam_high": obs["images"]["cam_high"], "cam_right_wrist": obs["images"]["cam_right_wrist"]}
+        
     
         return obs
     
@@ -210,15 +231,40 @@ class RealEnv:
         使用 print 方式输出调试信息，不依赖 logging。
         """
         # 解析动作
+        if self.use_single_arm:
+            left_arm_target = self._reset_position_left0.copy()   # 左臂保持在复位位置
+            right_arm_target = self._reset_position_right0.copy()  # 右臂保持在复位位置
+            
+            if self.single_arm_ == "left":
+                left_arm_target = action.tolist()
+                left_arm_target[-1] = left_arm_target[-1] - 0.005
+            else:
+                right_arm_target = action.tolist()
+                right_arm_target[-1] = right_arm_target[-1] - 0.005
+           
+            if self.args.use_actions_filter:
+                left_arm_target = self.left_action_joint_filter.update_all_joints(left_arm_target.copy())
+                right_arm_target = self.right_action_joint_filter.update_all_joints(right_arm_target.copy())
+                filtered_action = np.concatenate([
+                    left_arm_target,
+                    right_arm_target
+                ])
+           
+            self.ros_operator.puppet_arm_publish(
+                left_arm_target,
+                right_arm_target
+            )
+        
+            return None
+        
+
         if self.use_robot_base:
-            left_action = action[:7]      # [arm6, grip_norm]
-            right_action = action[7:14]   # [arm6, grip_norm]
             vel_action = action[14:16]    # [vx, wz]
         else:
-            state_len = len(action) // 2
-            left_action = action[:state_len]   # [arm6, grip_norm]
-            right_action = action[state_len:]  # [arm6, grip_norm]
             vel_action = None
+            
+        left_action = action[:7]      # [arm6, grip_norm]
+        right_action = action[7:14]   # [arm6, grip_norm]
 
         # print("[STEP] raw  action :", [round(x, 3) for x in action])
 
@@ -227,6 +273,8 @@ class RealEnv:
         right_arm_target = np.array(right_action, dtype=float)
         if self.use_robot_base and vel_action is not None:
             vel_action_target = np.array(vel_action, dtype=float)
+            if vel_action_target[0] < -0.005:
+                    vel_action_target[0] -= 0.13
         
         # ! useful for pour water
         left_arm_target[6] =  left_arm_target[6].copy() -0.005
@@ -284,8 +332,8 @@ class RealEnv:
         #         observation= self.get_observation()
         # )
 
-def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True, control_freq_hz) -> RealEnv:
-    return RealEnv(init_node, reset_position=reset_position, setup_robots=setup_robots, control_freq_hz=control_freq_hz)
+def make_real_env(init_node, *, reset_position: Optional[List[float]] = None, setup_robots: bool = True, control_freq_hz: float = 100.0, use_single_arm: bool = False) -> RealEnv:
+    return RealEnv(init_node, reset_position=reset_position, setup_robots=setup_robots, control_freq_hz=control_freq_hz, use_single_arm=use_single_arm)
 
 
 def tanh_smooth_map(x, threshold=0.05, width=0.01, low_output=0.0, high_output=0.1):

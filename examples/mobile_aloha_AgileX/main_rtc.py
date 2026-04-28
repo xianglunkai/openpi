@@ -32,6 +32,9 @@ class Args:
     use_action_interpolation: bool = True
     multiplier: int = 2
     
+    # Use single arm
+    use_single_arm: bool = True
+    
    
  
 def main(args: Args) -> None:
@@ -54,7 +57,7 @@ def main(args: Args) -> None:
     )
     
     runtime = _runtime_rtc.RuntimeRTC(
-        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_freq_hz=control_freq_hz),
+        environment=_env.AlohaRealEnvironment(reset_position=metadata.get("reset_pose"), control_freq_hz=control_freq_hz, use_single_arm=args.use_single_arm),
         policy=ws_client_policy,
         subscribers=[],
         fps=args.inference_fps,
