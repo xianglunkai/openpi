@@ -1,4 +1,7 @@
 {
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/third_party/rlt-openpi/src"
+    ],
     "[python]": {
         "editor.defaultFormatter": "charliermarsh.ruff",
         "editor.formatOnSave": true,

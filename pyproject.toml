@@ -132,6 +132,9 @@ known-third-party = ["wandb"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.pyright]
+extraPaths = ["third_party/rlt-openpi/src"]
+
 [tool.pytest.ini_options]
 markers = ["manual: should be run manually."]
 testpaths = ["src", "scripts", "packages"]
