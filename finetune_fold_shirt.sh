@@ -13,16 +13,16 @@ export TOKENIZERS_PARALLELISM=false
 
 export TORCH_NCCL_ENABLE_MONITORING=0  # disable watchdog
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
 # 设置 Hugging Face 镜像端点
 export HF_ENDPOINT=https://hf-mirror.com
 
-export repo_id=fold_towel
-export raw_dir=datasets/fold_towel
-export config_name=pi05_cobot_fold_towel
+export repo_id=fold_shirt
+export raw_dir=datasets/fold_shirt
+export config_name=pi05_cobot_fold_shirt
 export HF_LEROBOT_HOME=/workspace/huggingface/lerobot
 export HF_HOME=/workspace/huggingface
 
@@ -61,7 +61,7 @@ if [ "$DO_STEP4" -eq 1 ]; then
     echo "执行步骤4: 开始微调训练..."
     uv run scripts/train.py "$config_name" \
         --exp-name="$config_name" \
-        --overwrite \
+        # --resume \
         
     echo "步骤4完成"
 else

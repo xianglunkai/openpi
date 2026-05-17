@@ -68,7 +68,10 @@ class Policy(BasePolicy):
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
+        # print("=========================Transformed inputs 111========================:", inputs)
         inputs = self._input_transform(inputs)
+        # print("=========================Transformed inputs 222========================:", inputs)
+        
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
@@ -86,8 +89,8 @@ class Policy(BasePolicy):
             if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
                 noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
             sample_kwargs["noise"] = noise
-
         observation = _model.Observation.from_dict(inputs)
+
         start_time = time.monotonic()
         outputs = {
             "state": inputs["state"],

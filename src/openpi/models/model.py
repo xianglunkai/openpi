@@ -241,9 +241,12 @@ class BaseModelConfig(abc.ABC):
         return nnx.merge(graphdef, state)
 
     def load_pytorch(self, train_config, weight_path: str):
+        # print("=====================train_config====================================")
+        # print(train_config)
+        # print(weight_path)
         logger.info(f"train_config: {train_config}")
         model = pi0_pytorch.PI0Pytorch(config=train_config.model)
-        safetensors.torch.load_model(model, weight_path)
+        safetensors.torch.load_model(model, weight_path, strict=False)
         return model
 
     @abc.abstractmethod

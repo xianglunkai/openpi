@@ -55,6 +55,8 @@ def create_empty_dataset(
         "left_wrist_angle",
         "left_wrist_rotate",
         "left_gripper",
+        "base_vx",
+        "base_omega"
     ]
     cameras = [
         "cam_high",
@@ -83,7 +85,7 @@ def create_empty_dataset(
     if has_velocity:
         features["observation.velocity"] = {
             "dtype": "float32",
-            "shape": (len(motors),),
+            "shape": (len(motors) - 2,),
             "names": [
                 motors,
             ],
@@ -92,7 +94,7 @@ def create_empty_dataset(
     if has_effort:
         features["observation.effort"] = {
             "dtype": "float32",
-            "shape": (len(motors),),
+            "shape": (len(motors) - 2,),
             "names": [
                 motors,
             ],
@@ -166,8 +168,13 @@ def load_raw_episode_data(
     ep_path: Path,
 ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     with h5py.File(ep_path, "r") as ep:
+        base_action = torch.from_numpy(np.array(ep["/base_action"][:]))
+        
         state = torch.from_numpy(np.array(ep["/observations/qpos"][:]))
+        state = torch.cat([state, base_action], dim=1)
+   
         action = torch.from_numpy(np.array(ep["/action"][:]))
+        action = torch.cat([action, base_action], dim=1)
 
         velocity = None
         if "/observations/qvel" in ep:

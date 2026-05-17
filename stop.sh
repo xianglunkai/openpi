@@ -6,8 +6,8 @@ python -c "import torch; torch.cuda.empty_cache()" &> /dev/null
 
 
 # 精确匹配 conda 环境路径
-kill $(ps aux | grep '/workspace/miniconda/envs/lerobot/bin/python' | awk '{print $2}') 
-kill $(ps aux | grep '/workspace/miniconda/envs/lerobot/bin/torchrun' | awk '{print $2}')
+kill $(ps aux | grep '/workspace/openpi/.venv/bin/python3' | awk '{print $2}') 
+kill $(ps aux | grep '/workspace/openpi/.venv/bin/torchrun' | awk '{print $2}')
 
 
 # # 直接通过进程名匹配并杀死所有 python3.10 进程（root 用户无需 sudo）

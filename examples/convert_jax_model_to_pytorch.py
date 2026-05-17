@@ -401,7 +401,7 @@ def slice_initial_orbax_checkpoint(checkpoint_dir: str, restore_precision: str |
     params = openpi.models.model.restore_params(
         f"{checkpoint_dir}/params/", restore_type=np.ndarray, dtype=restore_precision
     )
-
+    # TODO (jeremy): handle other model types
     return {"paligemma_params": traversals.flatten_mapping(params["PaliGemma"], sep="/"), "projection_params": params}
 
 
