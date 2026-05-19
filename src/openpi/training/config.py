@@ -685,6 +685,13 @@ class TrainConfig:
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
 
+    # RLT (Representation Learning Token) configuration fields.
+    rlt_num_tokens: int | None = None
+    rlt_num_layers: int | None = None
+    rlt_embed_dim: int | None = None
+    rlt_input_dim: int | None = None
+    rlt_alpha: float | None = None
+
     # If the value is greater than 1, FSDP will be enabled and shard across number of specified devices; overall
     # device memory will be reduced but training could potentially be slower.
     # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
@@ -1483,7 +1490,7 @@ _CONFIGS = [
                 assets_dir="/workspace/openpi/assets/pi05_take_me_tissues",
                 asset_id="take_me_tissues",
             ),
-            default_prompt="Please take a pack of tissues from the drawer next to you, then pull out one sheet and give it to me.",
+            default_prompt="Please take a pack of tissues from the drawer next to you, then  give it to me.",
             repack_transforms=_transforms.Group(
                 inputs=[
                     _transforms.RepackTransform(
@@ -1508,7 +1515,7 @@ _CONFIGS = [
         # will increase memory and CPU usage.
         num_workers= 8,
         # Number of train steps (batches) to run.
-        num_train_steps=50_000,
+        num_train_steps=30_000,
 
         # How often (in steps) to log training metrics.
         log_interval= 100,
@@ -1567,6 +1574,67 @@ _CONFIGS = [
         save_interval= 5000,
         # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
         keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = True,
+    ),
+
+    #
+    # RLT (Representation Learning Token) configs.
+    # Here, we illustrate how to use the RLTTrainer by training a pi05 model with RLT on the screw sorting dataset. You can modify the model and data configs to train on other datasets as well. For more details on RLT and how to use it, see the documentation and the tutorial notebook in examples/rlt.
+   TrainConfig(
+        name="pi05_rlt_cobot_screw_sorting_new",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotSingleArmDataConfig(
+            repo_id="screw_sorting_new",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_rlt_cobot_screw_sorting_new",
+                asset_id="screw_sorting_new",
+            ),
+            default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
+      
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 8,
+        # Number of train steps (batches) to run.
+        num_train_steps=30_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 100,
+        # How often (in steps) to save checkpoints.
+        save_interval= 5000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        rlt_num_tokens=1,
+        rlt_num_layers=2,
+        rlt_embed_dim=2048,
+        rlt_input_dim=2048,
+        rlt_alpha=1.0,
 
         # If true, will overwrite the checkpoint directory if it already exists.
         overwrite = False,

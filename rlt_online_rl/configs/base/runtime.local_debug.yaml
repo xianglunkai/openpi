@@ -1,0 +1,36 @@
+runtime:
+  role: all
+  local_debug_mode: true
+
+  actor_service:
+    bind_host: 127.0.0.1
+    port: 9101
+    xla_mem_fraction: 0.10
+    xla_preallocate: false
+
+  learner_service:
+    replay_url: http://127.0.0.1:9102
+    checkpoint_dir: ./runs/debug/checkpoints
+    actor_snapshot_path: ./runs/debug/actor_snapshot/actor_snapshot.pkl
+    xla_mem_fraction: 0.75
+    xla_preallocate: false
+
+  replay:
+    bind_host: 127.0.0.1
+    port: 9102
+    journal_path: ./runs/debug/replay/replay_journal.pkl
+
+  env_driver:
+    machine_a_ws_url: ws://127.0.0.1:8000
+    actor_service_url: http://127.0.0.1:9101
+    replay_service_url: http://127.0.0.1:9102
+    episode_start_control_mode: policy
+    chunk_exec_horizon: 10
+    control_frequency_hz: 50.0
+    step_trace_stride: 2
+    replay_feature_batch_size: 16
+    safe_fallback_to_ref: true
+    machine_a_connect_timeout_sec: 5.0
+    machine_a_recv_timeout_sec: 5.0
+    machine_a_retry_interval_sec: 0.5
+    replay_request_timeout_sec: 30.0
