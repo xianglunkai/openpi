@@ -14,6 +14,7 @@ import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 from openpi.policies import rtc_processor
+import dataclasses
 
 logger = logging.getLogger("openpi")
 

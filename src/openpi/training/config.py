@@ -1589,13 +1589,13 @@ _CONFIGS = [
     # RLT (Representation Learning Token) configs.
     # Here, we illustrate how to use the RLTTrainer by training a pi05 model with RLT on the screw sorting dataset. You can modify the model and data configs to train on other datasets as well. For more details on RLT and how to use it, see the documentation and the tutorial notebook in examples/rlt.
    TrainConfig(
-        name="pi05_rlt_cobot_screw_sorting_new",
+        name="pi05_cobot_screw_sorting_rlt",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotSingleArmDataConfig(
-            repo_id="screw_sorting_new",
+            repo_id="screw_sorting_rlt",
             assets=AssetsConfig(
-                assets_dir="/workspace/openpi/assets/pi05_rlt_cobot_screw_sorting_new",
-                asset_id="screw_sorting_new",
+                assets_dir="/workspace/openpi/assets/pi05_rlt_cobot_screw_sorting_rlt",
+                asset_id="screw_sorting_rlt",
             ),
             default_prompt="Please sort and return the silver screws in the grey box to their proper places",
             repack_transforms=_transforms.Group(

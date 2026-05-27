@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
+import select
 import sys
 import termios
 import time
 import tty
-import select
 
-import rclpy
-from rclpy.node import Node
+import rospy
 from std_srvs.srv import Trigger
-from train_deploy_alignment.manual_signal_bridge import ENTER_CRITICAL_PHASE_SERVICE
-from train_deploy_alignment.manual_signal_bridge import RECORD_FAILURE_SERVICE
-from train_deploy_alignment.manual_signal_bridge import RECORD_SUCCESS_SERVICE
-from train_deploy_alignment.manual_signal_bridge import REQUEST_NEXT_EPISODE_SERVICE
+
+from train_deploy_alignment.manual_signal_bridge_ros1 import ENTER_CRITICAL_PHASE_SERVICE
+from train_deploy_alignment.manual_signal_bridge_ros1 import RECORD_FAILURE_SERVICE
+from train_deploy_alignment.manual_signal_bridge_ros1 import RECORD_SUCCESS_SERVICE
+from train_deploy_alignment.manual_signal_bridge_ros1 import REQUEST_NEXT_EPISODE_SERVICE
 
 RL_TELEOP_TRIGGER_SERVICE = "/teleop_trigger_rl"
 HW_TELEOP_TRIGGER_SERVICE = "/teleop_trigger"
@@ -35,7 +35,6 @@ def getkey():
     if ch != "\x1b":
         return ch
     seq = ch
-    # Arrow keys arrive as ESC + '[' + code (e.g. ESC [ C for right arrow).
     for _ in range(2):
         ready, _, _ = select.select([sys.stdin], [], [], 0.01)
         if not ready:
@@ -46,35 +45,24 @@ def getkey():
     return ch
 
 
-class KeyboardTeleopRecordRewardToggle(Node):
+class KeyboardTeleopRecordRewardToggleRos1:
     def __init__(self):
-        super().__init__("keyboard_teleop_record_reward_toggle")
-
-        self.rl_teleop_cli = self.create_client(Trigger, RL_TELEOP_TRIGGER_SERVICE)
-        self.hw_teleop_cli = self.create_client(Trigger, HW_TELEOP_TRIGGER_SERVICE)
-        self.teleop_status_cli = self.create_client(Trigger, TELEOP_STATUS_SERVICE)
-        self.next_episode_cli = self.create_client(Trigger, REQUEST_NEXT_EPISODE_SERVICE)
-        self.success_cli = self.create_client(Trigger, RECORD_SUCCESS_SERVICE)
-        self.failure_cli = self.create_client(Trigger, RECORD_FAILURE_SERVICE)
-        self.critical_phase_cli = self.create_client(Trigger, ENTER_CRITICAL_PHASE_SERVICE)
         self.control_mode = "unknown"
-
-        self.get_logger().info(f"Waiting for local teleop service {RL_TELEOP_TRIGGER_SERVICE}...")
-        self.rl_teleop_cli.wait_for_service()
-        self.get_logger().info(f"Waiting for hardware teleop service {HW_TELEOP_TRIGGER_SERVICE}...")
-        self.hw_teleop_cli.wait_for_service()
-        self.get_logger().info(f"Waiting for {TELEOP_STATUS_SERVICE} service...")
-        self.teleop_status_cli.wait_for_service()
-
-        self.get_logger().info("Waiting for next-episode / manual signal services...")
-        self.next_episode_cli.wait_for_service()
-
-        self.success_cli.wait_for_service()
-        self.failure_cli.wait_for_service()
-        self.critical_phase_cli.wait_for_service()
-
+        self.rl_teleop_cli = self._make_client(RL_TELEOP_TRIGGER_SERVICE)
+        self.hw_teleop_cli = self._make_client(HW_TELEOP_TRIGGER_SERVICE)
+        self.teleop_status_cli = self._make_client(TELEOP_STATUS_SERVICE)
+        self.next_episode_cli = self._make_client(REQUEST_NEXT_EPISODE_SERVICE)
+        self.success_cli = self._make_client(RECORD_SUCCESS_SERVICE)
+        self.failure_cli = self._make_client(RECORD_FAILURE_SERVICE)
+        self.critical_phase_cli = self._make_client(ENTER_CRITICAL_PHASE_SERVICE)
         self.refresh_teleop_mode(retries=5, timeout_sec=1.5)
-        self.get_logger().info(self._ready_message())
+        rospy.loginfo(self._ready_message())
+
+    @staticmethod
+    def _make_client(name: str):
+        rospy.loginfo("Waiting for service %s ...", name)
+        rospy.wait_for_service(name)
+        return rospy.ServiceProxy(name, Trigger)
 
     def _ready_message(self) -> str:
         return (
@@ -95,29 +83,31 @@ class KeyboardTeleopRecordRewardToggle(Node):
         return None
 
     def log_teleop_mode(self):
-        self.get_logger().info(f"Current control mode: {self.control_mode}")
+        rospy.loginfo("Current control mode: %s", self.control_mode)
 
     def refresh_teleop_mode(self, *, retries: int = 3, timeout_sec: float = 1.0):
         total_attempts = max(int(retries), 1)
         for attempt in range(1, total_attempts + 1):
-            req = Trigger.Request()
-            future = self.teleop_status_cli.call_async(req)
-            rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)
-            if future.result() is None:
+            try:
+                rospy.wait_for_service(TELEOP_STATUS_SERVICE, timeout=timeout_sec)
+                resp = self.teleop_status_cli()
+            except (rospy.ROSException, rospy.ServiceException) as exc:
                 if attempt < total_attempts:
-                    self.get_logger().warn(
-                        f"Failed to query teleop status (attempt {attempt}/{total_attempts}); retrying."
+                    rospy.logwarn(
+                        "Failed to query teleop status (attempt %s/%s): %s; retrying.",
+                        attempt,
+                        total_attempts,
+                        exc,
                     )
                     continue
                 self.control_mode = "unknown"
-                self.get_logger().error("Failed to query teleop status.")
+                rospy.logerr("Failed to query teleop status: %s", exc)
                 return False
 
-            resp = future.result()
             parsed = self._parse_mode_message(resp.message)
             if parsed is None:
                 self.control_mode = "unknown"
-                self.get_logger().error(f"Unexpected teleop status response: {resp.message!r}")
+                rospy.logerr("Unexpected teleop status response: %r", resp.message)
                 return False
 
             self.control_mode = parsed
@@ -125,51 +115,45 @@ class KeyboardTeleopRecordRewardToggle(Node):
             return True
         return False
 
-    def _call_trigger(self, client, failure_message: str, *, timeout_sec: float = 1.0):
-        req = Trigger.Request()
-        future = client.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)
-
-        if future.result() is None:
-            self.get_logger().error(failure_message)
+    def _call_trigger(self, client, failure_message: str):
+        try:
+            return client()
+        except rospy.ServiceException as exc:
+            rospy.logerr("%s (%s)", failure_message, exc)
             return None
-        return future.result()
 
     def _toggle_local_teleop(self) -> bool:
         resp = self._call_trigger(self.rl_teleop_cli, "Failed to toggle local teleop state.")
         if resp is None:
             return False
         if not resp.success:
-            self.get_logger().warn(resp.message if resp.message else "Local teleop toggle failed.")
+            rospy.logwarn(resp.message if resp.message else "Local teleop toggle failed.")
             self.refresh_teleop_mode()
             return False
 
         parsed = self._parse_mode_message(resp.message)
         if parsed is None:
-            self.get_logger().warn(f"Could not parse teleop mode from response: {resp.message!r}")
+            rospy.logwarn("Could not parse teleop mode from response: %r", resp.message)
             self.refresh_teleop_mode()
         else:
             self.control_mode = parsed
             self.log_teleop_mode()
-        self.get_logger().info(resp.message if resp.message else "Local teleop toggle succeeded.")
+        rospy.loginfo(resp.message if resp.message else "Local teleop toggle succeeded.")
         return True
 
     def _toggle_hardware_teleop(self, *, reason: str) -> bool:
-        resp = self._call_trigger(
-            self.hw_teleop_cli,
-            f"Failed to toggle hardware teleop for {reason}.",
-        )
+        resp = self._call_trigger(self.hw_teleop_cli, f"Failed to toggle hardware teleop for {reason}.")
         if resp is None:
             return False
         message = resp.message if resp.message else f"Hardware teleop toggled for {reason}."
-        self.get_logger().info(message)
+        rospy.loginfo(message)
         return True
 
     def _record_terminal(self, client, label: str) -> None:
         if not self.refresh_teleop_mode():
             return
         if self.control_mode == "reset":
-            self.get_logger().warn(f"Cannot record {label}: episode inactive/reset in progress.")
+            rospy.logwarn("Cannot record %s: episode inactive/reset in progress.", label)
             return
         if self.control_mode == "teleop":
             if not self._toggle_hardware_teleop(reason=f"{label} end"):
@@ -180,16 +164,16 @@ class KeyboardTeleopRecordRewardToggle(Node):
         if resp is None:
             return
         if resp.success:
-            self.get_logger().info(resp.message if resp.message else f"Recorded {label}.")
+            rospy.loginfo(resp.message if resp.message else f"Recorded {label}.")
         else:
-            self.get_logger().warn(resp.message if resp.message else f"Recording {label} failed.")
+            rospy.logwarn(resp.message if resp.message else f"Recording {label} failed.")
         self.refresh_teleop_mode()
 
     def toggle_teleop(self):
         if not self.refresh_teleop_mode():
             return
         if self.control_mode == "reset":
-            self.get_logger().warn("Episode inactive/reset in progress; teleop toggle ignored.")
+            rospy.logwarn("Episode inactive/reset in progress; teleop toggle ignored.")
             return
 
         if self.control_mode == "teleop":
@@ -209,11 +193,10 @@ class KeyboardTeleopRecordRewardToggle(Node):
         resp = self._call_trigger(self.next_episode_cli, "Failed to request next episode start.")
         if resp is None:
             return
-
         if resp.success:
-            self.get_logger().info(resp.message if resp.message else "Requested next episode start.")
+            rospy.loginfo(resp.message if resp.message else "Requested next episode start.")
             return
-        self.get_logger().warn(resp.message if resp.message else "Next episode request failed.")
+        rospy.logwarn(resp.message if resp.message else "Next episode request failed.")
 
     def record_success(self):
         self._record_terminal(self.success_cli, "success")
@@ -226,17 +209,16 @@ class KeyboardTeleopRecordRewardToggle(Node):
         if resp is None:
             return
         if resp.success:
-            self.get_logger().info(resp.message if resp.message else "Entered the critical phase.")
+            rospy.loginfo(resp.message if resp.message else "Entered the critical phase.")
             return
-        self.get_logger().warn(resp.message if resp.message else "Entering the critical phase failed.")
+        rospy.logwarn(resp.message if resp.message else "Entering the critical phase failed.")
 
 
 def main():
-    rclpy.init()
-    node = KeyboardTeleopRecordRewardToggle()
-
+    rospy.init_node("keyboard_teleop_record_reward_toggle_ros1", anonymous=True)
+    node = KeyboardTeleopRecordRewardToggleRos1()
     try:
-        while rclpy.ok():
+        while not rospy.is_shutdown():
             ch = getkey()
             if ch in {" ", "t"}:
                 node.toggle_teleop()
@@ -251,9 +233,9 @@ def main():
             elif ch == "q":
                 break
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        pass
 
 
 if __name__ == "__main__":
     main()
+
