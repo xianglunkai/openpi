@@ -26,7 +26,7 @@ class EefKinematicsConfig:
     )
     use_rad: bool = True
     ik_position_weight: float = 1.0
-    ik_orientation_weight: float = 0.01
+    ik_orientation_weight: float = 0.5
 
 
 class EefKinematics:

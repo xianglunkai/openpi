@@ -12,10 +12,12 @@ from train_deploy_alignment.manual_signal_bridge_ros1 import ENTER_CRITICAL_PHAS
 from train_deploy_alignment.manual_signal_bridge_ros1 import RECORD_FAILURE_SERVICE
 from train_deploy_alignment.manual_signal_bridge_ros1 import RECORD_SUCCESS_SERVICE
 from train_deploy_alignment.manual_signal_bridge_ros1 import REQUEST_NEXT_EPISODE_SERVICE
+from train_deploy_alignment.manual_signal_bridge_ros1 import TOGGLE_CRITICAL_PHASE_SERVICE
 
 RL_TELEOP_TRIGGER_SERVICE = "/teleop_trigger_rl"
 HW_TELEOP_TRIGGER_SERVICE = "/teleop_trigger"
 TELEOP_STATUS_SERVICE = "/teleop_status"
+SHUTDOWN_ROLLOUT_SERVICE = "/shutdown_rollout"
 HW_TELEOP_SETTLE_SEC = 1.0
 
 
@@ -51,24 +53,27 @@ class KeyboardTeleopRecordRewardToggleRos1:
         self.rl_teleop_cli = self._make_client(RL_TELEOP_TRIGGER_SERVICE)
         self.hw_teleop_cli = self._make_client(HW_TELEOP_TRIGGER_SERVICE)
         self.teleop_status_cli = self._make_client(TELEOP_STATUS_SERVICE)
+        self.shutdown_rollout_cli = self._make_client(SHUTDOWN_ROLLOUT_SERVICE)
         self.next_episode_cli = self._make_client(REQUEST_NEXT_EPISODE_SERVICE)
         self.success_cli = self._make_client(RECORD_SUCCESS_SERVICE)
         self.failure_cli = self._make_client(RECORD_FAILURE_SERVICE)
         self.critical_phase_cli = self._make_client(ENTER_CRITICAL_PHASE_SERVICE)
+        self.toggle_critical_phase_cli = self._make_client(TOGGLE_CRITICAL_PHASE_SERVICE)
         self.refresh_teleop_mode(retries=5, timeout_sec=1.5)
         rospy.loginfo(self._ready_message())
 
     @staticmethod
     def _make_client(name: str):
         rospy.loginfo("Waiting for service %s ...", name)
-        rospy.wait_for_service(name)
+        # rospy.wait_for_service(name)
         return rospy.ServiceProxy(name, Trigger)
 
     def _ready_message(self) -> str:
         return (
             "Ready. Press Space (or 't') to toggle teleop. Press Right Arrow (or 'o') to start the next episode. "
             "Press 's' to end the episode with success. Press 'f' to end the episode with failure. "
-            "Press 'c' to enter the critical phase. Press 'q' to quit."
+            "Press 'c' to enter the critical phase. Press 'x' to toggle critical phase. "
+            "Press 'q' to request rollout shutdown and quit."
         )
 
     @staticmethod
@@ -212,6 +217,24 @@ class KeyboardTeleopRecordRewardToggleRos1:
             rospy.loginfo(resp.message if resp.message else "Entered the critical phase.")
             return
         rospy.logwarn(resp.message if resp.message else "Entering the critical phase failed.")
+    
+    def toggle_critical_phase(self):
+        resp = self._call_trigger(self.toggle_critical_phase_cli, "Failed to toggle the critical phase.")
+        if resp is None:
+            return
+        if resp.success:
+            rospy.loginfo(resp.message if resp.message else "Toggled the critical phase.")
+            return
+        rospy.logwarn(resp.message if resp.message else "Toggling the critical phase failed.")
+
+    def request_rollout_shutdown(self):
+        resp = self._call_trigger(self.shutdown_rollout_cli, "Failed to request rollout shutdown.")
+        if resp is None:
+            return
+        if resp.success:
+            rospy.loginfo(resp.message if resp.message else "Requested rollout shutdown.")
+            return
+        rospy.logwarn(resp.message if resp.message else "Rollout shutdown request failed.")
 
 
 def main():
@@ -230,9 +253,13 @@ def main():
                 node.record_failure()
             elif ch == "c":
                 node.enter_critical_phase()
+            elif ch == "x":
+                node.toggle_critical_phase()
             elif ch == "q":
+                node.request_rollout_shutdown()
                 break
     finally:
+        rospy.loginfo("Shutting down keyboard teleop toggle node.")
         pass
 
 

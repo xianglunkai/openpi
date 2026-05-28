@@ -114,17 +114,16 @@ def _is_intervening(action: dict, deadzone: float) -> bool:
     axes = [abs(float(action.get(k, 0.0))) for k in ("delta_x", "delta_y", "delta_z", "delta_roll", "delta_pitch", "delta_yaw")]
     return max(axes) >= float(deadzone)
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SpaceMouse teleop for ROS1 AgileX single-arm.")
     parser.add_argument("--arm", choices=("left", "right"), default="right")
     parser.add_argument("--joint_topic", type=str, default="/puppet/joint_right")
     parser.add_argument("--cmd_topic", type=str, default="/master/joint_right")
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--deadzone", type=float, default=0.0005)
-    parser.add_argument("--eef_cutoff_freq", type=float, default=3.0)
+    parser.add_argument("--space_mouse_deadzone", type=float, default=0.05)
+    parser.add_argument("--intervention_deadzone", type=float, default=0.001)
     parser.add_argument("--auto_toggle_teleop", action="store_true")
-    parser.add_argument("--release_to_policy_delay_s", type=float, default=0.4)
+    parser.add_argument("--release_to_policy_delay_s", type=float, default=0.5)
     parser.add_argument("--teleop_trigger_service", type=str, default=TELEOP_TRIGGER_SERVICE)
     parser.add_argument("--teleop_status_service", type=str, default=TELEOP_STATUS_SERVICE)
     parser.add_argument("--joint_state_timeout_s", type=float, default=10.0)
@@ -151,9 +150,7 @@ def main() -> None:
     )
     teleop = SpacemouseTeleop(
         SpacemouseTeleopConfig(
-            fps=float(args.fps),
-            deadzone=float(args.deadzone),
-            eef_cutoff_freq=float(args.eef_cutoff_freq),
+            deadzone=float(args.space_mouse_deadzone),
             use_gripper=True,
         )
     )
@@ -174,18 +171,20 @@ def main() -> None:
     try:
         while not rospy.is_shutdown():
             action = teleop.get_action()
-            active = _is_intervening(action, float(args.deadzone))
+            active = _is_intervening(action, float(args.intervention_deadzone))
             if active:
                 last_active_s = time.time()
 
+            publish_allowed = True
             if mode_client is not None:
                 if active:
                     mode_client.ensure_mode("teleop")
                 elif time.time() - last_active_s >= float(args.release_to_policy_delay_s):
                     mode_client.ensure_mode("policy")
+                publish_allowed = mode_client.get_mode() == "teleop"
 
             converted = converter(action)
-            if converted is not None and "actions" in converted:
+            if publish_allowed and converted is not None and "actions" in converted:
                 target = np.asarray(converted["actions"], dtype=np.float64).reshape(-1)
                 if target.shape[0] >= 7:
                     msg = JointState()

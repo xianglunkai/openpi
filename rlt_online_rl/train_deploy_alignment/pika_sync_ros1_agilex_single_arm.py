@@ -61,6 +61,7 @@ ActionFilterFn = Callable[[np.ndarray], np.ndarray]
 logger = logging.getLogger("pika_sync_ros1_agilex_single_arm")
 
 TELEOP_STATUS_SERVICE = "/teleop_status"
+SHUTDOWN_ROLLOUT_SERVICE = "/shutdown_rollout"
 REQUEST_NEXT_EPISODE_SERVICE = "/request_next_episode"
 RECORD_SUCCESS_SERVICE = "/record_success"
 RECORD_FAILURE_SERVICE = "/record_failure"
@@ -78,6 +79,7 @@ SIGNAL_CRITICAL_STARTED = "critical_started"
 SIGNAL_SELECTED_CRITICAL_POLICY = "selected_critical_policy"
 SIGNAL_EPISODE_CRITICAL_POLICY = "episode_critical_policy"
 SIGNAL_TASK_MODE = "task_mode"
+SIGNAL_STOP_REQUESTED = "stop_requested"
 
 
 @dataclasses.dataclass(slots=True)
@@ -136,6 +138,7 @@ class RolloutRuntimeContext:
             self.signal_values[SIGNAL_MANUAL_SUCCESS_PENDING] = False
             self.signal_values[SIGNAL_MANUAL_FAILURE_PENDING] = False
             self.signal_values[SIGNAL_MANUAL_DONE_PENDING] = False
+            self.signal_values[SIGNAL_STOP_REQUESTED] = bool(self.signal_values.get(SIGNAL_STOP_REQUESTED, False))
             self._condition.notify_all()
 
     def set_selected_critical_policy_mode(self, mode: str) -> None:
@@ -150,9 +153,22 @@ class RolloutRuntimeContext:
     def request_next_episode(self) -> None:
         self.set_signal(SIGNAL_NEXT_EPISODE_REQUESTED, True)
 
+    def request_stop(self) -> None:
+        with self._condition:
+            self.signal_values[SIGNAL_STOP_REQUESTED] = True
+            self._condition.notify_all()
+
+    def stop_requested(self) -> bool:
+        with self._lock:
+            return bool(self.signal_values.get(SIGNAL_STOP_REQUESTED, False))
+
     def wait_for_next_episode_request(self) -> None:
         with self._condition:
-            while not rospy.is_shutdown() and not bool(self.signal_values.get(SIGNAL_NEXT_EPISODE_REQUESTED, False)):
+            while (
+                not rospy.is_shutdown()
+                and not bool(self.signal_values.get(SIGNAL_NEXT_EPISODE_REQUESTED, False))
+                and not bool(self.signal_values.get(SIGNAL_STOP_REQUESTED, False))
+            ):
                 self._condition.wait(timeout=0.1)
             self.signal_values[SIGNAL_NEXT_EPISODE_REQUESTED] = False
 
@@ -520,6 +536,7 @@ class Ros1ManualSignalServices:
     def __init__(self, runtime_context: RolloutRuntimeContext):
         self._runtime_context = runtime_context
         self._services = [
+            rospy.Service(SHUTDOWN_ROLLOUT_SERVICE, Trigger, self._on_shutdown_rollout),
             rospy.Service(REQUEST_NEXT_EPISODE_SERVICE, Trigger, self._on_request_next_episode),
             rospy.Service(RECORD_SUCCESS_SERVICE, Trigger, self._on_record_success),
             rospy.Service(RECORD_FAILURE_SERVICE, Trigger, self._on_record_failure),
@@ -530,7 +547,8 @@ class Ros1ManualSignalServices:
             rospy.Service(SET_CRITICAL_POLICY_BASE_SERVICE, Trigger, self._on_select_base),
         ]
         logger.info(
-            "Manual services next=%s success=%s failure=%s done=%s critical=%s toggle_critical=%s select_actor=%s select_base=%s",
+            "Manual services shutdown=%s next=%s success=%s failure=%s done=%s critical=%s toggle_critical=%s select_actor=%s select_base=%s",
+            SHUTDOWN_ROLLOUT_SERVICE,
             REQUEST_NEXT_EPISODE_SERVICE,
             RECORD_SUCCESS_SERVICE,
             RECORD_FAILURE_SERVICE,
@@ -540,6 +558,10 @@ class Ros1ManualSignalServices:
             SET_CRITICAL_POLICY_ACTOR_SERVICE,
             SET_CRITICAL_POLICY_BASE_SERVICE,
         )
+
+    def _on_shutdown_rollout(self, _request: Any) -> TriggerResponse:
+        self._runtime_context.request_stop()
+        return TriggerResponse(success=True, message="Rollout shutdown requested.")
 
     def _on_request_next_episode(self, _request: Any) -> TriggerResponse:
         self._runtime_context.request_next_episode()
@@ -729,10 +751,9 @@ class AgilexSingleArmROS1Bridge:
         return {
             "state": state.astype(np.float32, copy=True),
             "images": {
-                "global_camera": self._to_rgb_u8_hwc(img_front, resize_hw),
-                "pikaGripperFisheyeCamera": self._to_rgb_u8_hwc(wrist_img, resize_hw),
-                # Keep key compatibility with Machine A payload schema.
-                "pikaGripperDepthCamera": self._to_rgb_u8_hwc(wrist_img, resize_hw),
+                # Cobot single-arm policy expected keys (e.g., screw_sorting).
+                "cam_high": self._to_rgb_u8_hwc(img_front, resize_hw),
+                "cam_right_wrist": self._to_rgb_u8_hwc(wrist_img, resize_hw),
             },
             "prompt": task,
         }
@@ -822,6 +843,8 @@ class AgilexChunkEnvAdapter:
             self._action_delta_limits = limits
 
     def reset(self) -> dict[str, Any]:
+        if self._runtime_context.stop_requested():
+            raise KeyboardInterrupt
         self._episode_chunk_step = 0
         self._last_sent_action = None
         latest_human_action, latest_human_seq = self._human_action_recorder.snapshot_latest()
@@ -834,6 +857,8 @@ class AgilexChunkEnvAdapter:
         self._phase_controller.begin_episode()
         logger.info("Waiting for next episode request task_mode=%s", self._task_mode)
         self._runtime_context.wait_for_next_episode_request()
+        if self._runtime_context.stop_requested():
+            raise KeyboardInterrupt
         locked_mode = self._runtime_context.lock_episode_critical_policy_mode()
         logger.info("Episode critical policy mode=%s", locked_mode)
         self._apply_episode_start_control_mode()
@@ -849,6 +874,8 @@ class AgilexChunkEnvAdapter:
         control_hz: float,
         policy_planner: Callable[[dict[str, Any], int], PolicyPlan] | None = None,
     ) -> tuple[dict[str, Any], list[float], bool, dict[str, Any]]:
+        if self._runtime_context.stop_requested():
+            raise KeyboardInterrupt
         self._phase_controller.observe_progress()
         phase = self._phase_controller.episode_phase
         critical_started = self._runtime_context.in_critical_phase()
@@ -1108,13 +1135,14 @@ def parse_args() -> argparse.Namespace:
         "--left_reset",
         type=float,
         nargs=7,
-        default=[-0.001335, 0.002098, 0.015831, -0.032617, -0.002861, 0.000954, 0.09],
+        default=[-0.00133514404296875, 0.00209808349609375, 0.01583099365234375, -0.032616615295410156, -0.00286102294921875, 0.00095367431640625, 0.09],
     )
     parser.add_argument(
         "--right_reset",
         type=float,
         nargs=7,
-        default=[-0.001335, 0.004387, 0.034524, -0.053597, -0.004768, -0.002098, 0.09],
+        default=[-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09],
+        
     )
     return parser.parse_args()
 

@@ -365,6 +365,7 @@ def main(args: Args) -> None:
     if norm_stats:
         output_transforms.append(_transforms.Unnormalize(norm_stats, use_quantiles=data_config.use_quantile_norm))
     output_transforms.extend(data_config.data_transforms.outputs)
+    output_transforms.append(_transforms.OptimizeActionsBSpline(k=3, n_ctrl=10, verbose=False))
 
     policy = RLTPolicy(
         model,

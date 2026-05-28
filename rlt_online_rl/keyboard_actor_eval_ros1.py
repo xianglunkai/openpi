@@ -15,7 +15,7 @@ class KeyboardActorEvalRos1(KeyboardTeleopRecordRewardToggleRos1):
         return (
             "Eval ready. Press 'a' for actor refine, 'b' for Machine A only, Right Arrow (or 'o') to start the next episode, "
             "'c' to toggle critical on/off in full_task, 's' to end/reset the episode, "
-            "Space (or 't') to toggle teleop, 'q' to quit."
+            "Space (or 't') to toggle teleop, 'q' to request rollout shutdown and quit."
         )
 
     def __init__(self):
@@ -67,6 +67,7 @@ def main():
             elif ch == "b":
                 node.select_base()
             elif ch == "q":
+                node.request_rollout_shutdown()
                 break
     finally:
         pass

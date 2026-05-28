@@ -71,17 +71,17 @@ runtime:
     seed: 0
 
   env_driver:
-    machine_a_ws_url: ws://MACHINE_A_IP:8000
+    machine_a_ws_url: ws://0.0.0.0:8000
     actor_service_url: http://127.0.0.1:9101
     replay_service_url: http://127.0.0.1:9102
-    task_mode: critical_phase
+    task_mode: full_task
     episode_start_control_mode: policy
-    full_task_reset_action: [0.00647517, -0.01509710, 0.02923426, 0.00956440, 0.09037315, 0.01089085, 0.09599978]
-    critical_phase_reset_action: [0.18784978739210226, 1.2123580583125149, -0.9000662952532484, 0.2818183143194532, -0.18111281647940586, -0.31895892080188315, 0.00470703858137131]
+    full_task_reset_action: [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
+    critical_phase_reset_action: [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
     actor_deterministic: false
     chunk_exec_horizon: 10
-    control_frequency_hz: 20.0
-    step_trace_stride: 0
+    control_frequency_hz: 30.0
+    step_trace_stride: 2
     replay_feature_batch_size: 16
     enable_human_override: false
     safe_fallback_to_ref: true
