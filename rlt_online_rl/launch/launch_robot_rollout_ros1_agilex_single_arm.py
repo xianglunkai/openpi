@@ -15,7 +15,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 PIKA_SYNC_ROS1_AGILEX = REPO_ROOT / "train_deploy_alignment" / "pika_sync_ros1_agilex_single_arm.py"
-DEFAULT_CONFIG = REPO_ROOT / "configs" / "tasks" / "agilex_ethernet" / "online_rl.yaml"
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "tasks" / "screw_sorting" / "online_rl.yaml"
 
 from rlt_online_rl.config import load_system_config_yaml
 

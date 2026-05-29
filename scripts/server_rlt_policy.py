@@ -143,10 +143,28 @@ class RLTPolicy(_base_policy.BasePolicy):
         self._infer_fn = nnx_utils.module_jit(model.infer)
 
     @override
-    def infer(self, obs: dict) -> dict:
+    def infer(
+        self,
+        obs: dict,
+        use_rtc: bool = False,
+        noise: np.ndarray | None = None,
+    ) -> dict:
+        del use_rtc, noise  # RLT feature server does not use RTC or custom noise.
         if "batch" in obs:
             return self._infer_batch(obs["batch"])
         return self._infer_single(obs)
+
+    @staticmethod
+    def _as_action_chunk(actions: np.ndarray) -> np.ndarray:
+        """Normalize model output to (T, action_dim)."""
+        arr = np.asarray(actions, dtype=np.float32)
+        if arr.ndim == 3:
+            if arr.shape[0] != 1:
+                raise ValueError(f"Expected batch size 1, got {arr.shape[0]}")
+            arr = arr[0]
+        if arr.ndim != 2:
+            raise ValueError(f"Expected action chunk shape (T, D) or (1, T, D), got {arr.shape}")
+        return arr
 
     def _infer_single(self, obs: dict) -> dict:
         """Single observation inference (original behavior)."""
@@ -157,11 +175,12 @@ class RLTPolicy(_base_policy.BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        # actions shape : [1, 50, 32]
         actions, rl_token = self._infer_fn(sample_rng, observation)
         infer_time = time.monotonic() - start_time
 
         return self._build_single_result(
-            actions=np.asarray(actions[0]),
+            actions=self._as_action_chunk(actions),
             rl_token=np.asarray(rl_token[0]),
             state=np.asarray(inputs["state"])[0],
             infer_time=infer_time,
@@ -223,7 +242,7 @@ class RLTPolicy(_base_policy.BasePolicy):
         results = []
         for i in range(real_batch_size):
             result = self._build_single_result(
-                actions=actions_np[i],
+                actions=self._as_action_chunk(actions_np[i]),
                 rl_token=rl_token_np[i],
                 state=states_np[i],
                 infer_time=infer_time / real_batch_size,
@@ -266,8 +285,11 @@ class RLTPolicy(_base_policy.BasePolicy):
         n = min(PROPRIO_DIM, raw_state.shape[0])
         proprio[:n] = raw_state[:n].astype(np.float32)
 
-        # ref_chunk
-        vla_actions = outputs["actions"]
+        # ref_chunk: VLA action chunk for RLT rollout and robot clients.
+        vla_actions = np.asarray(outputs["actions"], dtype=np.float32)
+        # actions shape : (50, 7)
+        if vla_actions.ndim == 1:
+            vla_actions = vla_actions[np.newaxis, :]
         ref_chunk = vla_actions[:CHUNK_LEN, :ACTION_DIM].astype(np.float32)
 
         return {
@@ -275,7 +297,7 @@ class RLTPolicy(_base_policy.BasePolicy):
             "proprio": proprio,
             "ref_chunk": ref_chunk,
             "policy_timing": {"infer_ms": infer_time * 1000},
-            "_raw_actions": outputs["actions"],
+            "actions": ref_chunk,
             "_raw_rl_token": rl_token,
         }
 
@@ -383,32 +405,6 @@ def main(args: Args) -> None:
         },
     )
 
-    # Test single inference
-    logging.info("Testing single inference...")
-    fake_obs = config.model.fake_obs(batch_size=1)
-    fake_dict = {
-        "images": {k: np.asarray(v[0]) for k, v in fake_obs.images.items()},
-        "state": np.zeros(PROPRIO_DIM, dtype=np.float32),
-        "prompt": "test prompt",
-    }
-    try:
-        result = policy.infer(fake_dict)
-        logging.info(f"Single inference OK: z_rl={result['z_rl'].shape}, ref_chunk={result['ref_chunk'].shape}")
-    except Exception as e:
-        logging.warning(f"Single inference test failed: {e}")
-
-    # Test and warmup batch inference with various batch sizes
-    # This triggers JIT compilation for common batch sizes so clients don't time out
-    for warmup_bs in RLTPolicy.COMPILED_BATCH_SIZES:
-        logging.info(f"Warmup batch inference (batch_size={warmup_bs})...")
-        try:
-            batch_obs = {"batch": [fake_dict] * warmup_bs}
-            batch_result = policy.infer(batch_obs)
-            total_ms = batch_result["total_infer_ms"]
-            per_ms = batch_result["per_sample_infer_ms"]
-            logging.info(f"  Batch {warmup_bs} OK: total={total_ms:.1f}ms, per_sample={per_ms:.1f}ms")
-        except Exception as e:
-            logging.warning(f"  Batch {warmup_bs} failed: {e}")
 
     # Serve
     hostname = socket.gethostname()

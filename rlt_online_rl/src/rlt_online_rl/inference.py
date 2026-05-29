@@ -1401,7 +1401,7 @@ class EnvDriver:
         return records
 
     def run_forever(self, *, num_episodes: int | None = None) -> None:
-        logger.debug("EnvDriver entering rollout loop num_episodes=%s", num_episodes)
+        logger.info("EnvDriver entering rollout loop num_episodes=%d", num_episodes)
         episode_id = self._next_episode_id()
         session_episode_count = 0
         logger.info("EnvDriver resuming episode numbering from episode_id=%s", episode_id)

@@ -57,9 +57,20 @@ class WebsocketPolicyServer:
                 start_time = time.monotonic()
                 data = msgpack_numpy.unpackb(await websocket.recv())
             
-                obs = data.get("obs", None)     
-                use_rtc = data.get("use_rtc", False)
-                noise = data.get("noise", None)
+                if "batch" in data:
+                    # RLT batch feature requests send {"batch": [...]} directly.
+                    obs = data
+                    use_rtc = False
+                    noise = None
+                elif "obs" in data:
+                    obs = data["obs"]
+                    use_rtc = data.get("use_rtc", False)
+                    noise = data.get("noise", None)
+                else:
+                    # Legacy clients send a raw observation dict.
+                    obs = data
+                    use_rtc = False
+                    noise = None
              
                 infer_time = time.monotonic()
                 action = self._policy.infer(

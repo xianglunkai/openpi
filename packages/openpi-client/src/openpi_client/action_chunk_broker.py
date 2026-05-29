@@ -1,7 +1,6 @@
 from typing import Dict
 
 import numpy as np
-import tree
 from typing_extensions import override
 
 from openpi_client import base_policy as _base_policy
@@ -29,13 +28,11 @@ class ActionChunkBroker(_base_policy.BasePolicy):
             self._last_results = self._policy.infer(obs)
             self._cur_step = 0
 
-        def slicer(x):
-            if isinstance(x, np.ndarray):
-                return x[self._cur_step, ...]
-            else:
-                return x
+        results = dict(self._last_results)
+        actions = results.get("actions")
+        if isinstance(actions, np.ndarray) and actions.ndim >= 2:
+            results["actions"] = actions[self._cur_step, ...]
 
-        results = tree.map_structure(slicer, self._last_results)
         self._cur_step += 1
 
         if self._cur_step >= self._action_horizon:

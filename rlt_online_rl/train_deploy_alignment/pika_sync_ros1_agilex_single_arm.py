@@ -561,7 +561,7 @@ class Ros1ManualSignalServices:
 
     def _on_shutdown_rollout(self, _request: Any) -> TriggerResponse:
         self._runtime_context.request_stop()
-        return TriggerResponse(success=True, message="Rollout shutdown requested.")
+        return TriggerResponse(success=True, message="Rollout shutdown requested; robot will reset before exit.")
 
     def _on_request_next_episode(self, _request: Any) -> TriggerResponse:
         self._runtime_context.request_next_episode()
@@ -689,15 +689,6 @@ class AgilexSingleArmROS1Bridge:
     def __init__(self, args: argparse.Namespace):
         self._args = args
         ros_args = robot_utils.get_arguments()
-        ros_args.use_robot_base = False
-        ros_args.use_depth_image = False
-        ros_args.img_front_topic = args.global_image_topic
-        ros_args.img_left_topic = args.left_image_topic
-        ros_args.img_right_topic = args.right_image_topic
-        ros_args.puppet_arm_left_topic = args.left_joint_topic
-        ros_args.puppet_arm_right_topic = args.right_joint_topic
-        ros_args.puppet_arm_left_cmd_topic = args.left_cmd_topic
-        ros_args.puppet_arm_right_cmd_topic = args.right_cmd_topic
         self._ros_args = ros_args
         self._ros_operator = robot_utils.RosOperator(ros_args)
         self._single_arm = args.single_arm
@@ -721,15 +712,13 @@ class AgilexSingleArmROS1Bridge:
         return image_tools.convert_to_uint8(img)
 
     def wait_for_observation_ready(self, timeout_s: float | None = None) -> None:
-        start = time.time()
-        while not rospy.is_shutdown():
-            try:
-                _ = robot_utils.get_ros_observation(self._ros_args, self._ros_operator)
-                return
-            except Exception:
-                if timeout_s is not None and (time.time() - start) > timeout_s:
-                    raise RuntimeError("Timeout waiting ROS1 observation.")
-                time.sleep(0.05)
+     
+        try:
+            _ = robot_utils.get_ros_observation(self._ros_args, self._ros_operator)
+        except Exception:
+    
+            raise RuntimeError("Timeout waiting ROS1 observation.")
+    
 
     def get_observation(self, resize_hw: tuple[int, int], task: str) -> dict[str, Any]:
         img_front, img_left, img_right, puppet_left, puppet_right, _base = robot_utils.get_ros_observation(
@@ -775,6 +764,7 @@ class AgilexSingleArmROS1Bridge:
     def move_to_reset(self, target_action: np.ndarray | None) -> None:
         left_target = self._left_reset.copy()
         right_target = self._right_reset.copy()
+        print(f"left_target: {left_target}")
         if target_action is not None:
             target = np.asarray(target_action, dtype=np.float32).reshape(-1)
             if target.shape[0] >= 7:
@@ -842,6 +832,11 @@ class AgilexChunkEnvAdapter:
                 raise ValueError(f"action_delta_limits must have {system.rl.action_dim} entries, got {limits.shape[0]}")
             self._action_delta_limits = limits
 
+    def move_to_home_on_shutdown(self) -> None:
+        """Move the robot to the configured reset pose during rollout shutdown."""
+        self._intervention_state.enter_episode_reset()
+        self._reset_robot_to_mode_start()
+
     def reset(self) -> dict[str, Any]:
         if self._runtime_context.stop_requested():
             raise KeyboardInterrupt
@@ -852,7 +847,9 @@ class AgilexChunkEnvAdapter:
         self._last_human_action = None if latest_human_action is None else latest_human_action.astype(np.float32, copy=False)
         self._intervention_state.enter_episode_reset()
         self._runtime_context.reset_episode_state()
+    
         self._robot.wait_for_observation_ready(timeout_s=self._obs_ready_timeout_s)
+  
         self._reset_robot_to_mode_start()
         self._phase_controller.begin_episode()
         logger.info("Waiting for next episode request task_mode=%s", self._task_mode)
@@ -896,6 +893,8 @@ class AgilexChunkEnvAdapter:
         plan_cursor = 0
 
         for local_step in range(horizon):
+            if self._runtime_context.stop_requested():
+                raise KeyboardInterrupt
             if self._manual_terminal_requested():
                 break
             step_observation = step_observations[-1]
@@ -1098,13 +1097,13 @@ class AgilexChunkEnvAdapter:
 
 
 def parse_args() -> argparse.Namespace:
-    default_config = REPO_ROOT / "configs" / "tasks" / "agilex_ethernet" / "online_rl.yaml"
+    default_config = REPO_ROOT / "configs" / "tasks" / "screw_sorting" / "online_rl.yaml"
     parser = argparse.ArgumentParser(description="ROS1 AgileX single-arm runner for OpenPI RLT online RL.")
     parser.add_argument("--config", type=str, default=str(default_config))
     parser.add_argument("--task", type=str, default="insert the Ethernet cable into the port")
     parser.add_argument("--single_arm", type=str, choices=("left", "right"), default="right")
-    parser.add_argument("--num_episodes", type=int, default=None)
-    parser.add_argument("--max_chunk_steps_per_episode", type=int, default=200)
+    parser.add_argument("--num_episodes", type=int, default=1)
+    parser.add_argument("--max_chunk_steps_per_episode", type=int, default=20000)
     parser.add_argument("--idle_sleep_sec", type=float, default=0.02)
     parser.add_argument("--machine_a_ws_url", type=str, default=None)
     parser.add_argument("--actor_service_url", type=str, default=None)
@@ -1262,7 +1261,7 @@ def main() -> None:
         eval_actor_only=args.eval_actor_only,
         metrics_path=str(metrics_path_for(system, "robot_rollout_metrics.jsonl")),
     )
-
+  
     logger.info("Starting ROS1 AgileX rollout log=%s config=%s", log_path, args.config)
     logger.info("Machine A ws: %s", system.env_driver.machine_a_ws_url)
     logger.info("Actor service: %s", system.env_driver.actor_service_url)
@@ -1275,6 +1274,12 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received, shutting down.")
     finally:
+        if runtime_context.stop_requested():
+            logger.info("Stop requested; moving robot to reset pose before exit.")
+            try:
+                env.move_to_home_on_shutdown()
+            except Exception as exc:
+                logger.warning("Failed to move robot home on shutdown: %s", exc)
         human_action_recorder.shutdown()
         manual_services.shutdown()
         teleop_services.shutdown()

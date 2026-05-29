@@ -11,7 +11,13 @@ import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "mplconfig-rlt"))
 
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError as exc:
+    raise ModuleNotFoundError(
+        "matplotlib is required by plot_learner_metrics.py. "
+        "Install it with `pip install matplotlib` (or reinstall this package after updating dependencies)."
+    ) from exc
 
 """
 Plot learner metrics from an online run directory or an offline training directory.

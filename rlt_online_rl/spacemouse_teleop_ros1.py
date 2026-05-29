@@ -17,6 +17,7 @@ from openpi_client.teleop import EefActionConverter
 from openpi_client.teleop import EefKinematics
 from openpi_client.teleop import SpacemouseTeleop
 from openpi_client.teleop import SpacemouseTeleopConfig
+from speech_utils import log_say
 
 TELEOP_TRIGGER_SERVICE = "/teleop_trigger_rl"
 TELEOP_STATUS_SERVICE = "/teleop_status"
@@ -144,9 +145,16 @@ def main() -> None:
         joint_names=_joint_names_for_arm(args.arm),
         use_rad=True,
     )
+
+    def _get_joint_positions() -> np.ndarray:
+        latest = joint_cache.get()
+        if latest is None:
+            return np.zeros((7,), dtype=np.float64)
+        return latest
+
     converter = EefActionConverter(
         kinematics=kinematics,
-        get_joint_positions=lambda: joint_cache.get() if joint_cache.get() is not None else np.zeros((7,), dtype=np.float64),
+        get_joint_positions=_get_joint_positions,
     )
     teleop = SpacemouseTeleop(
         SpacemouseTeleopConfig(
@@ -166,8 +174,11 @@ def main() -> None:
         args.arm,
         bool(args.auto_toggle_teleop),
     )
+    log_say("SpaceMouse teleop started.")
     rate = rospy.Rate(max(float(args.fps), 1.0))
     last_active_s = 0.0
+    last_announced_mode: str | None = None
+    reset_blocked_announced = False
     try:
         while not rospy.is_shutdown():
             action = teleop.get_action()
@@ -177,11 +188,35 @@ def main() -> None:
 
             publish_allowed = True
             if mode_client is not None:
+                mode_before = mode_client.get_mode()
+                if mode_before in {"teleop", "policy", "reset"} and mode_before != last_announced_mode:
+                    log_say(f"Control mode {mode_before}.")
+                    last_announced_mode = mode_before
                 if active:
-                    mode_client.ensure_mode("teleop")
+                    if mode_before != "teleop":
+                        switched = mode_client.ensure_mode("teleop")
+                        mode_after = mode_client.get_mode()
+                        if switched and mode_after == "teleop":
+                            log_say("Manual takeover teleop.")
+                        elif mode_after == "reset" and not reset_blocked_announced:
+                            log_say("Episode inactive. Teleop control blocked.")
+                            reset_blocked_announced = True
+                    else:
+                        mode_after = mode_before
                 elif time.time() - last_active_s >= float(args.release_to_policy_delay_s):
-                    mode_client.ensure_mode("policy")
-                publish_allowed = mode_client.get_mode() == "teleop"
+                    if mode_before != "policy":
+                        switched = mode_client.ensure_mode("policy")
+                        mode_after = mode_client.get_mode()
+                        if switched and mode_after == "policy":
+                            log_say("Released to policy.")
+                    else:
+                        mode_after = mode_before
+                else:
+                    mode_after = mode_before
+
+                if mode_after != "reset":
+                    reset_blocked_announced = False
+                publish_allowed = mode_after == "teleop"
 
             converted = converter(action)
             if publish_allowed and converted is not None and "actions" in converted:

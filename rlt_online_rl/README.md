@@ -343,7 +343,7 @@ Plot learner metrics:
 
 ```bash
 python scripts/tools/plot_learner_metrics.py \
-  --run_dir runs/agilex_ethernet
+  runs/agilex_ethernet
 ```
 
 Offline training and analysis tools are documented in
@@ -353,6 +353,44 @@ Real-robot replay export and playback tools are documented in
 [scripts/replay_real_robot/README.md](scripts/replay_real_robot/README.md).
 
 ## Suggested First Run Order
+
+### One-terminal startup (recommended)
+
+From `rlt_online_rl/` (you may have `conda activate rl-tokens` in your shell; tmux windows set up their own env):
+
+```bash
+bash run_start_training.sh
+```
+
+This opens **one tmux session** (one terminal window) with internal tabs:
+
+- `machine-b` → learner / replay / actor (`conda rl-tokens`)
+- `machine-a` → policy server (**openpi `uv`**, Python 3.11+ from repo root)
+- `rollout` → ROS1 robot rollout (`conda rl-tokens` + ROS Noetic)
+- `spacemouse` → SpaceMouse teleop (`conda rl-tokens` + ROS + placo)
+- `keyboard` → manual control (`conda rl-tokens` + ROS, attached by default)
+
+Use `Ctrl+b` then `0/1/2/...` to switch tabs. Detach with `Ctrl+b d` (services keep running).
+
+Stop everything:
+
+```bash
+bash run_stop_training.sh
+```
+
+Plot metrics on demand (after data exists):
+
+```bash
+bash run_start_plot.sh runs/screw_sorting
+```
+
+Skip SpaceMouse tab:
+
+```bash
+bash run_start_training.sh --no-spacemouse
+```
+
+### Manual startup (separate terminals)
 
 Training:
 

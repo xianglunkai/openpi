@@ -6,6 +6,7 @@ import time
 import tty
 
 import rospy
+from speech_utils import log_say
 from std_srvs.srv import Trigger
 
 from train_deploy_alignment.manual_signal_bridge_ros1 import ENTER_CRITICAL_PHASE_SERVICE
@@ -49,6 +50,7 @@ def getkey():
 
 class KeyboardTeleopRecordRewardToggleRos1:
     def __init__(self):
+        self._last_announced_mode = None
         self.control_mode = "unknown"
         self.rl_teleop_cli = self._make_client(RL_TELEOP_TRIGGER_SERVICE)
         self.hw_teleop_cli = self._make_client(HW_TELEOP_TRIGGER_SERVICE)
@@ -61,6 +63,7 @@ class KeyboardTeleopRecordRewardToggleRos1:
         self.toggle_critical_phase_cli = self._make_client(TOGGLE_CRITICAL_PHASE_SERVICE)
         self.refresh_teleop_mode(retries=5, timeout_sec=1.5)
         rospy.loginfo(self._ready_message())
+        log_say("Teleoperation keyboard ready.")
 
     @staticmethod
     def _make_client(name: str):
@@ -89,6 +92,9 @@ class KeyboardTeleopRecordRewardToggleRos1:
 
     def log_teleop_mode(self):
         rospy.loginfo("Current control mode: %s", self.control_mode)
+        if self.control_mode in {"teleop", "policy", "reset"} and self.control_mode != self._last_announced_mode:
+            log_say(f"Control mode {self.control_mode}.")
+            self._last_announced_mode = self.control_mode
 
     def refresh_teleop_mode(self, *, retries: int = 3, timeout_sec: float = 1.0):
         total_attempts = max(int(retries), 1)
@@ -154,31 +160,36 @@ class KeyboardTeleopRecordRewardToggleRos1:
         rospy.loginfo(message)
         return True
 
-    def _record_terminal(self, client, label: str) -> None:
+    def _record_terminal(self, client, label: str) -> bool:
         if not self.refresh_teleop_mode():
-            return
+            return False
         if self.control_mode == "reset":
             rospy.logwarn("Cannot record %s: episode inactive/reset in progress.", label)
-            return
+            log_say(f"Cannot record {label}. Episode inactive.")
+            return False
         if self.control_mode == "teleop":
             if not self._toggle_hardware_teleop(reason=f"{label} end"):
-                return
+                return False
             time.sleep(HW_TELEOP_SETTLE_SEC)
 
         resp = self._call_trigger(client, f"Failed to record {label}.")
         if resp is None:
-            return
+            return False
         if resp.success:
             rospy.loginfo(resp.message if resp.message else f"Recorded {label}.")
+            log_say(f"Recorded {label}.")
         else:
             rospy.logwarn(resp.message if resp.message else f"Recording {label} failed.")
+            log_say(f"Record {label} failed.")
         self.refresh_teleop_mode()
+        return bool(resp.success)
 
     def toggle_teleop(self):
         if not self.refresh_teleop_mode():
             return
         if self.control_mode == "reset":
             rospy.logwarn("Episode inactive/reset in progress; teleop toggle ignored.")
+            log_say("Episode inactive. Toggle ignored.")
             return
 
         if self.control_mode == "teleop":
@@ -200,8 +211,10 @@ class KeyboardTeleopRecordRewardToggleRos1:
             return
         if resp.success:
             rospy.loginfo(resp.message if resp.message else "Requested next episode start.")
+            log_say("Next episode requested.")
             return
         rospy.logwarn(resp.message if resp.message else "Next episode request failed.")
+        log_say("Next episode request failed.")
 
     def record_success(self):
         self._record_terminal(self.success_cli, "success")
@@ -215,8 +228,10 @@ class KeyboardTeleopRecordRewardToggleRos1:
             return
         if resp.success:
             rospy.loginfo(resp.message if resp.message else "Entered the critical phase.")
+            log_say("Entered critical phase.")
             return
         rospy.logwarn(resp.message if resp.message else "Entering the critical phase failed.")
+        log_say("Enter critical phase failed.")
     
     def toggle_critical_phase(self):
         resp = self._call_trigger(self.toggle_critical_phase_cli, "Failed to toggle the critical phase.")
@@ -224,8 +239,10 @@ class KeyboardTeleopRecordRewardToggleRos1:
             return
         if resp.success:
             rospy.loginfo(resp.message if resp.message else "Toggled the critical phase.")
+            log_say("Critical phase toggled.")
             return
         rospy.logwarn(resp.message if resp.message else "Toggling the critical phase failed.")
+        log_say("Toggle critical phase failed.")
 
     def request_rollout_shutdown(self):
         resp = self._call_trigger(self.shutdown_rollout_cli, "Failed to request rollout shutdown.")
@@ -233,8 +250,10 @@ class KeyboardTeleopRecordRewardToggleRos1:
             return
         if resp.success:
             rospy.loginfo(resp.message if resp.message else "Requested rollout shutdown.")
+            log_say("Rollout shutdown requested.")
             return
         rospy.logwarn(resp.message if resp.message else "Rollout shutdown request failed.")
+        log_say("Rollout shutdown failed.")
 
 
 def main():
