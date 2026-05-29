@@ -276,3 +276,27 @@ class SpacemouseTeleop(Teleoperator):
         """Send feedback to the spacemouse."""
         # Spacemouse doesn't support feedback
         del feedback
+    
+    def should_intervene(self) -> bool:
+        with self.state_lock:
+            if self._latest_state is not None:
+                state = self._latest_state
+            else:
+                # Fallback to device.read() when available. Avoid using module-level
+                # read() which some pyspacemouse distributions do not expose.
+                if self._device is not None and hasattr(self._device, "read"):
+                    state = self._device.read()
+                else:
+                    raise RuntimeError("SpaceMouse device not ready and no read() method available")
+
+        deltas = [
+            state.y,
+            -state.x,
+            state.z,
+            state.roll,
+            state.pitch,
+            -state.yaw,
+        ]
+        
+        return max(abs(np.array(deltas))) >= self.config.deadzone
+        

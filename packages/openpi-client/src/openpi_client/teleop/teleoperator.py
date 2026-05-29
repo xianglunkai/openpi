@@ -65,3 +65,7 @@ class Teleoperator(abc.ABC):
     @abc.abstractmethod
     def disconnect(self) -> None:
         pass
+    
+    @abc.abstractmethod
+    def should_intervene(self) -> bool:
+        pass
