@@ -860,19 +860,30 @@ class EnvDriver:
             )
             logger.info("EnvDriver episode=%s finalizing raw episode and replay...", episode_id)
             raw_episode_path = self._persist_raw_episode(raw_episode, episode_id=episode_id, started_at=start_time)
-            transitions, replay_finalize_stats = self._build_episode_replay(raw_episode)
-            if transitions:
-                self._replay_client.add_transitions(transitions)
-            transitions_written = len(transitions)
-            logger.info(
-                "EnvDriver episode=%s finalize done raw_steps=%s replay_transitions=%s cached_anchors=%s fetched_anchors=%s raw_episode=%s",
-                episode_id,
-                len(raw_episode.steps),
-                transitions_written,
-                replay_finalize_stats.get("cached_anchor_count", 0),
-                replay_finalize_stats.get("fetched_anchor_count", 0),
-                raw_episode_path,
-            )
+            try:
+                transitions, replay_finalize_stats = self._build_episode_replay(raw_episode)
+            except Exception as exc:
+                logger.exception(
+                    "EnvDriver episode=%s replay finalize failed (e.g. Machine A websocket); "
+                    "episode ended on robot but replay was not built: %s",
+                    episode_id,
+                    exc,
+                )
+                transitions = []
+                replay_finalize_stats = {"replay_finalize_error": str(exc)}
+            else:
+                if transitions:
+                    self._replay_client.add_transitions(transitions)
+                transitions_written = len(transitions)
+                logger.info(
+                    "EnvDriver episode=%s finalize done raw_steps=%s replay_transitions=%s cached_anchors=%s fetched_anchors=%s raw_episode=%s",
+                    episode_id,
+                    len(raw_episode.steps),
+                    transitions_written,
+                    replay_finalize_stats.get("cached_anchor_count", 0),
+                    replay_finalize_stats.get("fetched_anchor_count", 0),
+                    raw_episode_path,
+                )
             logger.info("Episode %s finalize done. Ready for next episode. Press o to continue.", episode_id)
         summary = {
             "episode_id": episode_id,

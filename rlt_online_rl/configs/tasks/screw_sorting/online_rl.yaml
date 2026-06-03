@@ -1,7 +1,7 @@
 experiment:
   rl:
     action_dim: 7
-    chunk_len: 10
+    chunk_len: 25
     z_dim: 2048
     proprio_dim: 7
     action_representation: delta_chunk
@@ -79,7 +79,7 @@ runtime:
     full_task_reset_action: [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
     critical_phase_reset_action: [-0.00133514404296875, 0.00438690185546875, 0.034523963928222656, -0.053597450256347656, -0.00476837158203125, -0.00209808349609375, 0.09]
     actor_deterministic: false
-    chunk_exec_horizon: 10
+    chunk_exec_horizon: 25
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16

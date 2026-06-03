@@ -601,6 +601,7 @@ class HumanInterventionState:
     def enter_episode_reset(self) -> str:
         with self._lock:
             self._episode_active = False
+            self._policy_enabled = True
             self._need_reset_on_resume = False
             self._resume_until = 0.0
             return self._mode_name_locked()

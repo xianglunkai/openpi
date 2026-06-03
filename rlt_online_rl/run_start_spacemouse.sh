@@ -12,4 +12,6 @@ fi
 CMEEL_LIB="${CONDA_PREFIX}/lib/python3.10/site-packages/cmeel.prefix/lib"
 export LD_LIBRARY_PATH="${CMEEL_LIB}:${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH}"
 
+# Toggle teleop/policy with keyboard 't' or Space (keyboard_toggle script).
 python spacemouse_teleop_ros1.py "$@"
+

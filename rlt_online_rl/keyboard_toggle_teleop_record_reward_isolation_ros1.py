@@ -52,6 +52,7 @@ class KeyboardTeleopRecordRewardToggleRos1:
     def __init__(self):
         self._last_announced_mode = None
         self.control_mode = "unknown"
+        self._hw_teleop_available = self._probe_hw_teleop_service()
         self.rl_teleop_cli = self._make_client(RL_TELEOP_TRIGGER_SERVICE)
         self.hw_teleop_cli = self._make_client(HW_TELEOP_TRIGGER_SERVICE)
         self.teleop_status_cli = self._make_client(TELEOP_STATUS_SERVICE)
@@ -70,6 +71,20 @@ class KeyboardTeleopRecordRewardToggleRos1:
         rospy.loginfo("Waiting for service %s ...", name)
         # rospy.wait_for_service(name)
         return rospy.ServiceProxy(name, Trigger)
+
+    @staticmethod
+    def _probe_hw_teleop_service(*, timeout_sec: float = 2.0) -> bool:
+        try:
+            rospy.wait_for_service(HW_TELEOP_TRIGGER_SERVICE, timeout=timeout_sec)
+            rospy.loginfo("Hardware teleop service %s is available.", HW_TELEOP_TRIGGER_SERVICE)
+            return True
+        except rospy.ROSException:
+            rospy.logwarn(
+                "Hardware teleop service %s unavailable; toggles use %s only (SpaceMouse / policy).",
+                HW_TELEOP_TRIGGER_SERVICE,
+                RL_TELEOP_TRIGGER_SERVICE,
+            )
+            return False
 
     def _ready_message(self) -> str:
         return (
@@ -153,6 +168,8 @@ class KeyboardTeleopRecordRewardToggleRos1:
         return True
 
     def _toggle_hardware_teleop(self, *, reason: str) -> bool:
+        if not self._hw_teleop_available:
+            return True
         resp = self._call_trigger(self.hw_teleop_cli, f"Failed to toggle hardware teleop for {reason}.")
         if resp is None:
             return False
@@ -171,6 +188,8 @@ class KeyboardTeleopRecordRewardToggleRos1:
             if not self._toggle_hardware_teleop(reason=f"{label} end"):
                 return False
             time.sleep(HW_TELEOP_SETTLE_SEC)
+            if not self._toggle_local_teleop():
+                return False
 
         resp = self._call_trigger(client, f"Failed to record {label}.")
         if resp is None:
@@ -217,10 +236,15 @@ class KeyboardTeleopRecordRewardToggleRos1:
         log_say("Next episode request failed.")
 
     def record_success(self):
-        self._record_terminal(self.success_cli, "success")
+        if self._record_terminal(self.success_cli, "success"):
+            rospy.loginfo("Episode ended (success). Rollout will reset and wait for 'o' if still running.")
 
     def record_failure(self):
-        self._record_terminal(self.failure_cli, "failure")
+        if self._record_terminal(self.failure_cli, "failure"):
+            rospy.loginfo(
+                "Episode ended (failure). Rollout moves the arm to reset, then waits for 'o' for the next episode."
+            )
+            log_say("Failure recorded. Robot resetting. Press o for next episode.")
 
     def enter_critical_phase(self):
         resp = self._call_trigger(self.critical_phase_cli, "Failed to enter the critical phase.")

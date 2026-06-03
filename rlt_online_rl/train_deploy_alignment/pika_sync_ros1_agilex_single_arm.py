@@ -492,6 +492,7 @@ class HumanInterventionState:
     def enter_episode_reset(self) -> str:
         with self._lock:
             self._episode_active = False
+            self._policy_enabled = True
             self._need_reset_on_resume = False
             self._resume_until = 0.0
             return self._mode_name_locked()
@@ -927,9 +928,10 @@ class AgilexChunkEnvAdapter:
                 plan_cursor += 1
             else:
                 human_action = self._sample_latest_human_action(step_observation)
-                self._robot.send_action(human_action)
-                executed.append(human_action)
-                ref_actions.append(human_action.copy())
+                bounded_human = self._apply_action_limits(human_action)
+                # SpaceMouse already commands /master; skip duplicate puppet publish to reduce jitter.
+                executed.append(bounded_human)
+                ref_actions.append(bounded_human.copy())
                 human_controlled.append(True)
                 step_sources.append(int(TransitionSource.HUMAN))
                 actor_param_versions.append(-1)
@@ -978,8 +980,7 @@ class AgilexChunkEnvAdapter:
         if not executed:
             self._last_sent_action = None
             if terminal_requested:
-                self._intervention_state.enter_episode_reset()
-                self._phase_controller.finish_episode()
+                self._on_episode_done(terminal_requested=True)
             return next_observation, rewards, terminal_requested, {
                 "drop_transition": True,
                 "intervention_flag": False,
@@ -994,8 +995,7 @@ class AgilexChunkEnvAdapter:
         self._episode_chunk_step += 1
         done = bool(terminal_requested or (self._episode_chunk_step >= self._max_chunk_steps_per_episode))
         if done:
-            self._intervention_state.enter_episode_reset()
-            self._phase_controller.finish_episode()
+            self._on_episode_done(terminal_requested=terminal_requested)
         if step_trace:
             step_trace[-1]["done"] = done
         if human_intervened:
@@ -1074,6 +1074,16 @@ class AgilexChunkEnvAdapter:
     def _reset_robot_to_mode_start(self) -> None:
         self._robot.move_to_reset(self._reset_target_for_mode())
 
+    def _on_episode_done(self, *, terminal_requested: bool) -> None:
+        self._intervention_state.enter_episode_reset()
+        self._phase_controller.finish_episode()
+        if terminal_requested:
+            logger.info("Episode terminal signal received; moving robot to reset pose.")
+            try:
+                self._reset_robot_to_mode_start()
+            except Exception as exc:
+                logger.warning("Failed to move robot to reset pose after episode end: %s", exc)
+
     def _apply_action_limits(self, action: np.ndarray) -> np.ndarray:
         action = np.asarray(action, dtype=np.float32).reshape(-1)[: self._system.rl.action_dim]
         if self._action_delta_limits is None or self._last_sent_action is None:
@@ -1100,9 +1110,15 @@ def parse_args() -> argparse.Namespace:
     default_config = REPO_ROOT / "configs" / "tasks" / "screw_sorting" / "online_rl.yaml"
     parser = argparse.ArgumentParser(description="ROS1 AgileX single-arm runner for OpenPI RLT online RL.")
     parser.add_argument("--config", type=str, default=str(default_config))
-    parser.add_argument("--task", type=str, default="insert the Ethernet cable into the port")
+    parser.add_argument("--task", type=str, default="Please sort and return the silver screws in the grey box to their proper places.")
     parser.add_argument("--single_arm", type=str, choices=("left", "right"), default="right")
-    parser.add_argument("--num_episodes", type=int, default=1)
+    parser.add_argument(
+        "--num_episodes",
+        type=int,
+        default=None,
+        help="Max episodes per rollout session (default: unlimited; press 'o' between episodes). "
+        "Use a finite value only for one-shot eval runs.",
+    )
     parser.add_argument("--max_chunk_steps_per_episode", type=int, default=20000)
     parser.add_argument("--idle_sleep_sec", type=float, default=0.02)
     parser.add_argument("--machine_a_ws_url", type=str, default=None)
@@ -1126,7 +1142,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--left_cmd_topic", type=str, default="/master/joint_left")
     parser.add_argument("--right_cmd_topic", type=str, default="/master/joint_right")
     parser.add_argument("--teleop_trigger_service", type=str, default="/teleop_trigger_rl")
-    parser.add_argument("--policy_resume_delay_s", type=float, default=1.0)
+    parser.add_argument("--policy_resume_delay_s", type=float, default=0.2)
     parser.add_argument("--start_in_human_mode", action="store_true")
     parser.add_argument("--step_trace_stride", type=int, default=None)
     parser.add_argument("--eval_actor_only", action="store_true")

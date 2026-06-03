@@ -175,6 +175,8 @@ class KeyboardTeleopRecordRewardToggle(Node):
             if not self._toggle_hardware_teleop(reason=f"{label} end"):
                 return
             time.sleep(HW_TELEOP_SETTLE_SEC)
+            if not self._toggle_local_teleop():
+                return
 
         resp = self._call_trigger(client, f"Failed to record {label}.")
         if resp is None:

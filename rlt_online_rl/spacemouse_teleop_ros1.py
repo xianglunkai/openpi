@@ -19,7 +19,6 @@ from openpi_client.teleop import SpacemouseTeleop
 from openpi_client.teleop import SpacemouseTeleopConfig
 from speech_utils import log_say
 
-TELEOP_TRIGGER_SERVICE = "/teleop_trigger_rl"
 TELEOP_STATUS_SERVICE = "/teleop_status"
 
 
@@ -68,41 +67,50 @@ class JointStateCache:
         self._sub.unregister()
 
 
-class TeleopModeClient:
-    def __init__(self, trigger_service: str, status_service: str):
-        rospy.wait_for_service(trigger_service)
-        rospy.wait_for_service(status_service)
-        self._trigger = rospy.ServiceProxy(trigger_service, Trigger)
-        self._status = rospy.ServiceProxy(status_service, Trigger)
+class TeleopStatusClient:
+    """Read rollout control mode; mode changes are done via keyboard (t / Space)."""
+
+    def __init__(self, status_service: str, *, wait_timeout_s: float = 30.0):
+        self._status_service = status_service
+        self._status: rospy.ServiceProxy | None = None
+        self._last_warn_s = 0.0
+        self._warn_interval_s = 5.0
+        self._connect(wait_timeout_s=wait_timeout_s)
+
+    def _warn_throttled(self, message: str) -> None:
+        now = time.time()
+        if now - self._last_warn_s < self._warn_interval_s:
+            return
+        self._last_warn_s = now
+        rospy.logwarn(message)
+
+    def _connect(self, *, wait_timeout_s: float) -> bool:
+        try:
+            rospy.wait_for_service(self._status_service, timeout=wait_timeout_s)
+        except rospy.ROSException:
+            self._status = None
+            self._warn_throttled(
+                f"Rollout teleop status unavailable ({self._status_service}). "
+                "Start rollout and use keyboard 't' or Space to toggle teleop."
+            )
+            return False
+        self._status = rospy.ServiceProxy(self._status_service, Trigger)
+        return True
+
+    @property
+    def available(self) -> bool:
+        return self._status is not None
 
     def get_mode(self) -> str:
+        if not self.available:
+            return "unknown"
         try:
             resp = self._status()
         except rospy.ServiceException as exc:
-            rospy.logwarn("Failed teleop status query: %s", exc)
+            self._warn_throttled(f"Failed teleop status query: {exc}")
             return "unknown"
         parsed = _parse_mode_message(resp.message)
         return parsed if parsed is not None else "unknown"
-
-    def toggle(self) -> bool:
-        try:
-            resp = self._trigger()
-        except rospy.ServiceException as exc:
-            rospy.logwarn("Failed teleop toggle: %s", exc)
-            return False
-        rospy.loginfo(resp.message if resp.message else "teleop toggled")
-        return bool(resp.success)
-
-    def ensure_mode(self, target_mode: str) -> bool:
-        mode = self.get_mode()
-        if mode == target_mode:
-            return True
-        if mode == "reset":
-            return False
-        if not self.toggle():
-            return False
-        mode_after = self.get_mode()
-        return mode_after == target_mode
 
 
 def _joint_names_for_arm(arm: str) -> list[str]:
@@ -111,23 +119,15 @@ def _joint_names_for_arm(arm: str) -> list[str]:
     return [f"right_joint{i}" for i in range(6)]
 
 
-def _is_intervening(action: dict, deadzone: float) -> bool:
-    axes = [abs(float(action.get(k, 0.0))) for k in ("delta_x", "delta_y", "delta_z", "delta_roll", "delta_pitch", "delta_yaw")]
-    return max(axes) >= float(deadzone)
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SpaceMouse teleop for ROS1 AgileX single-arm.")
     parser.add_argument("--arm", choices=("left", "right"), default="right")
     parser.add_argument("--joint_topic", type=str, default="/puppet/joint_right")
     parser.add_argument("--cmd_topic", type=str, default="/master/joint_right")
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--space_mouse_deadzone", type=float, default=0.05)
-    parser.add_argument("--intervention_deadzone", type=float, default=0.001)
-    parser.add_argument("--auto_toggle_teleop", action="store_true")
-    parser.add_argument("--release_to_policy_delay_s", type=float, default=0.5)
-    parser.add_argument("--teleop_trigger_service", type=str, default=TELEOP_TRIGGER_SERVICE)
+    parser.add_argument("--space_mouse_deadzone", type=float, default=0.0)
     parser.add_argument("--teleop_status_service", type=str, default=TELEOP_STATUS_SERVICE)
-    parser.add_argument("--joint_state_timeout_s", type=float, default=10.0)
+    parser.add_argument("--joint_state_timeout_s", type=float, default=1.0)
     parser.add_argument("--urdf_path", type=str, default="")
     return parser.parse_args()
 
@@ -152,9 +152,11 @@ def main() -> None:
             return np.zeros((7,), dtype=np.float64)
         return latest
 
+    control_fps = max(float(args.fps), 1.0)
     converter = EefActionConverter(
         kinematics=kinematics,
         get_joint_positions=_get_joint_positions,
+        input_fps=control_fps,
     )
     teleop = SpacemouseTeleop(
         SpacemouseTeleopConfig(
@@ -162,71 +164,57 @@ def main() -> None:
             use_gripper=True,
         )
     )
-    mode_client = None
-    if args.auto_toggle_teleop:
-        mode_client = TeleopModeClient(args.teleop_trigger_service, args.teleop_status_service)
+    status_client = TeleopStatusClient(args.teleop_status_service)
 
     teleop.connect()
     rospy.loginfo(
-        "SpaceMouse teleop started cmd_topic=%s joint_topic=%s arm=%s auto_toggle=%s",
+        "SpaceMouse teleop started cmd_topic=%s joint_topic=%s arm=%s",
         args.cmd_topic,
         args.joint_topic,
         args.arm,
-        bool(args.auto_toggle_teleop),
     )
-    log_say("SpaceMouse teleop started.")
-    rate = rospy.Rate(max(float(args.fps), 1.0))
-    last_active_s = 0.0
+    log_say("SpaceMouse teleop started. Press t or Space on the keyboard to toggle teleop.")
+    if not status_client.available:
+        rospy.logwarn(
+            "Teleop status unavailable: commands are published continuously; rollout gates execution. "
+            "Press keyboard 't' or Space to switch to teleop mode once rollout is running."
+        )
+    rate = rospy.Rate(control_fps)
     last_announced_mode: str | None = None
-    reset_blocked_announced = False
+    last_status_retry_s = 0.0
+    status_retry_interval_s = 0.5
+    last_cmd: np.ndarray | None = None
     try:
         while not rospy.is_shutdown():
             action = teleop.get_action()
-            active = _is_intervening(action, float(args.intervention_deadzone))
-            if active:
-                last_active_s = time.time()
 
             publish_allowed = True
-            if mode_client is not None:
-                mode_before = mode_client.get_mode()
-                if mode_before in {"teleop", "policy", "reset"} and mode_before != last_announced_mode:
-                    log_say(f"Control mode {mode_before}.")
-                    last_announced_mode = mode_before
-                if active:
-                    if mode_before != "teleop":
-                        switched = mode_client.ensure_mode("teleop")
-                        mode_after = mode_client.get_mode()
-                        if switched and mode_after == "teleop":
-                            log_say("Manual takeover teleop.")
-                        elif mode_after == "reset" and not reset_blocked_announced:
-                            log_say("Episode inactive. Teleop control blocked.")
-                            reset_blocked_announced = True
-                    else:
-                        mode_after = mode_before
-                elif time.time() - last_active_s >= float(args.release_to_policy_delay_s):
-                    if mode_before != "policy":
-                        switched = mode_client.ensure_mode("policy")
-                        mode_after = mode_client.get_mode()
-                        if switched and mode_after == "policy":
-                            log_say("Released to policy.")
-                    else:
-                        mode_after = mode_before
-                else:
-                    mode_after = mode_before
-
-                if mode_after != "reset":
-                    reset_blocked_announced = False
-                publish_allowed = mode_after == "teleop"
+            now = time.time()
+            if not status_client.available and now - last_status_retry_s >= status_retry_interval_s:
+                status_client._connect(wait_timeout_s=0.5)
+                last_status_retry_s = now
+            if status_client.available:
+                mode = status_client.get_mode()
+                if mode in {"teleop", "policy", "reset"} and mode != last_announced_mode:
+                    log_say(f"Control mode {mode}.")
+                    last_announced_mode = mode
+                publish_allowed = mode == "teleop"
 
             converted = converter(action)
-            if publish_allowed and converted is not None and "actions" in converted:
+            target: np.ndarray | None = None
+            if converted is not None and "actions" in converted:
                 target = np.asarray(converted["actions"], dtype=np.float64).reshape(-1)
                 if target.shape[0] >= 7:
-                    msg = JointState()
-                    msg.header = Header(stamp=rospy.Time.now())
-                    msg.name = ["joint0", "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
-                    msg.position = target[:7].tolist()
-                    pub.publish(msg)
+                    last_cmd = target[:7].copy()
+            elif publish_allowed and last_cmd is not None:
+                target = last_cmd
+
+            if publish_allowed and target is not None and target.shape[0] >= 7:
+                msg = JointState()
+                msg.header = Header(stamp=rospy.Time.now())
+                msg.name = ["joint0", "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+                msg.position = target[:7].tolist()
+                pub.publish(msg)
             rate.sleep()
     finally:
         teleop.disconnect()
@@ -235,4 +223,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

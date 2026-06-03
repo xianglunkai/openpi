@@ -32,7 +32,6 @@ class EefActionConverter:
         *,
         gripper_open: float = 0.03,
         gripper_close: float = 0.0,
-        min_delta: float = 1e-4,
         input_fps: float = 30.0,
         command_timeout_s: float = 0.5,
         joint_velocity_limits: np.ndarray | list[float] | None = None,
@@ -43,7 +42,7 @@ class EefActionConverter:
         self._get_joint_positions = get_joint_positions
         self._gripper_open = gripper_open
         self._gripper_close = gripper_close
-        self._min_delta = min_delta
+  
         self._dt = 1.0 / max(float(input_fps), 1.0)
         self._command_timeout_s = max(float(command_timeout_s), 0.0)
 
@@ -67,6 +66,10 @@ class EefActionConverter:
         if self._last_call_s is not None and (now - self._last_call_s) > self._command_timeout_s:
             self._fallback_qd[:] = 0.0
             self._fallback_qdd[:] = 0.0
+        if self._last_call_s is not None:
+            dt = float(np.clip(now - self._last_call_s, 1e-3, 0.1))
+        else:
+            dt = self._dt
         self._last_call_s = now
 
         converted = teleop_eef_to_actions(
@@ -75,7 +78,6 @@ class EefActionConverter:
             get_joint_positions=self._get_joint_positions,
             gripper_open=self._gripper_open,
             gripper_close=self._gripper_close,
-            min_delta=self._min_delta,
         )
         if converted is None:
             return None
@@ -85,7 +87,7 @@ class EefActionConverter:
         q_raw = np.asarray(self._get_joint_positions(), dtype=np.float64).reshape(-1)
         if q_raw.shape[0] < 7:
             return converted
-        q_target[:6] = self._apply_internal_smoother(q_raw[:6], q_target[:6], self._dt)
+        # q_target[:6] = self._apply_internal_smoother(q_raw[:6], q_target[:6], dt)
         return {"actions": q_target.astype(np.float32)}
 
     def _apply_internal_smoother(self, q_current: np.ndarray, q_target: np.ndarray, dt: float) -> np.ndarray:
@@ -141,7 +143,6 @@ def teleop_eef_to_actions(
     get_joint_positions: Callable[[], np.ndarray],
     gripper_open: float = 0.03,
     gripper_close: float = 0.0,
-    min_delta: float = 1e-4,
 ) -> Optional[dict]:
     """Convert teleop EEF deltas to ``{"actions": joint_targets}`` (7-DoF arm + gripper).
 
@@ -155,12 +156,6 @@ def teleop_eef_to_actions(
     delta_yaw = float(ee_command.get("delta_yaw", 0.0))
     gripper = float(ee_command.get("gripper", 1.0))
 
-    # if the delta is less than the min_delta, return None
-    if (
-        max(abs(delta_x), abs(delta_y), abs(delta_z), abs(delta_roll), abs(delta_pitch), abs(delta_yaw))
-        < min_delta
-    ):
-        return None
 
     q_raw = np.asarray(get_joint_positions(), dtype=np.float64).reshape(-1)
     if q_raw.size < 7:

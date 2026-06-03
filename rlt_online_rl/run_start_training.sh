@@ -134,7 +134,7 @@ EOF
 tmux new-session -d -s "${SESSION_NAME}" -n machine-b "$(_run_rlt "bash run_start_machineB.sh")"
 
 # 1: machine-a
-tmux new-window -t "${SESSION_NAME}" -n machine-a "$(_run_machine_a)"
+# tmux new-window -t "${SESSION_NAME}" -n machine-a "$(_run_machine_a)"
 
 # 2: rollout (waits for actor/replay, then starts robot adapter)
 tmux new-window -t "${SESSION_NAME}" -n rollout "$(_run_rlt "bash run_start_rollout.sh")"
@@ -146,6 +146,11 @@ fi
 
 # last: keyboard (interactive; attach here)
 tmux new-window -t "${SESSION_NAME}" -n keyboard "$(_run_rlt "bash run_start_keyborad.sh")"
+
+# Stop all services without switching windows: Ctrl+b then Q (or run run_stop_training.sh elsewhere).
+tmux bind-key -T prefix Q confirm-before -p \
+  "Stop all RLT training services?" \
+  "run-shell \"bash '${SCRIPT_DIR}/run_stop_training.sh'\""
 
 tmux select-window -t "${SESSION_NAME}:keyboard"
 
@@ -163,7 +168,8 @@ cat <<EOF
 
 Switch window: Ctrl+b then 0/1/2/...
 Detach:        Ctrl+b d
-Stop all:      bash run_stop_training.sh
+Stop all:      Ctrl+b Q   (or: bash run_stop_training.sh)
+Force stop:    bash run_stop_training.sh --force
 Plot:          bash run_start_plot.sh runs/screw_sorting
 
 Attaching to keyboard window...

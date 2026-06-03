@@ -21,6 +21,8 @@ if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
 fi
 export LD_LIBRARY_PATH="${_rollout_ld_path}"
 
+# Omit --num_episodes to run continuously (reset pose + wait for keyboard 'o' after each s/f).
 python launch/launch_robot_rollout_ros1_agilex_single_arm.py \
   --config configs/tasks/screw_sorting/online_rl.yaml \
-  --machine_a_ws_url ws://0.0.0.0:8000
+  --machine_a_ws_url ws://0.0.0.0:8000 \
+  --policy_resume_delay_s 0.0
