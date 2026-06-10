@@ -715,6 +715,7 @@ class EnvDriver:
         logger.info("EnvDriver episode=%s started", episode_id)
         observation = self._env.reset()
         collection_phase = self._current_collection_phase()
+        # step_id: chunk 序号；env_step_id: 环境逐步计数（用于 replay 对齐）
         done = False
         step_id = 0
         env_step_id = 0
@@ -735,11 +736,14 @@ class EnvDriver:
         actor_versions: list[int] = []
         start_time = time.time()
 
+        # 主循环：按 action chunk 推进 episode，每个 chunk 内可能多次调用 planner（replan）
         while not done:
             plan_request_count = 0
 
             def _policy_planner(plan_observation: dict[str, Any], local_step: int) -> PolicyPlan:
+                """单次规划：取特征 -> Actor 精修 ref_chunk -> 可选人工接管/安全裁剪。"""
                 nonlocal fallback_count, intervention_count, plan_request_count
+                # Machine A 特征 + ref_chunk（baseline 动作块）
                 current = normalize_feature_payload(
                     self._feature_provider.get_features(plan_observation),
                     self._rl_config,
@@ -747,6 +751,7 @@ class EnvDriver:
                 )
                 current_features = _chunk_features_from_payload(current, self._rl_config)
                 ref_chunk = current_features.ref_chunk
+                # 远程 Actor 在 ref_chunk 基础上输出 refined_chunk；失败时可回退 ref
                 refine = maybe_refine_chunk(
                     self._actor_client,
                     z_rl=current_features.z_rl,
@@ -771,6 +776,7 @@ class EnvDriver:
                         plan_request_count - 1,
                         refine.error,
                     )
+                # 遥操作/键盘接管：覆盖 Actor 输出，标记为 HUMAN 来源
                 if self._env_config.enable_human_override and self._human_override_fn is not None:
                     maybe_human_chunk = self._human_override_fn(plan_observation, ref_chunk, action_chunk)
                     if maybe_human_chunk is not None:
@@ -794,10 +800,12 @@ class EnvDriver:
                     actor_param_version=actor_param_version,
                 )
 
+            # 在环境中执行整个 chunk（内部按需回调 _policy_planner）
             next_observation, rewards, done, info = self._execute_chunk(observation, _policy_planner)
             step_trace = info.get("step_trace") or []
             self._accumulate_rollout_trace(step_trace, source_counts, actor_versions)
             chunk_success = int(info.get("success", 0))
+            # 纯评估模式：只跑策略、不写 raw/replay，直接进下一 chunk
             if self._eval_actor_only:
                 env_step_id += len(step_trace)
                 observation = next_observation
@@ -805,9 +813,11 @@ class EnvDriver:
                 episode_success = int(info.get("success", episode_success))
                 continue
 
+            # 环境侧干预（如 reward 隔离/按键标记），与 planner 内 human override 分开统计
             env_intervention_flag = bool(info.get("intervention_flag", False))
             if env_intervention_flag:
                 intervention_count += 1
+            # drop_transition：该 chunk 数据不入 replay，但仍保留 raw trace 供排查
             if bool(info.get("drop_transition", False)):
                 dropped_transitions += 1
                 logger.warning(
@@ -817,6 +827,7 @@ class EnvDriver:
                     env_intervention_flag,
                 )
 
+            # 将 chunk 内逐步 trace 转为可持久化的 step 记录，并追加到 raw episode
             source = int(info.get("source", int(TransitionSource.HUMAN)))
             trace_records = self._build_trace_records(
                 step_trace,
@@ -844,6 +855,7 @@ class EnvDriver:
             step_id += 1
             episode_success = int(info.get("success", episode_success))
 
+        # --- episode 收尾：落盘 raw trace，构建 replay transition 并写入 replay buffer ---
         transitions_written = 0
         raw_episode_path: str | None = None
         replay_finalize_stats: dict[str, Any] = {}
@@ -861,6 +873,7 @@ class EnvDriver:
             logger.info("EnvDriver episode=%s finalizing raw episode and replay...", episode_id)
             raw_episode_path = self._persist_raw_episode(raw_episode, episode_id=episode_id, started_at=start_time)
             try:
+                # 需回连 Machine A 补全 policy anchor 特征；失败时不阻塞下一 episode
                 transitions, replay_finalize_stats = self._build_episode_replay(raw_episode)
             except Exception as exc:
                 logger.exception(
@@ -885,6 +898,7 @@ class EnvDriver:
                     raw_episode_path,
                 )
             logger.info("Episode %s finalize done. Ready for next episode. Press o to continue.", episode_id)
+        # 汇总本 episode 指标，可选写入 jsonl
         summary = {
             "episode_id": episode_id,
             "num_chunk_steps": step_id,
