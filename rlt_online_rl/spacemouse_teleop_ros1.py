@@ -127,7 +127,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--space_mouse_deadzone", type=float, default=0.0)
     parser.add_argument("--teleop_status_service", type=str, default=TELEOP_STATUS_SERVICE)
-    parser.add_argument("--joint_state_timeout_s", type=float, default=1.0)
+    parser.add_argument("--joint_state_timeout_s", type=float, default=0.2)
     parser.add_argument("--urdf_path", type=str, default="")
     return parser.parse_args()
 
@@ -182,16 +182,16 @@ def main() -> None:
     rate = rospy.Rate(control_fps)
     last_announced_mode: str | None = None
     last_status_retry_s = 0.0
-    status_retry_interval_s = 0.5
+    status_retry_interval_s = 0.2
     last_cmd: np.ndarray | None = None
     try:
         while not rospy.is_shutdown():
             action = teleop.get_action()
 
-            publish_allowed = True
+            publish_allowed = False
             now = time.time()
             if not status_client.available and now - last_status_retry_s >= status_retry_interval_s:
-                status_client._connect(wait_timeout_s=0.5)
+                status_client._connect(wait_timeout_s=status_retry_interval_s)
                 last_status_retry_s = now
             if status_client.available:
                 mode = status_client.get_mode()

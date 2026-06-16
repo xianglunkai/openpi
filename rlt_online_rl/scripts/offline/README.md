@@ -67,13 +67,13 @@ Command template:
 
 ```bash
 python scripts/offline/offline_train_from_replay.py \
-  --replay-path runs/agilex_ethernet/replay/replay_journal.pkl \
+  --replay-path runs/screw_sorting/replay/replay_journal.pkl \
   --steps 10000 \
   --batch-size 128 \
   --seed 0 \
-  --bc-weight 2.0 \
+  --bc-weight 10.0 \
   --q-weight 0.1 \
-  --output-dir runs/agilex_ethernet/offline_train_bcq
+  --output-dir runs/screw_sorting/offline_train_bcq
 ```
 
 Useful options:
@@ -120,8 +120,8 @@ Command template:
 
 ```bash
 python scripts/offline/eval_action_fit.py \
-  --replay-path runs/agilex_ethernet/replay/replay_journal.pkl \
-  --model-dir runs/agilex_ethernet/offline_train_bcq \
+  --replay-path runs/screw_sorting/replay/replay_journal.pkl \
+  --model-dir runs/screw_sorting/offline_train_bcq \
   --actor-mode mean
 ```
 
