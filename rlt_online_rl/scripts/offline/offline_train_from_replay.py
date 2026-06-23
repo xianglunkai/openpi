@@ -86,6 +86,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--actor-num-layers", type=int, default=2)
     parser.add_argument("--critic-hidden-dim", type=int, default=256)
     parser.add_argument("--critic-num-layers", type=int, default=2)
+    parser.add_argument("--reference-dropout-prob", type=float, default=0.0)
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--val-ratio", type=float, default=0.05)
     parser.add_argument(
@@ -702,6 +703,8 @@ def main() -> None:
         rl_config = dataclasses.replace(rl_config, critic_hidden_dim=args.critic_hidden_dim)
     if args.critic_num_layers is not None:
         rl_config = dataclasses.replace(rl_config, critic_num_layers=args.critic_num_layers)
+    if args.reference_dropout_prob is not None:
+        rl_config = dataclasses.replace(rl_config, reference_dropout_prob=args.reference_dropout_prob)
     records = filter_replay_records(
         _load_replay_records(replay_path),
         phase=args.phase,

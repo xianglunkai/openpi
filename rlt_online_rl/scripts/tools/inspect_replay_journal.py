@@ -76,12 +76,21 @@ def _resolve_journal_path(input_path: Path) -> Path:
     raise FileNotFoundError(f"Could not find replay journal under {path}")
 
 
+class _NumpyCompatUnpickler(pickle.Unpickler):
+    """Load journals written with NumPy 2.x when running under NumPy 1.x."""
+
+    def find_class(self, module: str, name: str) -> object:
+        if module.startswith("numpy._core"):
+            module = module.replace("numpy._core", "numpy.core", 1)
+        return super().find_class(module, name)
+
+
 def _load_records(journal_path: Path) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     with journal_path.open("rb") as f:
         while True:
             try:
-                item = pickle.load(f)
+                item = _NumpyCompatUnpickler(f).load()
             except EOFError:
                 break
             if isinstance(item, dict):
