@@ -741,7 +741,7 @@ class EnvDriver:
             plan_request_count = 0
 
             def _policy_planner(plan_observation: dict[str, Any], local_step: int) -> PolicyPlan:
-                """单次规划：取特征 -> Actor 精修 ref_chunk -> 可选人工接管/安全裁剪。"""
+             
                 nonlocal fallback_count, intervention_count, plan_request_count
                 # Machine A 特征 + ref_chunk（baseline 动作块）
                 current = normalize_feature_payload(
@@ -1426,7 +1426,7 @@ class EnvDriver:
         return records
 
     def run_forever(self, *, num_episodes: int | None = None) -> None:
-        logger.info("EnvDriver entering rollout loop num_episodes=%d", num_episodes)
+      
         episode_id = self._next_episode_id()
         session_episode_count = 0
         logger.info("EnvDriver resuming episode numbering from episode_id=%s", episode_id)
@@ -1436,8 +1436,9 @@ class EnvDriver:
                 episode_id += 1
                 session_episode_count += 1
         finally:
+            print("close")
             self.close()
-        logger.debug("EnvDriver rollout loop completed num_episodes=%s", num_episodes)
+        logger.debug("EnvDriver rollout loop completed num_episodes")
 
     def _execute_chunk(
         self,

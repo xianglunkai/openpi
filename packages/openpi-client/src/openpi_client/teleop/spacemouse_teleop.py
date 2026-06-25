@@ -43,15 +43,15 @@ class SpacemouseTeleopConfig(TeleoperatorConfig):
     device: str = ""
     end_effector_step_sizes: dict[str, float] = field(
         default_factory=lambda: {
-            "x": 0.02,
-            "y": 0.02,
-            "z": 0.02,
+            "x": 0.2,
+            "y": 0.2,
+            "z": 0.2,
             "roll": 0.0,
             "pitch": 0.0,
             "yaw": 0.0,
         }
     )
-    deadzone: float = 0.05
+    deadzone: float = 0.005
 
 
 class SpacemouseTeleop(Teleoperator):

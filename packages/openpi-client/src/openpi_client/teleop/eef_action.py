@@ -33,10 +33,9 @@ class EefActionConverter:
         gripper_open: float = 0.03,
         gripper_close: float = 0.0,
         input_fps: float = 30.0,
+        velocity_filter_cutoff_hz: float = 5.0,
+        dls_damping: float = 0.1,
         command_timeout_s: float = 0.5,
-        joint_velocity_limits: np.ndarray | list[float] | None = None,
-        joint_acceleration_limits: np.ndarray | list[float] | None = None,
-        joint_jerk_limits: np.ndarray | list[float] | None = None,
     ) -> None:
         self._kinematics = kinematics
         self._get_joint_positions = get_joint_positions
@@ -46,83 +45,76 @@ class EefActionConverter:
         self._dt = 1.0 / max(float(input_fps), 1.0)
         self._command_timeout_s = max(float(command_timeout_s), 0.0)
 
-        # Fallback online smoother (velocity/acceleration/jerk constrained).
-        default_v = np.array([0.785, 0.785, 0.785, 0.785, 0.785, 0.785], dtype=np.float64)
-        default_a = np.array([1.57, 1.57, 1.57, 1.57, 1.57, 1.57], dtype=np.float64)
-        default_j = np.array([6.28, 6.28, 6.28, 6.28, 6.28, 6.28], dtype=np.float64)
-        self._joint_velocity_limits = _as_limit_array(joint_velocity_limits, default_v, "joint_velocity_limits")
-        self._joint_acceleration_limits = _as_limit_array(
-            joint_acceleration_limits,
-            default_a,
-            "joint_acceleration_limits",
-        )
-        self._joint_jerk_limits = _as_limit_array(joint_jerk_limits, default_j, "joint_jerk_limits")
-        self._fallback_qd = np.zeros(6, dtype=np.float64)
-        self._fallback_qdd = np.zeros(6, dtype=np.float64)
-        self._last_call_s: float | None = None
+        self._last_call_eef_time: float | None = None
+        self._servo_joint_state_initialized = False
+        self._integrated_q = None
+        self._filtered_vel = np.zeros(6, dtype=np.float64)
+        self._velocity_filter_cutoff_hz = velocity_filter_cutoff_hz
+        self._dls_damping = dls_damping
+ 
 
     def __call__(self, ee_command: dict) -> Optional[dict]:
         now = time.time()
-        if self._last_call_s is not None and (now - self._last_call_s) > self._command_timeout_s:
-            self._fallback_qd[:] = 0.0
-            self._fallback_qdd[:] = 0.0
-        if self._last_call_s is not None:
-            dt = float(np.clip(now - self._last_call_s, 1e-3, 0.1))
-        else:
-            dt = self._dt
-        self._last_call_s = now
+        if self._last_call_eef_time is not None:
+            if now - self._last_call_eef_time > self._command_timeout_s:
+                self._servo_joint_state_initialized = False
+                self._integrated_q = None
+                self._filtered_vel.fill(0.0)
+        self._last_call_eef_time = now
 
-        converted = teleop_eef_to_actions(
-            ee_command,
-            kinematics=self._kinematics,
-            get_joint_positions=self._get_joint_positions,
-            gripper_open=self._gripper_open,
-            gripper_close=self._gripper_close,
-        )
-        if converted is None:
-            return None
-        q_target = np.asarray(converted["actions"], dtype=np.float64).reshape(-1)
-        if q_target.shape[0] < 7:
-            return converted
-        q_raw = np.asarray(self._get_joint_positions(), dtype=np.float64).reshape(-1)
-        if q_raw.shape[0] < 7:
-            return converted
-        # q_target[:6] = self._apply_internal_smoother(q_raw[:6], q_target[:6], dt)
+        dt = self._dt
+        delta_x = ee_command.get("delta_x", 0.0)
+        delta_y = ee_command.get("delta_y", 0.0)
+        delta_z = ee_command.get("delta_z", 0.0)
+        delta_roll = ee_command.get("delta_roll", 0.0)
+        delta_pitch = ee_command.get("delta_pitch", 0.0)
+        delta_yaw = ee_command.get("delta_yaw", 0.0)
+        gripper = ee_command.get("gripper", 1.0)
+
+        raw_vel = np.array([delta_x, delta_y, delta_z, delta_roll, delta_pitch, delta_yaw],
+                        dtype=np.float64)
+        
+        fc = self._velocity_filter_cutoff_hz
+        alpha = 2.0 * np.pi * fc * dt
+        alpha = np.clip(alpha, 0.0, 1.0)
+        self._filtered_vel = (1.0 - alpha) * self._filtered_vel + alpha * raw_vel
+        v_filt = self._filtered_vel
+
+        
+        q_raw = self._get_joint_positions()
+        q = np.array(q_raw[:-1], dtype=np.float64)  
+        if self._integrated_q is None or not self._servo_joint_state_initialized:
+            if self._kinematics.use_rad:
+                self._integrated_q = q.copy()
+            else:
+                self._integrated_q = np.deg2rad(q.copy())
+            self._servo_joint_state_initialized = True
+
+        lambda_dls = self._dls_damping
+        J_pinv = self._kinematics.get_damped_pinv(self._integrated_q, damping=lambda_dls)
+        q_dot = J_pinv @ v_filt
+        self._integrated_q = self._integrated_q + q_dot * dt
+
+        if self._kinematics.use_rad:
+            desired_q = self._integrated_q
+        else:
+            desired_q = np.rad2deg(self._integrated_q)
+
+        q_target = np.zeros(7)
+        q_target[:-1] = desired_q
+
+        gripper_mode = _decode_gripper_mode(gripper)
+        if gripper_mode == 0:
+            q_target[-1] = 0.0
+        elif gripper_mode == 1:
+            q_target[-1] = q_raw[-1]
+        elif gripper_mode == 2:
+            q_target[-1] = self._gripper_open
+        else:
+            q_target[-1] = q_raw[-1]
+
         return {"actions": q_target.astype(np.float32)}
 
-    def _apply_internal_smoother(self, q_current: np.ndarray, q_target: np.ndarray, dt: float) -> np.ndarray:
-        """Rate-limit target joints using velocity/acceleration/jerk constraints."""
-        dt = max(float(dt), 1e-3)
-        v_lim = self._joint_velocity_limits
-        a_lim = self._joint_acceleration_limits
-        j_lim = self._joint_jerk_limits
-
-        v_des = np.clip((q_target - q_current) / dt, -v_lim, v_lim)
-        a_des = np.clip((v_des - self._fallback_qd) / dt, -a_lim, a_lim)
-
-        da = a_des - self._fallback_qdd
-        da_lim = j_lim * dt
-        a_cmd = self._fallback_qdd + np.clip(da, -da_lim, da_lim)
-
-        v_cmd = np.clip(self._fallback_qd + a_cmd * dt, -v_lim, v_lim)
-        q_cmd = q_current + v_cmd * dt
-
-        self._fallback_qd = v_cmd
-        self._fallback_qdd = a_cmd
-        return q_cmd
-
-
-def _as_limit_array(
-    value: np.ndarray | list[float] | None,
-    default: np.ndarray,
-    name: str,
-) -> np.ndarray:
-    if value is None:
-        return default.copy()
-    arr = np.asarray(value, dtype=np.float64).reshape(-1)
-    if arr.shape[0] != default.shape[0]:
-        raise ValueError(f"{name} must contain {default.shape[0]} entries, got {arr.shape[0]}")
-    return np.maximum(arr, 1e-6)
 
 
 def _decode_gripper_mode(value: float) -> int:

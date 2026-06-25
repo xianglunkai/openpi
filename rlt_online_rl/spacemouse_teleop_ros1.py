@@ -113,19 +113,13 @@ class TeleopStatusClient:
         return parsed if parsed is not None else "unknown"
 
 
-def _joint_names_for_arm(arm: str) -> list[str]:
-    if arm == "left":
-        return [f"left_joint{i}" for i in range(6)]
-    return [f"right_joint{i}" for i in range(6)]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SpaceMouse teleop for ROS1 AgileX single-arm.")
     parser.add_argument("--arm", choices=("left", "right"), default="right")
     parser.add_argument("--joint_topic", type=str, default="/puppet/joint_right")
     parser.add_argument("--cmd_topic", type=str, default="/master/joint_right")
     parser.add_argument("--fps", type=float, default=30.0)
-    parser.add_argument("--space_mouse_deadzone", type=float, default=0.0)
+    parser.add_argument("--space_mouse_deadzone", type=float, default=0.005)
     parser.add_argument("--teleop_status_service", type=str, default=TELEOP_STATUS_SERVICE)
     parser.add_argument("--joint_state_timeout_s", type=float, default=0.2)
     parser.add_argument("--urdf_path", type=str, default="")
@@ -142,7 +136,6 @@ def main() -> None:
 
     kinematics = EefKinematics.for_agilex_cobot(
         urdf_path=args.urdf_path or None,
-        joint_names=_joint_names_for_arm(args.arm),
         use_rad=True,
     )
 
@@ -190,9 +183,11 @@ def main() -> None:
 
             publish_allowed = False
             now = time.time()
+            # If status service is not available, keep retrying periodically in case rollout starts after teleop.
             if not status_client.available and now - last_status_retry_s >= status_retry_interval_s:
                 status_client._connect(wait_timeout_s=status_retry_interval_s)
                 last_status_retry_s = now
+                
             if status_client.available:
                 mode = status_client.get_mode()
                 if mode in {"teleop", "policy", "reset"} and mode != last_announced_mode:
@@ -200,21 +195,24 @@ def main() -> None:
                     last_announced_mode = mode
                 publish_allowed = mode == "teleop"
 
-            converted = converter(action)
-            target: np.ndarray | None = None
-            if converted is not None and "actions" in converted:
-                target = np.asarray(converted["actions"], dtype=np.float64).reshape(-1)
-                if target.shape[0] >= 7:
-                    last_cmd = target[:7].copy()
-            elif publish_allowed and last_cmd is not None:
-                target = last_cmd
-
-            if publish_allowed and target is not None and target.shape[0] >= 7:
-                msg = JointState()
-                msg.header = Header(stamp=rospy.Time.now())
-                msg.name = ["joint0", "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
-                msg.position = target[:7].tolist()
-                pub.publish(msg)
+            if publish_allowed:
+                
+                converted = converter(action)
+                target: np.ndarray | None = None
+                if converted is not None and "actions" in converted:
+                    target = np.asarray(converted["actions"], dtype=np.float64).reshape(-1)
+                    if target.shape[0] >= 7:
+                        last_cmd = target[:7].copy()
+                elif publish_allowed and last_cmd is not None:
+                    target = last_cmd
+                
+                if target is not None and target.shape[0] >= 7:
+                    msg = JointState()
+                    msg.header = Header(stamp=rospy.Time.now())
+                    msg.name = ["joint0", "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+                    msg.position = target[:7].tolist()
+                    pub.publish(msg)
+                    
             rate.sleep()
     finally:
         teleop.disconnect()

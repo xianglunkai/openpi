@@ -22,6 +22,7 @@ class EefKinematicsConfig:
             "right_joint3",
             "right_joint4",
             "right_joint5",
+            'gripper_frame_joint'
         ]
     )
     use_rad: bool = True
@@ -59,9 +60,13 @@ class EefKinematics:
         self.ik_position_weight = ik_position_weight
         self.ik_orientation_weight = ik_orientation_weight
 
+        # If joint_names is None, use all joints from the URDF (including gripper); otherwise use provided list.
         self.with_gripper_joint_names = list(self.robot.joint_names()) if joint_names is None else joint_names
+        
+        # Remove gripper joint from joint_names if it's included, since FK/IK will only consider arm joints. Assumes gripper joint is last in the list.
         self.joint_names = self.with_gripper_joint_names[:-1]
 
+        # Add tip frame as a task to the solver. This frame will be used for IK target pose.
         self.tip_frame = self.solver.add_frame_task(self.target_frame_name, np.eye(4))
 
     @classmethod
@@ -86,7 +91,7 @@ class EefKinematics:
     ) -> EefKinematics:
         """Factory with agilex_cobot defaults."""
         cfg = EefKinematicsConfig(
-            urdf_path=urdf_path or EefKinematicsConfig.urdf_path,
+            urdf_path= urdf_path or EefKinematicsConfig.urdf_path,
             target_frame_name=target_frame_name,
             joint_names=joint_names or EefKinematicsConfig().joint_names,
             use_rad=use_rad,
@@ -146,3 +151,37 @@ class EefKinematics:
             result[len(self.joint_names) :] = current_joint_pos[len(self.joint_names) :]
             return result
         return joint_pos_out
+
+    def _arm_jacobian(self) -> np.ndarray:
+        """6×n Jacobian for the controlled arm joints at the target frame."""
+        try:
+            j_full = self.robot.frame_jacobian(self.target_frame_name, "world")
+            j_cols = [self.robot.get_joint_v_offset(joint_name) for joint_name in self.joint_names]
+            return j_full[:, j_cols]
+        except (TypeError, AttributeError, RuntimeError):
+            # Older placo: joint_jacobian(joint) returns the chain Jacobian at that joint.
+            return self.robot.joint_jacobian(self.joint_names[-1], "world")
+
+    def get_damped_pinv(self, joint_pos_rad: np.ndarray, damping: float = 0.1) -> np.ndarray:
+        """
+        给定关节角(弧度)，返回当前构型的阻尼最小二乘伪逆 (6×n)。
+        用于速度级遥操作。
+        """
+        # 更新 robot 到当前关节角
+        if len(joint_pos_rad) != len(self.joint_names):
+            raise ValueError(
+                f"Expected {len(self.joint_names)} arm joint values, got {len(joint_pos_rad)}. "
+                f"Arm joints: {self.joint_names}. "
+                f"If you passed only arm names to joint_names, append the gripper "
+                f"(e.g. fr_joint7) as the last element — RobotKinematics always excludes it."
+            )
+        for i, joint_name in enumerate(self.joint_names):
+            self.robot.set_joint(joint_name, float(joint_pos_rad[i]))
+        self.robot.update_kinematics()
+
+        j = self._arm_jacobian()
+
+        # 阻尼伪逆
+        jj_t = j @ j.T
+        damped_inv = j.T @ np.linalg.inv(jj_t + damping**2 * np.eye(6))
+        return damped_inv

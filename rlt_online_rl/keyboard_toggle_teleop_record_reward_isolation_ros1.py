@@ -20,7 +20,10 @@ HW_TELEOP_TRIGGER_SERVICE = "/teleop_trigger"
 TELEOP_STATUS_SERVICE = "/teleop_status"
 SHUTDOWN_ROLLOUT_SERVICE = "/shutdown_rollout"
 HW_TELEOP_SETTLE_SEC = 1.0
-
+# Ignore repeated Space/t within this window (keyboard auto-repeat / double-tap).
+TELEOP_TOGGLE_DEBOUNCE_SEC = 0.5
+# After a handled toggle, discard any extra Space/t already buffered by the OS.
+TELEOP_TOGGLE_DRAIN_SEC = 0.15
 
 def getch():
     fd = sys.stdin.fileno()
@@ -47,11 +50,30 @@ def getkey():
         return "RIGHT"
     return ch
 
+def drain_pending_toggle_keys(*, window_sec: float = TELEOP_TOGGLE_DRAIN_SEC) -> None:
+    """Drop buffered Space/t key repeats so one physical press does not toggle twice."""
+    deadline = time.monotonic() + max(float(window_sec), 0.0)
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.02)
+            if not ready:
+                continue
+            ch = sys.stdin.read(1)
+            if ch not in {" ", "t"}:
+                rospy.logdebug("Stopped toggle key drain after unexpected key %r.", ch)
+                break
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
 
 class KeyboardTeleopRecordRewardToggleRos1:
     def __init__(self):
         self._last_announced_mode = None
         self.control_mode = "unknown"
+        self._last_teleop_toggle_at = 0.0
         self._hw_teleop_available = self._probe_hw_teleop_service()
         self.rl_teleop_cli = self._make_client(RL_TELEOP_TRIGGER_SERVICE)
         self.hw_teleop_cli = self._make_client(HW_TELEOP_TRIGGER_SERVICE)
@@ -204,6 +226,16 @@ class KeyboardTeleopRecordRewardToggleRos1:
         return bool(resp.success)
 
     def toggle_teleop(self):
+        now = time.monotonic()
+        elapsed = now - self._last_teleop_toggle_at
+        if elapsed < TELEOP_TOGGLE_DEBOUNCE_SEC:
+            rospy.logwarn(
+                "Teleop toggle ignored (debounce %.2fs remaining). Press Space/t once, then wait.",
+                TELEOP_TOGGLE_DEBOUNCE_SEC - elapsed,
+            )
+            return
+        self._last_teleop_toggle_at = now
+
         if not self.refresh_teleop_mode():
             return
         if self.control_mode == "reset":
@@ -288,6 +320,7 @@ def main():
             ch = getkey()
             if ch in {" ", "t"}:
                 node.toggle_teleop()
+                drain_pending_toggle_keys()
             elif ch in {"RIGHT", "o"}:
                 node.request_next_episode()
             elif ch == "s":
