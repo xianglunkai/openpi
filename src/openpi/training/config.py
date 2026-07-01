@@ -1585,6 +1585,60 @@ _CONFIGS = [
         wandb_enabled = True,
     ),
 
+
+
+    TrainConfig(
+        name="pi05_cobot_screw_sorting_single",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotSingleArmDataConfig(
+            repo_id="screw_sorting",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_cobot_screw_sorting_single",
+                asset_id="screw_sorting_single",
+            ),
+            default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
+      
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 8,
+        # Number of train steps (batches) to run.
+        num_train_steps=30_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 100,
+        # How often (in steps) to save checkpoints.
+        save_interval= 5000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = True,
+    ),
+
     #
     # RLT (Representation Learning Token) configs.
     # Here, we illustrate how to use the RLTTrainer by training a pi05 model with RLT on the screw sorting dataset. You can modify the model and data configs to train on other datasets as well. For more details on RLT and how to use it, see the documentation and the tutorial notebook in examples/rlt.
