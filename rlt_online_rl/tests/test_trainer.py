@@ -110,6 +110,34 @@ def test_soft_update_changes_target_params() -> None:
     assert any(not np.allclose(np.asarray(o), np.asarray(n)) for o, n in zip(leaves_old, leaves_new, strict=True))
 
 
+def test_target_critic_updates_without_actor_update() -> None:
+    cfg = _config()
+    state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(2))
+    batch = {k: jax.numpy.asarray(v) for k, v in _batch(cfg).items()}
+    target_critic_before = jax.tree.map(np.asarray, state.target_critic_params)
+    target_actor_before = jax.tree.map(np.asarray, state.target_actor_params)
+    state, metrics = train_step(state, batch, actor=actor, critic=critic, rl_config=cfg)
+    assert int(metrics["did_actor_update"]) == 0
+    target_critic_after = jax.tree.map(np.asarray, state.target_critic_params)
+    target_actor_after = jax.tree.map(np.asarray, state.target_actor_params)
+    assert any(
+        not np.allclose(np.asarray(old), np.asarray(new))
+        for old, new in zip(
+            jax.tree.leaves(target_critic_before),
+            jax.tree.leaves(target_critic_after),
+            strict=True,
+        )
+    )
+    assert all(
+        np.allclose(np.asarray(old), np.asarray(new))
+        for old, new in zip(
+            jax.tree.leaves(target_actor_before),
+            jax.tree.leaves(target_actor_after),
+            strict=True,
+        )
+    )
+
+
 def test_learner_service_exports_actor_snapshot(tmp_path) -> None:
     cfg = _config()
     service_cfg = LearnerServiceConfig(

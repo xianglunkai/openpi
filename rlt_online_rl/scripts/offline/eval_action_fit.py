@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
         help="Optional explicit actor snapshot/checkpoint path. Overrides --model-dir auto resolution.",
     )
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--disable-ref-input", action="store_true", help="Only used when compare_target=snapshot.")
     parser.add_argument("--compare-target", choices=("snapshot", "recorded-action"), default="snapshot")
     parser.add_argument(

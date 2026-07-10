@@ -25,6 +25,7 @@ Plot learner metrics from an online run directory or an offline training directo
 Examples:
 python3 scripts/tools/plot_learner_metrics.py runs/agilex_ethernet
 python3 scripts/tools/plot_learner_metrics.py runs/agilex_ethernet/offline_train_bcq
+python3 scripts/tools/plot_learner_metrics.py runs/screw_sorting --latest-run-only
 """
 
 EMA_ALPHA = 0.1
@@ -38,6 +39,23 @@ def _parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("input_path", type=Path, help="Run dir, offline dir, logs dir, or metrics jsonl path.")
+    parser.add_argument(
+        "--latest-run-only",
+        action="store_true",
+        default=False,
+        help="Plot only the latest training run when global_step resets in metrics jsonl.",
+    )
+    parser.add_argument(
+        "--all-runs",
+        action="store_true",
+        help="Plot all runs in metrics jsonl (overrides --latest-run-only).",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional output png path. Defaults to <run-dir>/plots/learner_curves.png",
+    )
     return parser.parse_args()
 
 
@@ -74,6 +92,18 @@ def _load_records(metrics_path: Path) -> list[dict]:
     return records
 
 
+def _latest_run_records(records: list[dict]) -> list[dict]:
+    if len(records) <= 1:
+        return records
+    start_idx = 0
+    for i in range(1, len(records)):
+        if float(records[i]["global_step"]) < float(records[i - 1]["global_step"]):
+            start_idx = i
+    if start_idx == 0:
+        return records
+    return records[start_idx:]
+
+
 def _ema(values: np.ndarray, *, alpha: float = EMA_ALPHA) -> np.ndarray:
     if values.size == 0:
         return values
@@ -92,11 +122,7 @@ def _series(records: list[dict], key: str, *, default: float = np.nan) -> np.nda
     return np.asarray([float(record.get(key, default)) for record in records], dtype=np.float64)
 
 
-def main() -> int:
-    args = _parse_args()
-    output_root, metrics_path = _resolve_metrics_path(args.input_path)
-    records = _load_records(metrics_path)
-
+def _plot_records(records: list[dict], *, output_root: Path, output_path: Path) -> None:
     steps = _series(records, "global_step")
     critic_loss = _series(records, "critic_loss")
     did_actor_update = np.asarray([float(record.get("did_actor_update", 1.0)) > 0.5 for record in records], dtype=bool)
@@ -117,7 +143,7 @@ def main() -> int:
     ax.set_title("Critic Loss")
     ax.set_xlabel("global_step")
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8)
 
     ax = axes[0, 1]
     if actor_steps.size > 0:
@@ -126,7 +152,7 @@ def main() -> int:
     ax.set_title("Actor Loss")
     ax.set_xlabel("global_step")
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8)
 
     ax = axes[1, 0]
     if actor_steps.size > 0:
@@ -137,21 +163,37 @@ def main() -> int:
     ax.set_title("Actor Q / BC")
     ax.set_xlabel("global_step")
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8)
 
     ax = axes[1, 1]
     ax.plot(steps, replay_size, color="tab:purple", linewidth=2.0, label="replay_size")
     ax.set_title("Replay Size")
     ax.set_xlabel("global_step")
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8)
 
-    fig.suptitle(output_root.name)
-    plots_dir = output_root / "plots"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    output_path = plots_dir / "learner_curves.png"
+    last_step = int(steps[-1]) if steps.size else 0
+    fig.suptitle(f"{output_root.name}  (latest run, step={last_step}, n={len(records)})")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=180)
     plt.close(fig)
+
+
+def main() -> int:
+    args = _parse_args()
+    latest_run_only = args.latest_run_only and not args.all_runs
+    output_root, metrics_path = _resolve_metrics_path(args.input_path)
+    all_records = _load_records(metrics_path)
+    records = _latest_run_records(all_records) if latest_run_only else all_records
+    if latest_run_only and len(records) != len(all_records):
+        print(f"plotting latest run only: {len(records)}/{len(all_records)} rows from {metrics_path.name}")
+
+    output_path = (
+        args.output.resolve()
+        if args.output is not None
+        else (output_root / "plots" / "learner_curves.png").resolve()
+    )
+    _plot_records(records, output_root=output_root, output_path=output_path)
     print(output_path)
     return 0
 

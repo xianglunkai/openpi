@@ -223,6 +223,7 @@ def _discounted_chunk_rewards(rewards: jax.Array, gamma: float) -> jax.Array:
     return jnp.sum(rewards * discounts[None, :], axis=-1)
 
 
+# build the TD target，the TD target is the discounted sum of the rewards and the bootstrap
 def build_td_target(
     target_actor: ChunkActor,
     target_actor_params: PyTree,
@@ -236,6 +237,7 @@ def build_td_target(
     gamma: float,
     rng: jax.Array,
 ) -> jax.Array:
+    # sample the next action，the action is sampled from the target actor
     next_action = target_actor.sample_action(
         target_actor_params,
         rng,
@@ -244,12 +246,17 @@ def build_td_target(
         next_ref_chunk,
         deterministic=False,
     )
+    # compute the next Q-values，the Q-values are computed from the target critic
     next_q1, next_q2 = target_critic.q_values(target_critic_params, next_z_rl, next_proprio, next_action)
+    # compute the bootstrap，the bootstrap is the discounted sum of the rewards and the minimum of the next Q-values
     bootstrap = (1.0 - done.astype(rewards.dtype)) * (gamma ** rewards.shape[-1]) * jnp.minimum(next_q1, next_q2)
+    # compute the TD target，the TD target is the discounted sum of the rewards and the bootstrap
     return _discounted_chunk_rewards(rewards, gamma) + bootstrap
 
 
+# compute the actor loss，the loss is the mean of the Q-values minus the mean of the behavior cloning penalty
 def compute_actor_loss(
+    # compute the actor loss，the loss is the mean of the Q-values minus the mean of the behavior cloning penalty
     actor: ChunkActor,
     actor_params: PyTree,
     critic: TwinCritic,
@@ -273,44 +280,3 @@ def compute_actor_loss(
         "bc_penalty": bc_penalty,
     }
     return actor_loss, metrics
-
-
-def compute_critic_loss(
-    critic: TwinCritic,
-    critic_params: PyTree,
-    actor: ChunkActor,
-    target_actor_params: PyTree,
-    target_critic_params: PyTree,
-    z_rl: jax.Array,
-    proprio: jax.Array,
-    action_chunk: jax.Array,
-    rewards: jax.Array,
-    done: jax.Array,
-    next_z_rl: jax.Array,
-    next_proprio: jax.Array,
-    next_ref_chunk: jax.Array,
-    gamma: float,
-    rng: jax.Array,
-) -> tuple[jax.Array, dict[str, jax.Array]]:
-    q1, q2 = critic.q_values(critic_params, z_rl, proprio, action_chunk)
-    target_q = build_td_target(
-        actor,
-        target_actor_params,
-        critic,
-        target_critic_params,
-        next_z_rl,
-        next_proprio,
-        next_ref_chunk,
-        rewards,
-        done,
-        gamma,
-        rng,
-    )
-    critic_loss = jnp.mean(jnp.square(q1 - target_q)) + jnp.mean(jnp.square(q2 - target_q))
-    metrics = {
-        "critic_loss": critic_loss,
-        "q1_mean": jnp.mean(q1),
-        "q2_mean": jnp.mean(q2),
-        "target_q_mean": jnp.mean(target_q),
-    }
-    return critic_loss, metrics

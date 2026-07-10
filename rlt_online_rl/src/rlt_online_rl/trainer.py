@@ -24,7 +24,7 @@ from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import PyTree
 from rlt_online_rl.networks import TwinCritic
 from rlt_online_rl.networks import apply_reference_dropout
-from rlt_online_rl.networks import compute_critic_loss
+from rlt_online_rl.critic_loss import compute_critic_loss
 from rlt_online_rl.replay import COLLECTION_PHASE_ONLINE
 from rlt_online_rl.replay import COLLECTION_PHASE_WARMUP
 from rlt_online_rl.replay import ReplayBatchSource
@@ -143,28 +143,33 @@ def update_critic(
             critic,
             critic_params,
             actor,
+            state.actor_params,
             state.target_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],
             batch["action_chunk"],
+            batch["ref_chunk"],
             batch["rewards"],
             batch["done"],
             batch["next_z_rl"],
             batch["next_proprio"],
             batch["next_ref_chunk"],
-            rl_config.gamma,
+            rl_config,
             critic_rng,
         )
-
+    # compute the critic loss and the gradients
     (critic_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.critic_params)
+    # update the critic parameters
     updates, critic_opt_state = state.critic_tx.update(grads, state.critic_opt_state, state.critic_params)
+    # apply the updates to the critic parameters
     critic_params = optax.apply_updates(state.critic_params, updates)
     new_state = state.replace(
         critic_params=critic_params,
         critic_opt_state=critic_opt_state,
         rng=next_rng,
     )
+    # compute the metrics
     metrics = {
         **metrics,
         "critic_loss": critic_loss,
@@ -186,15 +191,18 @@ def update_actor(
     action_q01: jax.Array | None = None,
     action_q99: jax.Array | None = None,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
+    # split the random key
     actor_rng, next_rng = jax.random.split(state.rng)
-
+    # define the actor loss function
     def loss_fn(actor_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
         dropout_rng, sample_rng = jax.random.split(actor_rng)
+        # apply reference dropout
         dropped_ref = apply_reference_dropout(
             dropout_rng,
             batch["ref_chunk"],
             rl_config.reference_dropout_prob,
         )
+        # sample the action
         action_chunk = actor.sample_action(
             actor_params,
             sample_rng,
@@ -203,31 +211,43 @@ def update_actor(
             dropped_ref,
             deterministic=False,
         )
+        # compute the Q-values
         q1, _ = critic.q_values(
             state.critic_params,
             batch["z_rl"],
             batch["proprio"],
             action_chunk,
         )
+       
         source_chunk = batch["source_chunk"]
+        # compute the human mask
         human_mask = jnp.logical_or(
             source_chunk == int(TransitionSource.HUMAN),
             source_chunk == int(TransitionSource.MIXED),
         )
+        # convert the human mask to float
         human_mask_f = human_mask.astype(jnp.float32)
         policy_mask_f = 1.0 - human_mask_f
+        # compute the behavior cloning target，if the action is human or mixed, use the action chunk, otherwise use the reference chunk
         bc_target = jnp.where(human_mask[..., None], batch["action_chunk"], batch["ref_chunk"])
+        # compute the behavior cloning error，the error is the difference between the action chunk and the behavior cloning target
         bc_error = jnp.mean(jnp.square(action_chunk - bc_target), axis=-1)
+        # compute the reference error，the error is the difference between the action chunk and the reference chunk
         ref_error = jnp.mean(jnp.square(action_chunk - batch["ref_chunk"]), axis=-1)
+        # compute the human error，the error is the difference between the action chunk and the action chunk
         human_error = jnp.mean(jnp.square(action_chunk - batch["action_chunk"]), axis=-1)
+        # compute the behavior cloning penalty
         bc_penalty = jnp.mean(bc_error)
+        # compute the reference penalty
         bc_ref_penalty = jnp.sum(ref_error * policy_mask_f) / jnp.maximum(jnp.sum(policy_mask_f), 1.0)
+        # compute the human penalty
         bc_human_penalty = jnp.sum(human_error * human_mask_f) / jnp.maximum(jnp.sum(human_mask_f), 1.0)
         human_mask_ratio = jnp.mean(human_mask_f)
         if not use_action_adapter:
             pred_abs_chunk = action_chunk
             target_abs_chunk = bc_target
         else:
+            # denormalize the action chunk to absolute chunk
             pred_abs_chunk = jax_denormalize_to_abs_chunk(
                 action_chunk,
                 batch["proprio"],
@@ -235,6 +255,7 @@ def update_actor(
                 action_q99,
                 action_representation=rl_config.action_representation,
             )
+            # denormalize the behavior cloning target to absolute chunk
             target_abs_chunk = jax_denormalize_to_abs_chunk(
                 bc_target,
                 batch["proprio"],
@@ -242,14 +263,23 @@ def update_actor(
                 action_q99,
                 action_representation=rl_config.action_representation,
             )
+        # compute the delta penalty
         pred_step_delta = pred_abs_chunk[:, 1:, :6] - pred_abs_chunk[:, :-1, :6]
+        # compute the target delta
         target_step_delta = target_abs_chunk[:, 1:, :6] - target_abs_chunk[:, :-1, :6]
+        # compute the delta penalty，the penalty is the difference between the predicted delta and the target delta
         delta_penalty = jnp.mean(jnp.square(pred_step_delta - target_step_delta))
+        # compute the actor Q-value，the Q-value is the mean of the Q-values
         actor_q = jnp.mean(q1)
+        # compute the weighted behavior cloning penalty，the penalty is the weight for the behavior cloning penalty
         weighted_bc = jnp.asarray(bc_weight, dtype=jnp.float32) * bc_penalty
+        # compute the weighted Q-value，the Q-value is the weight for the Q-value
         weighted_q = jnp.asarray(q_weight, dtype=jnp.float32) * actor_q
+        # compute the weighted delta penalty，the penalty is the weight for the delta penalty
         weighted_delta = jnp.asarray(delta_weight, dtype=jnp.float32) * delta_penalty
+        # compute the actor loss，the loss is the weighted behavior cloning penalty minus the weighted Q-value plus the weighted delta penalty
         actor_loss = weighted_bc - weighted_q + weighted_delta
+        # compute the metrics
         metrics = {
             "actor_loss": actor_loss,
             "actor_q": actor_q,
@@ -265,14 +295,19 @@ def update_actor(
         }
         return actor_loss, metrics
 
+    # compute the actor loss and the gradients
     (actor_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.actor_params)
+    # update the actor parameters
     updates, actor_opt_state = state.actor_tx.update(grads, state.actor_opt_state, state.actor_params)
+    # apply the updates to the actor parameters
     actor_params = optax.apply_updates(state.actor_params, updates)
+    # update the state
     new_state = state.replace(
         actor_params=actor_params,
         actor_opt_state=actor_opt_state,
         rng=next_rng,
     )
+    # compute the metrics
     metrics = {
         **metrics,
         "actor_loss": actor_loss,
@@ -295,9 +330,18 @@ def train_step(
     action_q01: jax.Array | None = None,
     action_q99: jax.Array | None = None,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
+    # update the critic
     state, critic_metrics = update_critic(state, batch, actor, critic, rl_config)
+    # keep the target critic aligned with every online critic step
+    state = state.replace(
+        target_critic_params=soft_update_targets(
+            state.target_critic_params, state.critic_params, rl_config.target_tau
+        )
+    )
+    # check if the actor should be updated
     should_update_actor = ((state.global_step + 1) % rl_config.actor_update_period) == 0
 
+    # initialize zero metrics
     zero_metrics = {
         "actor_loss": jnp.array(0.0, dtype=jnp.float32),
         "actor_q": jnp.array(0.0, dtype=jnp.float32),
@@ -311,7 +355,7 @@ def train_step(
         "weighted_delta": jnp.array(0.0, dtype=jnp.float32),
         "weighted_q": jnp.array(0.0, dtype=jnp.float32),
     }
-
+    # define the actor update function
     def do_actor_update(train_state: RLTTrainState) -> tuple[RLTTrainState, dict[str, jax.Array]]:
         updated_state, actor_metrics = update_actor(
             train_state,
@@ -329,23 +373,22 @@ def train_step(
         target_actor = soft_update_targets(
             updated_state.target_actor_params, updated_state.actor_params, rl_config.target_tau
         )
-        target_critic = soft_update_targets(
-            updated_state.target_critic_params, updated_state.critic_params, rl_config.target_tau
-        )
         updated_state = updated_state.replace(
             target_actor_params=target_actor,
-            target_critic_params=target_critic,
             actor_version=updated_state.actor_version + 1,
         )
         return updated_state, actor_metrics
 
+    # update the actor if needed
     state, actor_metrics = jax.lax.cond(
         should_update_actor,
         do_actor_update,
         lambda train_state: (train_state, zero_metrics),
         state,
     )
+    # update the global step
     state = state.replace(global_step=state.global_step + 1)
+    # combine the critic and actor metrics
     metrics = {
         **critic_metrics,
         **actor_metrics,
@@ -476,8 +519,11 @@ class LearnerService:
         return self._state
 
     def train_once(self, *, stop_event: Any | None = None) -> dict[str, float] | None:
+        # get replay buffer stats
         stats = self._replay_source.stats()
+        # refresh progress
         progress = self._refresh_progress(stats)
+        # check if warmup is complete, if not, wait for warmup
         if progress["replay_size"] < self._rl_config.warmup_min_size:
             now = time.time()
             if now - self._last_warmup_log_time >= 5.0:
@@ -488,8 +534,10 @@ class LearnerService:
                 )
                 self._last_warmup_log_time = now
             return None
+        # check if freeze after warmup is enabled, if so, wait for warmup to complete
         if self._rl_config.freeze_after_warmup and bool(progress["ready_for_online"]):
             if not self._freeze_logged:
+                # export actor snapshot
                 self.export_actor_snapshot(force=True)
                 logger.info(
                     "Warmup complete and freeze_after_warmup enabled; learner updates disabled at global_step=%s",
@@ -497,6 +545,7 @@ class LearnerService:
                 )
                 self._freeze_logged = True
             return None
+        # check if there is enough budget to update, if not, wait for budget to be available
         if self._pending_update_budget <= 0:
             now = time.time()
             if now - self._last_budget_idle_log_time >= 5.0:
@@ -510,13 +559,16 @@ class LearnerService:
                 self._last_budget_idle_log_time = now
             return None
 
+        # check if the training loop should be stopped, if so, exit
         if stop_event is not None and stop_event.is_set():
             return None
 
+        # sample a batch from the replay buffer
         batch_np = _ensure_source_chunk(
             self._replay_source.sample_batch(self._service_config.sample_batch_size),
             self._rl_config.chunk_len,
         )
+        # calculate sample metrics
         max_episode_id = int(stats.get("max_episode_id", -1))
         recent_window = int(stats.get("recent_episode_window", 20))
         recent_start_episode_id = max_episode_id - max(recent_window, 1) + 1
@@ -524,10 +576,13 @@ class LearnerService:
             batch_np,
             recent_start_episode_id=recent_start_episode_id,
         )
+        # prepare training batch
         if self._action_adapter is not None:
             batch_np = self._action_adapter.prepare_training_batch(batch_np)
         batch = {key: jnp.asarray(value) for key, value in batch_np.items()}
+        # resolve actor loss weights， bc_weight is the weight for the behavior cloning loss, q_weight is the weight for the Q-value loss
         bc_weight, q_weight = _resolve_actor_loss_weights(self._rl_config, progress)
+        # train the actor
         self._state, raw_metrics = train_step(
             self._state,
             batch,
@@ -541,8 +596,11 @@ class LearnerService:
             action_q01=self._action_q01,
             action_q99=self._action_q99,
         )
+        # refresh progress
         progress = self._refresh_progress(stats)
+        # convert raw metrics to float
         metrics = {key: float(value) for key, value in jax.device_get(raw_metrics).items()}
+        # add progress metrics
         metrics["replay_size"] = float(progress["replay_size"])
         metrics["adds_total"] = float(progress["adds_total"])
         metrics["pending_update_budget"] = float(progress["pending_update_budget"])

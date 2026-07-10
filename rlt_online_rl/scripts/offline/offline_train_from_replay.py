@@ -58,7 +58,7 @@ from rlt_online_rl.config import save_system_config_yaml
 from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import PyTree
 from rlt_online_rl.networks import TwinCritic
-from rlt_online_rl.networks import compute_critic_loss
+from rlt_online_rl.critic_loss import compute_critic_loss
 from rlt_online_rl.replay import TransitionSource
 from rlt_online_rl.trainer import RLTTrainState
 from rlt_online_rl.trainer import init_train_state
@@ -87,6 +87,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--critic-hidden-dim", type=int, default=256)
     parser.add_argument("--critic-num-layers", type=int, default=2)
     parser.add_argument("--reference-dropout-prob", type=float, default=0.0)
+    parser.add_argument(
+        "--critic-loss-mode",
+        choices=("td", "cql"),
+        default="td",
+        help="Critic objective: td = TD only; cql = TD + CQL conservative penalty.",
+    )
+    parser.add_argument("--cql-alpha", type=float, default=0.1, help="CQL penalty weight when critic-loss-mode=cql.")
+    parser.add_argument("--cql-n-actions", type=int, default=5, help="OOD action samples per transition for CQL.")
+    parser.add_argument("--cql-temp", type=float, default=1.0, help="CQL log-sum-exp temperature.")
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--val-ratio", type=float, default=0.05)
     parser.add_argument(
@@ -541,23 +550,27 @@ def _update_critic(
     disable_ref_input: bool,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
     critic_rng, next_rng = jax.random.split(state.rng)
+    ref_chunk = jnp.zeros_like(batch["ref_chunk"]) if disable_ref_input else batch["ref_chunk"]
+    next_ref_chunk = jnp.zeros_like(batch["next_ref_chunk"]) if disable_ref_input else batch["next_ref_chunk"]
 
     def loss_fn(critic_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
         return compute_critic_loss(
             critic,
             critic_params,
             actor,
+            state.actor_params,
             state.target_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],
             batch["action_chunk"],
+            ref_chunk,
             batch["rewards"],
             batch["done"],
             batch["next_z_rl"],
             batch["next_proprio"],
-            jnp.zeros_like(batch["next_ref_chunk"]) if disable_ref_input else batch["next_ref_chunk"],
-            rl_config.gamma,
+            next_ref_chunk,
+            rl_config,
             critic_rng,
         )
 
@@ -610,6 +623,13 @@ def _make_train_step(
             rl_config,
             disable_ref_input=disable_ref_input,
         )
+        state_after_critic = state_after_critic.replace(
+            target_critic_params=soft_update_targets(
+                state_after_critic.target_critic_params,
+                state_after_critic.critic_params,
+                rl_config.target_tau,
+            )
+        )
         should_update_actor = ((state_after_critic.global_step + 1) % rl_config.actor_update_period) == 0
 
         def do_actor_update(train_state: RLTTrainState) -> tuple[RLTTrainState, dict[str, jax.Array]]:
@@ -652,9 +672,6 @@ def _make_train_step(
                 target_actor_params=soft_update_targets(
                     updated_state.target_actor_params, updated_state.actor_params, rl_config.target_tau
                 ),
-                target_critic_params=soft_update_targets(
-                    updated_state.target_critic_params, updated_state.critic_params, rl_config.target_tau
-                ),
                 actor_version=updated_state.actor_version + 1,
             )
             metrics = {**metrics, "actor_loss": actor_loss}
@@ -684,6 +701,8 @@ def main() -> None:
     replay_path = args.replay_path.resolve()
     task_dir = infer_task_dir_from_replay_path(replay_path)
     default_output_name = "offline_train_bcq"
+    if args.critic_loss_mode == "cql":
+        default_output_name += "_cql"
     if args.disable_ref_input:
         default_output_name += "_noref"
     default_output_name += default_filter_suffix(phase=args.phase, source=args.source)
@@ -705,6 +724,13 @@ def main() -> None:
         rl_config = dataclasses.replace(rl_config, critic_num_layers=args.critic_num_layers)
     if args.reference_dropout_prob is not None:
         rl_config = dataclasses.replace(rl_config, reference_dropout_prob=args.reference_dropout_prob)
+    rl_config = dataclasses.replace(
+        rl_config,
+        critic_loss_mode=args.critic_loss_mode,
+        cql_alpha=args.cql_alpha,
+        cql_n_actions=args.cql_n_actions,
+        cql_temp=args.cql_temp,
+    )
     records = filter_replay_records(
         _load_replay_records(replay_path),
         phase=args.phase,
@@ -747,6 +773,7 @@ def main() -> None:
 
     metrics_path = output_dir / "metrics.jsonl"
     status_path = output_dir / "status.json"
+    metrics_path.write_text("", encoding="utf-8")
     best_actor_snapshot_path = output_dir / "best_actor_snapshot.pkl"
     best_critic_snapshot_path = output_dir / "best_critic_snapshot.pkl"
     final_actor_snapshot_path = output_dir / "final_actor_snapshot.pkl"
@@ -774,6 +801,10 @@ def main() -> None:
         "actor_num_layers": int(rl_config.actor_num_layers),
         "critic_hidden_dim": int(rl_config.critic_hidden_dim),
         "critic_num_layers": int(rl_config.critic_num_layers),
+        "critic_loss_mode": str(rl_config.critic_loss_mode),
+        "cql_alpha": float(rl_config.cql_alpha),
+        "cql_n_actions": int(rl_config.cql_n_actions),
+        "cql_temp": float(rl_config.cql_temp),
         "published_model_tag": "final",
         "rl_config": _portable_rl_config_dict(rl_config, output_dir / "experiment.json"),
     }
@@ -783,7 +814,8 @@ def main() -> None:
         f"replay={replay_path.name} phase={args.phase} source={args.source} "
         f"train={train_ds['z_rl'].shape[0]} val={val_ds['z_rl'].shape[0]} "
         f"steps={args.steps} batch={args.batch_size} bc_weight={args.bc_weight:.3f} q_weight={args.q_weight:.3f} "
-        f"fixed_std={rl_config.fixed_std:.4f} disable_ref_input={args.disable_ref_input}"
+        f"fixed_std={rl_config.fixed_std:.4f} disable_ref_input={args.disable_ref_input} "
+        f"critic_loss_mode={rl_config.critic_loss_mode} cql_alpha={rl_config.cql_alpha:.3f}"
     )
 
     best_val = float("inf")

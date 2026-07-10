@@ -20,7 +20,7 @@ class RLTOnlineRLConfig:
     chunk_len: int = 10
     z_dim: int = 2048
     proprio_dim: int = 7
-    action_representation: Literal["abs", "delta_chunk"] = "abs"
+    action_representation: Literal["abs", "delta_chunk"] = "delta_chunk"
     action_norm_stats_path: str | None = None
 
     gamma: float = 0.99
@@ -41,6 +41,16 @@ class RLTOnlineRLConfig:
     critic_lr: float = 3e-4
     target_tau: float = 5e-3
     actor_update_period: int = 2
+
+    critic_loss_mode: Literal["td", "cql"] = "td"
+    cql_alpha: float = 0.1
+    cql_n_actions: int = 5
+    cql_temp: float = 1.0
+    cql_action_sample_method: Literal["normal", "uniform"] = "normal"
+    cql_action_min: float = -1.0
+    cql_action_max: float = 1.0
+    cql_clip_diff_min: float = float("-inf")
+    cql_clip_diff_max: float = float("inf")
 
     warmup_min_size: int = 1_000
     warmup_post_collect_updates: int | None = None

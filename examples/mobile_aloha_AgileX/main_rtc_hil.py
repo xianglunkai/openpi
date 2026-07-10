@@ -22,7 +22,7 @@ class Args:
     # RTC parameters
     use_rtc: bool = True
     execution_horizon: int = 25
-    action_queue_size_to_get_new_actions: int = 35
+    action_queue_size_to_get_new_actions: int = 25
 
     # Action interpolation parameters
     inference_fps: int = 30
@@ -35,7 +35,7 @@ class Args:
     # HIL parameters (teleop / keyboard are enabled by default in RuntimeRTCHil)
     enable_keyboard: bool = True
     enable_teleop: bool = True
-    spacemouse_auto_intervene: bool = True
+    spacemouse_auto_intervene: bool = False
     play_sounds: bool = True
 
     # LeRobot dataset recording via remote service in openpi venv (see run_lerobot_recorder.sh).
