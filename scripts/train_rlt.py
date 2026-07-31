@@ -112,6 +112,7 @@ def _make_rlt_trainable_filter(alpha: float) -> nnx.filterlib.Filter:
 
 
 def _make_rlt_freeze_filter(alpha: float) -> nnx.filterlib.Filter:
+    """Params excluded from the optimizer when alpha==0 (everything except rlt_module)."""
     if alpha == 0.0:
         return nnx.All(nnx.Param, nnx.Not(nnx_utils.PathRegex(".*rlt_module.*")))
     return nnx.Nothing
@@ -172,7 +173,10 @@ class RLTTrainModel(nnx.Module):
         prefix_embs_f32 = prefix_embs_sg.astype(jnp.float32)
 
         # RL Token reconstruction loss (Lro)
-        rlt_loss, rlt_info = self.rlt_module(prefix_embs_f32, None, train=train)
+        # rlt_loss, rlt_info = self.rlt_module(prefix_embs_f32, None, train=train)
+        
+        # RL Token reconstruction loss (Lro); mask drops padded/missing camera tokens
+        rlt_loss, rlt_info = self.rlt_module(prefix_embs_f32, prefix_mask, train=train)
         mse = rlt_info["mse"]
 
         info = {"rlt_loss": rlt_loss, "mse": mse}
@@ -186,6 +190,22 @@ class RLTTrainModel(nnx.Module):
         return total_loss, info
 
 
+def _resolve_rlt_ema_decay(config: _config.TrainConfig, alpha: float) -> float | None:
+    """EMA is applied to the full param tree and checkpoints save ema_params for inference.
+
+    When alpha==0 the VLA is optimizer-frozen but would still be rewritten every step by EMA, and
+    that drifted copy is what gets served. Disable EMA in that case.
+    """
+    if alpha == 0.0:
+        if config.ema_decay is not None:
+            logging.warning(
+                "rlt_alpha=0: disabling ema_decay=%s so frozen VLA weights are checkpointed exactly",
+                config.ema_decay,
+            )
+        return None
+    return config.ema_decay
+
+
 @at.typecheck
 def init_train_state(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
@@ -193,8 +213,15 @@ def init_train_state(
     rlt_config = _create_rlt_config(config)
     alpha = _get_rlt_alpha(config)
     trainable_filter = _make_rlt_trainable_filter(alpha)
-    freeze_filter = _make_rlt_freeze_filter(alpha)
+    # freeze_filter = _make_rlt_freeze_filter(alpha)
+    ema_decay = _resolve_rlt_ema_decay(config, alpha)
     prefix_seq_len = _infer_prefix_seq_len(config.model)
+    logging.info(
+        "RLT init: alpha=%s trainable=%s ema_decay=%s (frozen VLA kept in float32)",
+        alpha,
+        "rlt_module_only" if alpha == 0.0 else "all_params",
+        ema_decay,
+    )
 
     tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
 
@@ -209,7 +236,9 @@ def init_train_state(
             model = nnx.merge(graphdef, state)
 
         params = nnx.state(model)
-        params = nnx_utils.state_map(params, freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
+        # Keep frozen VLA in float32. Casting it to bf16 only saved memory; with alpha=0 the whole
+        # backbone is frozen and must match the stage-1 checkpoint used for policy rollout.
+        # params = nnx_utils.state_map(params, freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
 
         return training_utils.TrainState(
             step=0,
@@ -217,8 +246,8 @@ def init_train_state(
             model_def=nnx.graphdef(model),
             tx=tx,
             opt_state=tx.init(params.filter(trainable_filter)),
-            ema_decay=config.ema_decay,
-            ema_params=None if config.ema_decay is None else params,
+            ema_decay=ema_decay,
+            ema_params=None if ema_decay is None else params,
         )
 
     train_state_shape = jax.eval_shape(init, init_rng)
@@ -249,6 +278,7 @@ def train_step(
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     alpha = _get_rlt_alpha(config)
     trainable_filter = _make_rlt_trainable_filter(alpha)
+    freeze_filter = _make_rlt_freeze_filter(alpha)
 
     model = nnx.merge(state.model_def, state.params)
     model.train()
@@ -275,12 +305,17 @@ def train_step(
 
     new_state = dataclasses.replace(state, step=state.step + 1, params=new_params, opt_state=new_opt_state)
     if state.ema_decay is not None:
-        new_state = dataclasses.replace(
-            new_state,
-            ema_params=jax.tree.map(
-                lambda old, new: state.ema_decay * old + (1 - state.ema_decay) * new, state.ema_params, new_params
-            ),
+        # Only EMA trainable weights. Frozen leaves are copied bit-exact from live params so a
+        # frozen VLA cannot drift in the checkpointed ema_params tree used for inference.
+        ema_trainable = jax.tree.map(
+            lambda old, new: state.ema_decay * old + (1.0 - state.ema_decay) * new,
+            state.ema_params.filter(trainable_filter),
+            new_params.filter(trainable_filter),
         )
+        ema_frozen = new_params.filter(freeze_filter)
+        ema_flat = {**ema_frozen.flat_state(), **ema_trainable.flat_state()}
+        ema_params = new_params.map(lambda k, v: ema_flat[k] if k in ema_flat else v)
+        new_state = dataclasses.replace(new_state, ema_params=ema_params)
 
     kernel_params = nnx.state(
         model,

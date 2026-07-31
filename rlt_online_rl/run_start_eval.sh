@@ -37,7 +37,7 @@ Options:
   -h, --help        Show this help
 
 Environment overrides:
-  RLT_EVAL_CONFIG       Config YAML (default: runs/screw_sorting/checkpoints/online_rl_config.yaml)
+  RLT_EVAL_CONFIG       Config YAML (default: configs/tasks/screw_sorting/online_rl.yaml)
   RLT_ACTOR_SNAPSHOT    Actor snapshot for eval (default: runs/screw_sorting/best_actor_snapshot.pkl)
   RLT_MACHINE_A_WS_URL  Machine A websocket URL (default: ws://0.0.0.0:8000)
 

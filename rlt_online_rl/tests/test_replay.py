@@ -54,6 +54,13 @@ def _make_episode(
     return steps
 
 
+def test_partial_chunk_records_actual_steps() -> None:
+    transitions = build_chunk_transitions_from_episode(_make_episode(length=5), chunk_len=3, stride=2)
+    partial = transitions[-1]
+    assert partial.actual_steps == 1
+    assert partial.ref_chunk.shape[0] == 3
+
+
 def test_stride2_builds_expected_chunk_transitions() -> None:
     transitions = build_chunk_transitions_from_episode(_make_episode(), chunk_len=3, stride=2)
     assert len(transitions) == 3

@@ -369,7 +369,8 @@ def test_rollout_trace_summary_counts_sources_and_actor_versions() -> None:
     assert summary["mixed_steps"] == 0
 
 
-def test_replay_uses_vla_ref_payload_for_human_steps() -> None:
+def test_replay_replaces_intervened_ref_steps_with_executed_action() -> None:
+    """Paper/Evo: intervention replaces VLA reference rows in the replay buffer."""
     cfg = _replay_config()
     provider = _CountingFeatureProvider(cfg)
     driver = _make_replay_driver(cfg, provider, stride=0)
@@ -383,8 +384,9 @@ def test_replay_uses_vla_ref_payload_for_human_steps() -> None:
 
     assert len(transitions) == 1
     transition = transitions[0]
-    assert np.allclose(transition.ref_chunk, 0.0)
     assert np.allclose(transition.action_chunk[0], 7.0)
+    assert np.allclose(transition.ref_chunk[0], 7.0)
+    assert np.allclose(transition.ref_chunk[1:], 0.0)
     assert int(transition.source_chunk[0]) == int(TransitionSource.HUMAN)
     assert np.allclose(transition.next_ref_chunk, 10.0)
     assert stats["fetched_anchor_count"] == 1

@@ -49,6 +49,7 @@ def _config() -> RLTOnlineRLConfig:
         actor_update_period=2,
         warmup_min_size=1,
         grad_updates_per_cycle=2,
+        bc_reduction="sum",
     )
 
 
@@ -69,6 +70,7 @@ def _batch(cfg: RLTOnlineRLConfig, batch_size: int = 8) -> dict[str, np.ndarray]
         "intervention_flag": np.zeros((batch_size,), dtype=np.bool_),
         "episode_id": np.zeros((batch_size,), dtype=np.int32),
         "step_id": np.arange(batch_size, dtype=np.int32),
+        "actual_steps": np.full((batch_size,), cfg.chunk_len, dtype=np.int32),
     }
 
 

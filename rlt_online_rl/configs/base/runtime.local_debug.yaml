@@ -25,7 +25,8 @@ runtime:
     actor_service_url: http://127.0.0.1:9101
     replay_service_url: http://127.0.0.1:9102
     episode_start_control_mode: policy
-    chunk_exec_horizon: 10
+    vla_chunk_exec_horizon: 25
+    rl_chunk_exec_horizon: null
     control_frequency_hz: 50.0
     step_trace_stride: 2
     replay_feature_batch_size: 16

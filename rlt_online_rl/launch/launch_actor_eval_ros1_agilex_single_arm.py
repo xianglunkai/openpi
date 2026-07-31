@@ -35,9 +35,13 @@ def _resolve_config_path(run_dir: str | None, config: str | None) -> str:
         return config
     if run_dir is None:
         return str(DEFAULT_CONFIG)
-    resolved = Path(run_dir) / "checkpoints" / "online_rl_config.yaml"
-    if resolved.exists():
-        return str(resolved)
+    run_path = Path(run_dir)
+    task_config = REPO_ROOT / "configs" / "tasks" / run_path.name / "online_rl.yaml"
+    if task_config.is_file():
+        return str(task_config)
+    legacy = run_path / "checkpoints" / "online_rl_config.yaml"
+    if legacy.exists():
+        return str(legacy)
     return str(DEFAULT_CONFIG)
 
 

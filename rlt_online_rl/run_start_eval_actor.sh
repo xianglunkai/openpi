@@ -2,10 +2,10 @@
 # Start actor_service only (no learner / replay). Used for eval rollout.
 #
 # Override defaults:
-#   RLT_EVAL_CONFIG=runs/screw_sorting/checkpoints/online_rl_config.yaml
+#   RLT_EVAL_CONFIG=configs/tasks/screw_sorting/online_rl.yaml
 #   RLT_ACTOR_SNAPSHOT=runs/screw_sorting/best_actor_snapshot.pkl
 
-CONFIG="${RLT_EVAL_CONFIG:-runs/screw_sorting/checkpoints/online_rl_config.yaml}"
+CONFIG="${RLT_EVAL_CONFIG:-configs/tasks/screw_sorting/online_rl.yaml}"
 ACTOR_SNAPSHOT="${RLT_ACTOR_SNAPSHOT:-runs/screw_sorting/best_actor_snapshot.pkl}"
 
 python scripts/run_online_rl.py \

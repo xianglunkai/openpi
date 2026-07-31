@@ -69,6 +69,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from openpi_client import image_tools
 
+from rlt_online_rl.chunk_horizon import ChunkHorizonEnvMixin
 from rlt_online_rl.config import OnlineRLSystemConfig
 from rlt_online_rl.config import load_system_config_yaml
 from rlt_online_rl.inference import ActorClient
@@ -992,7 +993,7 @@ def _default_done_fn(
     return bool(failure or done)
 
 
-class PikaChunkEnvAdapter:
+class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
     """Robot-specific env adapter consumed by the generic EnvDriver."""
 
     def __init__(
@@ -1077,8 +1078,9 @@ class PikaChunkEnvAdapter:
         self._phase_controller.observe_progress()
         phase = self._phase_controller.episode_phase
         critical_started = self._runtime_context.in_critical_phase()
+        self.refresh_chunk_horizon_state()
         period = 1.0 / max(float(control_hz), 1e-6)
-        horizon = int(self._system.env_driver.chunk_exec_horizon)
+        horizon = self.current_chunk_exec_horizon()
 
         observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
         executed: list[np.ndarray] = []

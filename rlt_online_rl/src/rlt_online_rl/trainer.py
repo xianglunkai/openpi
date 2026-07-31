@@ -85,6 +85,13 @@ def _make_networks(rl_config: RLTOnlineRLConfig) -> tuple[ChunkActor, TwinCritic
     return actor, critic
 
 
+def _make_optimizer(lr: float, grad_clip_norm: float) -> optax.GradientTransformation:
+    tx = optax.adam(lr)
+    if grad_clip_norm > 0.0:
+        tx = optax.chain(optax.clip_by_global_norm(grad_clip_norm), tx)
+    return tx
+
+
 def init_train_state(
     rl_config: RLTOnlineRLConfig,
     *,
@@ -94,8 +101,8 @@ def init_train_state(
     actor_key, critic_key, state_key = jax.random.split(rng, 3)
     actor_params = actor.init_params(actor_key)
     critic_params = critic.init_params(critic_key)
-    actor_tx = optax.adam(rl_config.actor_lr)
-    critic_tx = optax.adam(rl_config.critic_lr)
+    actor_tx = _make_optimizer(rl_config.actor_lr, rl_config.grad_clip_norm)
+    critic_tx = _make_optimizer(rl_config.critic_lr, rl_config.grad_clip_norm)
     state = RLTTrainState(
         actor_params=actor_params,
         target_actor_params=actor_params,
@@ -136,27 +143,23 @@ def update_critic(
     critic: TwinCritic,
     rl_config: RLTOnlineRLConfig,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
-    critic_rng, next_rng = jax.random.split(state.rng)
-
     def loss_fn(critic_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
         return compute_critic_loss(
             critic,
             critic_params,
             actor,
             state.actor_params,
-            state.target_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],
             batch["action_chunk"],
-            batch["ref_chunk"],
             batch["rewards"],
             batch["done"],
             batch["next_z_rl"],
             batch["next_proprio"],
             batch["next_ref_chunk"],
+            batch["actual_steps"],
             rl_config,
-            critic_rng,
         )
     # compute the critic loss and the gradients
     (critic_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.critic_params)
@@ -167,7 +170,6 @@ def update_critic(
     new_state = state.replace(
         critic_params=critic_params,
         critic_opt_state=critic_opt_state,
-        rng=next_rng,
     )
     # compute the metrics
     metrics = {
@@ -195,54 +197,79 @@ def update_actor(
     actor_rng, next_rng = jax.random.split(state.rng)
     # define the actor loss function
     def loss_fn(actor_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
-        dropout_rng, sample_rng = jax.random.split(actor_rng)
-        # apply reference dropout
+        # --- 1) Reference conditioning for the actor ---
+        # Binary ref dropout per batch element (same mask for all C*A of that sample).
+        # keep_mask: (B, 1, 1) broadcasts over (B, C, A).
+        # Example: B=2, p_drop=0.5 → keep_mask maybe [[1],[0]] → sample0 keeps ref, sample1 zeros ref.
+        dropout_rng, _ = jax.random.split(actor_rng)
         dropped_ref = apply_reference_dropout(
             dropout_rng,
             batch["ref_chunk"],
             rl_config.reference_dropout_prob,
         )
-        # sample the action
-        action_chunk = actor.sample_action(
+        # π_θ(z, proprio, ref) → action mean; Q_φ twin-min of that action.
+        action_chunk = actor.actor_mean(
             actor_params,
-            sample_rng,
             batch["z_rl"],
             batch["proprio"],
             dropped_ref,
-            deterministic=False,
         )
-        # compute the Q-values
-        q1, _ = critic.q_values(
+        # Evo / TD3: maximize conservative twin-Q (min of Q1, Q2), not Q1 alone.
+        q = critic.min_q(
             state.critic_params,
             batch["z_rl"],
             batch["proprio"],
             action_chunk,
         )
-       
+
+        # --- 2) Per-step human vs policy mask for BC target selection ---
+        # human_mask: (B, C) True where that step came from HUMAN or MIXED teleop.
+        # Example source_chunk[0] = [POLICY, HUMAN, POLICY, ...] → human_mask[0,1]=True.
         source_chunk = batch["source_chunk"]
-        # compute the human mask
         human_mask = jnp.logical_or(
             source_chunk == int(TransitionSource.HUMAN),
             source_chunk == int(TransitionSource.MIXED),
         )
-        # convert the human mask to float
-        human_mask_f = human_mask.astype(jnp.float32)
-        policy_mask_f = 1.0 - human_mask_f
-        # compute the behavior cloning target，if the action is human or mixed, use the action chunk, otherwise use the reference chunk
+       
+        # Chunk-level flags for metrics only: any human step → whole sample is "human".
+        # human_mask_chunk / policy_mask_chunk: (B,)
+        # Example: human_mask[i] has any True → human_mask_chunk[i]=1, policy_mask_chunk[i]=0.
+        human_mask_chunk = jnp.any(human_mask, axis=-1).astype(jnp.float32)
+        policy_mask_chunk = 1.0 - human_mask_chunk
+
+        # BC target: human/mixed steps → behavior (demo/exec); else → VLA ref.
+        # human_mask[..., None]: (B, C, 1) broadcasts over A.
+        # Example: step t human → bc_target[i,t]=behavior; else bc_target[i,t]=ref.
         bc_target = jnp.where(human_mask[..., None], batch["action_chunk"], batch["ref_chunk"])
-        # compute the behavior cloning error，the error is the difference between the action chunk and the behavior cloning target
-        bc_error = jnp.mean(jnp.square(action_chunk - bc_target), axis=-1)
-        # compute the reference error，the error is the difference between the action chunk and the reference chunk
-        ref_error = jnp.mean(jnp.square(action_chunk - batch["ref_chunk"]), axis=-1)
-        # compute the human error，the error is the difference between the action chunk and the action chunk
-        human_error = jnp.mean(jnp.square(action_chunk - batch["action_chunk"]), axis=-1)
-        # compute the behavior cloning penalty
-        bc_penalty = jnp.mean(bc_error)
-        # compute the reference penalty
-        bc_ref_penalty = jnp.sum(ref_error * policy_mask_f) / jnp.maximum(jnp.sum(policy_mask_f), 1.0)
-        # compute the human penalty
-        bc_human_penalty = jnp.sum(human_error * human_mask_f) / jnp.maximum(jnp.sum(human_mask_f), 1.0)
-        human_mask_ratio = jnp.mean(human_mask_f)
+
+        # --- 3) BC term that enters the loss ---
+        # Squared error then sum over (C, A) → per-sample scalar, then mean over B.
+        # bc_error: (B, C, A); per_sample_bc: (B,)
+        # Example C=10,A=7: sum over 70 dims; "sum" reduction keeps that scale (Evo-RLT/paper β).
+        # bc_error = jnp.square(action_chunk - bc_target)
+        bc_error = jnp.square(action_chunk - batch["ref_chunk"])
+        per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))
+        if rl_config.bc_reduction == "sum":
+            bc_penalty = jnp.mean(per_sample_bc)
+        else:
+            chunk_len = bc_error.shape[-2]
+            action_dim = bc_error.shape[-1]
+            bc_penalty = jnp.mean(per_sample_bc) / jnp.maximum(chunk_len * action_dim, 1.0)
+        # Compute BC metrics (logging only; do not affect gradients via this path)
+        # Compare μ to pure ref / pure behavior, then average over policy-only or human-only samples.
+        ref_error_squared = jnp.square(action_chunk - batch["ref_chunk"])
+        human_error_squared = jnp.square(action_chunk - batch["action_chunk"])
+        per_sample_ref = jnp.sum(ref_error_squared, axis=(-2, -1))
+        per_sample_human = jnp.sum(human_error_squared, axis=(-2, -1))
+        if rl_config.bc_reduction == "mean":
+            chunk_len = bc_error.shape[-2]
+            action_dim = bc_error.shape[-1]
+            scale = jnp.maximum(chunk_len * action_dim, 1.0)
+            per_sample_ref = per_sample_ref / scale
+            per_sample_human = per_sample_human / scale
+        bc_ref_penalty = jnp.sum(per_sample_ref * policy_mask_chunk) / jnp.maximum(jnp.sum(policy_mask_chunk), 1.0)
+        bc_human_penalty = jnp.sum(per_sample_human * human_mask_chunk) / jnp.maximum(jnp.sum(human_mask_chunk), 1.0)
+        human_mask_ratio = jnp.mean(human_mask_chunk)
         if not use_action_adapter:
             pred_abs_chunk = action_chunk
             target_abs_chunk = bc_target
@@ -269,8 +296,7 @@ def update_actor(
         target_step_delta = target_abs_chunk[:, 1:, :6] - target_abs_chunk[:, :-1, :6]
         # compute the delta penalty，the penalty is the difference between the predicted delta and the target delta
         delta_penalty = jnp.mean(jnp.square(pred_step_delta - target_step_delta))
-        # compute the actor Q-value，the Q-value is the mean of the Q-values
-        actor_q = jnp.mean(q1)
+        actor_q = jnp.mean(q)
         # compute the weighted behavior cloning penalty，the penalty is the weight for the behavior cloning penalty
         weighted_bc = jnp.asarray(bc_weight, dtype=jnp.float32) * bc_penalty
         # compute the weighted Q-value，the Q-value is the weight for the Q-value
@@ -408,6 +434,14 @@ def _tree_to_numpy(tree: Any) -> Any:
 
 def _tree_to_jax(tree: Any) -> Any:
     return jax.tree_util.tree_map(jnp.asarray, tree)
+
+
+def _ensure_actual_steps(batch_np: dict[str, np.ndarray], chunk_len: int) -> dict[str, np.ndarray]:
+    if "actual_steps" in batch_np:
+        return batch_np
+    batch_np = dict(batch_np)
+    batch_np["actual_steps"] = np.full(batch_np["z_rl"].shape[0], int(chunk_len), dtype=np.int32)
+    return batch_np
 
 
 def _ensure_source_chunk(batch_np: dict[str, np.ndarray], chunk_len: int) -> dict[str, np.ndarray]:
@@ -564,8 +598,11 @@ class LearnerService:
             return None
 
         # sample a batch from the replay buffer
-        batch_np = _ensure_source_chunk(
-            self._replay_source.sample_batch(self._service_config.sample_batch_size),
+        batch_np = _ensure_actual_steps(
+            _ensure_source_chunk(
+                self._replay_source.sample_batch(self._service_config.sample_batch_size),
+                self._rl_config.chunk_len,
+            ),
             self._rl_config.chunk_len,
         )
         # calculate sample metrics
@@ -741,8 +778,8 @@ class LearnerService:
             rng=_tree_to_jax(state_payload["rng"]),
             global_step=jnp.asarray(state_payload["global_step"], dtype=jnp.int32),
             actor_version=jnp.asarray(state_payload["actor_version"], dtype=jnp.int32),
-            actor_tx=optax.adam(self._rl_config.actor_lr),
-            critic_tx=optax.adam(self._rl_config.critic_lr),
+            actor_tx=_make_optimizer(self._rl_config.actor_lr, self._rl_config.grad_clip_norm),
+            critic_tx=_make_optimizer(self._rl_config.critic_lr, self._rl_config.grad_clip_norm),
         )
 
     def flush_artifacts(self) -> None:

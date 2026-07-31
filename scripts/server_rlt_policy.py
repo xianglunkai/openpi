@@ -112,6 +112,26 @@ class RLTInferenceModel(nnx.Module):
         return actions, rl_token
 
 
+    # def _infer_legacy(self, rng: at.KeyArrayLike, observation: _model.Observation) -> tuple[jnp.ndarray, jnp.ndarray]:
+    #     prefix_embs, prefix_mask = self.vla.extract_prefix_embeddings(
+    #         rng, observation, train=False, image_only=True
+    #     )
+    #     prefix_f32 = prefix_embs.astype(jnp.float32)
+    #     rl_token = self.rlt_module(prefix_f32, prefix_mask, method="encode", train=False)
+    #     actions = self.vla.sample_actions(rng, observation)
+    #     return actions, rl_token
+
+    # def _infer_shared_prefix(
+    #     self, rng: at.KeyArrayLike, observation: _model.Observation
+    # ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    #     prefix_cache = self.vla.prepare_prefix_for_inference(observation)
+    #     prefix_f32 = prefix_cache.image_prefix_out.astype(jnp.float32)
+    #     # Cache stores full prefix_mask (images + language); RLT uses image tokens only.
+    #     image_prefix_mask = prefix_cache.prefix_mask[:, : prefix_f32.shape[1]]
+    #     rl_token = self.rlt_module(prefix_f32, image_prefix_mask, method="encode", train=False)
+    #     actions = self.vla.sample_actions_from_prefix_cache(rng, prefix_cache)
+    #     return actions, rl_token
+
 # Constants for output format
 PROPRIO_DIM = 7
 CHUNK_LEN = 50

@@ -113,6 +113,7 @@ class RLTTransition:
     intervention_flag: bool
     episode_id: int
     step_id: int
+    actual_steps: int = 0
 
     def to_numpy(self) -> ArrayDict:
         return {
@@ -127,6 +128,7 @@ class RLTTransition:
             "next_ref_chunk": _ensure_array(self.next_ref_chunk, dtype=np.float16),
             "source": _ensure_array(self.source, dtype=np.uint8),
             "source_chunk": _ensure_array(self.source_chunk, dtype=np.uint8),
+            "actual_steps": _ensure_array(self.actual_steps, dtype=np.int32),
             "collection_phase_id": _ensure_array(collection_phase_to_id(self.collection_phase), dtype=np.uint8),
             "success": _ensure_array(self.success, dtype=np.int8),
             "intervention_flag": _ensure_array(self.intervention_flag, dtype=np.bool_),
@@ -165,6 +167,7 @@ class RLTTransition:
             intervention_flag=bool(data.get("intervention_flag", False)),
             episode_id=int(data.get("episode_id", 0)),
             step_id=int(data.get("step_id", 0)),
+            actual_steps=int(data.get("actual_steps", np.asarray(data["ref_chunk"]).shape[0])),
         )
 
 
@@ -305,6 +308,7 @@ def _build_chunk_transition(
         np.uint8,
     )
     done = bool(any(step.done for step in window) or last.done)
+    actual_steps = end - start
     return RLTTransition(
         z_rl=current.z_rl,
         proprio=current.proprio,
@@ -322,6 +326,7 @@ def _build_chunk_transition(
         intervention_flag=intervention,
         episode_id=current.episode_id,
         step_id=current.step_id,
+        actual_steps=actual_steps,
     )
 
 

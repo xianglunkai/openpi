@@ -20,7 +20,7 @@ if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
 fi
 export LD_LIBRARY_PATH="${_rollout_ld_path}"
 
-CONFIG="${RLT_EVAL_CONFIG:-runs/screw_sorting/checkpoints/online_rl_config.yaml}"
+CONFIG="${RLT_EVAL_CONFIG:-configs/tasks/screw_sorting/online_rl.yaml}"
 MACHINE_A_WS_URL="${RLT_MACHINE_A_WS_URL:-ws://0.0.0.0:8000}"
 
 python launch/launch_actor_eval_ros1_agilex_single_arm.py \

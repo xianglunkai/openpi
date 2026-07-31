@@ -1,7 +1,10 @@
+# Single source of truth for screw_sorting online RL and offline warmup BCQ.
+# Machine B / rollout / offline_train_from_replay all load this file.
+# Do not fork copies under runs/*/checkpoints/online_rl_config.yaml.
 experiment:
   rl:
     action_dim: 7
-    chunk_len: 20
+    chunk_len: 10
     z_dim: 2048
     proprio_dim: 7
     action_representation: delta_chunk
@@ -10,26 +13,29 @@ experiment:
     gamma: 0.99
     fixed_std: 0.002
     reference_dropout_prob: 0.5
-    delta_weight: 10.0
-    warmup_bc_weight: 10.0
-    warmup_q_weight: 0.1
+    bc_reduction: sum
+    target_q_clip: 100.0
+    grad_clip_norm: 1.0
+    action_clip_min: -1.0
+    action_clip_max: 1.0
+    delta_weight: 0.0
+    warmup_bc_weight: 5.0
+    warmup_q_weight: 1.0
     online_bc_weight: 5.0
-    online_q_weight: 0.1
+    online_q_weight: 1.0
 
     actor_hidden_dim: 256
-    actor_num_layers: 2
+    actor_num_layers: 3
     critic_hidden_dim: 256
-    critic_num_layers: 2
+    critic_num_layers: 3
 
     actor_lr: 0.0001
     critic_lr: 0.0001
     target_tau: 0.005
     actor_update_period: 2
 
-    critic_loss_mode: td
-
     warmup_min_size: 1200
-    warmup_post_collect_updates: 20000
+    warmup_post_collect_updates: 50000
     freeze_after_warmup: false
     grad_updates_per_cycle: 5
 
@@ -40,13 +46,13 @@ runtime:
     bind_host: 127.0.0.1
     port: 9101
     snapshot_path: runs/screw_sorting/actor_snapshot/actor_snapshot.pkl
-    xla_mem_fraction: 0.1
+    xla_mem_fraction: 0.10
     xla_preallocate: false
 
   learner_service:
     push_actor_interval_steps: 500
     checkpoint_interval_steps: 1000
-    sample_batch_size: 128
+    sample_batch_size: 256
     checkpoint_dir: runs/screw_sorting/checkpoints
     actor_snapshot_path: runs/screw_sorting/actor_snapshot/actor_snapshot.pkl
     replay_url: http://127.0.0.1:9102
@@ -88,15 +94,17 @@ runtime:
     - -0.00476837158203125
     - -0.00209808349609375
     - 0.09
-    actor_deterministic: false
-    chunk_exec_horizon: 20
+    actor_deterministic: true
+    vla_chunk_exec_horizon: 50
+    # null → rl.chunk_len (10 for screw_sorting)
+    rl_chunk_exec_horizon: null
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16
     enable_human_override: false
     safe_fallback_to_ref: true
-    machine_a_connect_timeout_sec: 5.0
-    machine_a_recv_timeout_sec: 5.0
+    machine_a_connect_timeout_sec: 10.0
+    machine_a_recv_timeout_sec: 10.0
     machine_a_retry_interval_sec: 0.5
     actor_request_timeout_sec: 2.0
     replay_request_timeout_sec: 30.0

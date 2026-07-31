@@ -31,7 +31,6 @@ Outputs:
 - loss_curves.png
 - fit_curves.png
 - joint_fit_curves.png
-- cql_curves.png (only when CQL metrics are present)
 - summary.json
 
 Example:
@@ -105,23 +104,10 @@ def _moving_average(y: np.ndarray, window: int) -> np.ndarray:
     return np.convolve(padded, kernel, mode="valid")
 
 
-def _has_metric(rows: list[dict], key: str) -> bool:
-    return any(key in row for row in rows)
-
-
-def _plot_per_step(ax: plt.Axes, rows: list[dict], key: str, *, label: str | None = None) -> bool:
-    x, y = _series(rows, key)
-    if x.size == 0:
-        return False
-    ax.plot(x, y, linewidth=1.8, label=label or key)
-    return True
-
-
 def _plot_losses(rows: list[dict], output_path: Path) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-    critic_title = "Critic Loss (TD + CQL)" if _has_metric(rows, "cql_loss") else "Critic Loss"
     plot_specs = [
-        ("critic_loss", critic_title, False),
+        ("critic_loss", "Critic Loss", False),
         ("actor_loss", "Actor Loss", True),
         ("actor_q", "Actor Q", True),
         ("bc_penalty", "BC Penalty", True),
@@ -146,63 +132,6 @@ def _plot_losses(rows: list[dict], output_path: Path) -> None:
         ax.set_ylabel(key)
         ax.legend(frameon=False, fontsize=8, loc="upper right")
         ax.grid(True, alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=200)
-    plt.close(fig)
-
-
-def _plot_cql(rows: list[dict], output_path: Path) -> None:
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-    axes = axes.reshape(-1)
-
-    single_specs = [
-        ("td_loss", "TD Loss"),
-        ("cql_loss", "CQL Loss"),
-        ("cql_diff", "CQL Diff (OOD - behavior)"),
-        ("critic_loss", "Total Critic Loss"),
-    ]
-    for ax, (key, title) in zip(axes[:4], single_specs, strict=True):
-        if not _plot_per_step(ax, rows, key, label="per step"):
-            ax.set_title(title)
-        else:
-            ax.set_title(title)
-            ax.legend(frameon=False, fontsize=8, loc="upper right")
-        ax.set_xlabel("global_step")
-        ax.set_ylabel(key)
-        ax.grid(True, alpha=0.25)
-
-    ax_q = axes[4]
-    plotted_q = False
-    for key, label in (
-        ("q1_mean", "behavior q1"),
-        ("target_q_mean", "target q"),
-        ("cql_ood_q1", "cql ood q1"),
-    ):
-        if _plot_per_step(ax_q, rows, key, label=label):
-            plotted_q = True
-    ax_q.set_title("Q Values")
-    ax_q.set_xlabel("global_step")
-    ax_q.set_ylabel("q")
-    if plotted_q:
-        ax_q.legend(frameon=False, fontsize=8, loc="upper right")
-    ax_q.grid(True, alpha=0.25)
-
-    ax_ood = axes[5]
-    plotted_ood = False
-    for key, label in (
-        ("cql_random_q1", "random actions"),
-        ("cql_current_q1", "current policy"),
-        ("cql_next_q1", "next policy"),
-    ):
-        if _plot_per_step(ax_ood, rows, key, label=label):
-            plotted_ood = True
-    ax_ood.set_title("CQL OOD Q1 by Sample Type")
-    ax_ood.set_xlabel("global_step")
-    ax_ood.set_ylabel("q1")
-    if plotted_ood:
-        ax_ood.legend(frameon=False, fontsize=8, loc="upper right")
-    ax_ood.grid(True, alpha=0.25)
-
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -237,7 +166,10 @@ def _plot_joint_fit(rows: list[dict], output_path: Path) -> None:
     labels = [f"joint{i + 1}" for i in range(6)] + ["gripper"]
     for joint_idx, label in enumerate(labels):
         ax = axes[joint_idx]
+        # Prefer canonical name (gripper); fall back to legacy joint7 from older runs.
         x, y = _series(rows, f"val_{label}_mean_abs_delta")
+        if not x.size and label == "gripper":
+            x, y = _series(rows, "val_joint7_mean_abs_delta")
         if x.size:
             ax.plot(x, y, linewidth=1.8)
         ax.set_title(label)
@@ -270,14 +202,6 @@ def _write_summary(rows: list[dict], status_path: Path, output_path: Path) -> No
         "last_val_mean_abs_delta": float(last.get("val_mean_abs_delta", np.nan)),
         "last_val_max_abs_delta": float(last.get("val_max_abs_delta", np.nan)),
     }
-    if _has_metric(rows, "cql_loss"):
-        _, cql_loss_vals = _series(rows, "cql_loss")
-        _, td_loss_vals = _series(rows, "td_loss")
-        _, cql_diff_vals = _series(rows, "cql_diff")
-        payload["last_cql_loss"] = float(cql_loss_vals[-1]) if cql_loss_vals.size else float("nan")
-        payload["last_td_loss"] = float(td_loss_vals[-1]) if td_loss_vals.size else float("nan")
-        payload["last_cql_diff"] = float(cql_diff_vals[-1]) if cql_diff_vals.size else float("nan")
-        payload["last_cql_alpha"] = float(last.get("cql_alpha", np.nan))
     if status_path.exists():
         payload["status"] = json.loads(status_path.read_text(encoding="utf-8"))
     output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -296,14 +220,10 @@ def main() -> None:
     if len(rows) != len(all_rows):
         print(f"metrics.jsonl contains multiple runs; plotting latest run only ({len(rows)} steps)")
     _plot_losses(rows, output_dir / "loss_curves.png")
-    if _has_metric(rows, "cql_loss"):
-        _plot_cql(rows, output_dir / "cql_curves.png")
     _plot_fit(rows, output_dir / "fit_curves.png")
     _plot_joint_fit(rows, output_dir / "joint_fit_curves.png")
     _write_summary(rows, status_path, output_dir / "summary.json")
     wrote = ["loss_curves.png", "fit_curves.png", "joint_fit_curves.png"]
-    if _has_metric(rows, "cql_loss"):
-        wrote.append("cql_curves.png")
     print(f"wrote offline training visualizations to: {output_dir} ({', '.join(wrote)})")
 
 

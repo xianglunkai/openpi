@@ -26,31 +26,28 @@ class RLTOnlineRLConfig:
     gamma: float = 0.99
     fixed_std: float = 0.05
     reference_dropout_prob: float = 0.5
-    warmup_bc_weight: float = 1.0
+    # BC penalty reduction: "sum" matches Evo-RLT / paper beta scaling over chunk dims.
+    bc_reduction: Literal["mean", "sum"] = "mean"
+    warmup_bc_weight: float = 5.0
     warmup_q_weight: float = 1.0
-    online_bc_weight: float = 1.0
+    online_bc_weight: float = 5.0
     online_q_weight: float = 1.0
     delta_weight: float = 0.0
+    # TD3-style target action clamp and Q-value clip (Evo-RLT defaults).
+    action_clip_min: float = -1.0
+    action_clip_max: float = 1.0
+    target_q_clip: float = 100.0
+    grad_clip_norm: float = 1.0
 
     actor_hidden_dim: int = 256
-    actor_num_layers: int = 2
+    actor_num_layers: int = 3
     critic_hidden_dim: int = 256
-    critic_num_layers: int = 2
+    critic_num_layers: int = 3
 
     actor_lr: float = 3e-4
     critic_lr: float = 3e-4
     target_tau: float = 5e-3
     actor_update_period: int = 2
-
-    critic_loss_mode: Literal["td", "cql"] = "td"
-    cql_alpha: float = 0.1
-    cql_n_actions: int = 5
-    cql_temp: float = 1.0
-    cql_action_sample_method: Literal["normal", "uniform"] = "normal"
-    cql_action_min: float = -1.0
-    cql_action_max: float = 1.0
-    cql_clip_diff_min: float = float("-inf")
-    cql_clip_diff_max: float = float("inf")
 
     warmup_min_size: int = 1_000
     warmup_post_collect_updates: int | None = None
@@ -115,7 +112,10 @@ class EnvDriverConfig:
     full_task_reset_action: list[float] | None = None
     critical_phase_reset_action: list[float] | None = None
     actor_deterministic: bool = True
-    chunk_exec_horizon: int = 10
+    # Asymmetric deploy horizons (Evo-RLT): VLA phase executes longer chunks than RL phase.
+    vla_chunk_exec_horizon: int = 25
+    # None → use experiment.rl.chunk_len (typically 10 or 20).
+    rl_chunk_exec_horizon: int | None = None
     # RLT experiments run the robot at 50 Hz.
     control_frequency_hz: float = 50.0
     step_trace_stride: int = 0
@@ -267,15 +267,35 @@ def _coerce_scalar_value(value: Any, annotation: Any) -> Any:
     return value
 
 
+# Removed CQL fields; ignored when loading older yaml/snapshots.
+_LEGACY_RL_CONFIG_KEYS = frozenset(
+    {
+        "critic_loss_mode",
+        "cql_alpha",
+        "cql_n_actions",
+        "cql_temp",
+        "cql_action_sample_method",
+        "cql_action_min",
+        "cql_action_max",
+        "cql_clip_diff_min",
+        "cql_clip_diff_max",
+    }
+)
+
+
 def _dataclass_from_mapping(cls: type[Any], data: Mapping[str, Any]) -> Any:
     default_value = cls()
     allowed_keys = {field.name for field in dataclasses.fields(default_value)}
-    _validate_mapping_keys(cls.__name__, data, allowed_keys)
+    incoming = dict(data)
+    if cls is RLTOnlineRLConfig:
+        for key in _LEGACY_RL_CONFIG_KEYS:
+            incoming.pop(key, None)
+    _validate_mapping_keys(cls.__name__, incoming, allowed_keys)
     field_types = get_type_hints(cls)
 
     kwargs: dict[str, Any] = {}
     for field in dataclasses.fields(default_value):
-        value = data.get(field.name, getattr(default_value, field.name))
+        value = incoming.get(field.name, getattr(default_value, field.name))
         default_field_value = getattr(default_value, field.name)
         if dataclasses.is_dataclass(default_field_value):
             if not isinstance(value, Mapping):

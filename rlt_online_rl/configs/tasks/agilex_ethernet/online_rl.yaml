@@ -13,7 +13,7 @@ experiment:
     delta_weight: 10.0
     warmup_bc_weight: 10.0
     warmup_q_weight: 0.1
-    online_bc_weight: 5.0
+    online_bc_weight: 10.0
     online_q_weight: 0.1
 
     actor_hidden_dim: 256

@@ -21,8 +21,9 @@ Offline actor/critic training from a replay journal.
 Inputs:
 
 - data is selected by `--replay-path`
-- task config is inferred from `<task-dir>/actor_snapshot/actor_snapshot.pkl`
-- replay subsets are selected only by `--phase` and `--source`
+- algorithm/runtime config comes from the same task YAML used online
+  (`configs/tasks/<task>/online_rl.yaml`, or `--config`)
+- replay subsets are selected by `--phase` and `--source`
 
 The script:
 
@@ -31,8 +32,7 @@ The script:
 3. initializes actor and critic from scratch
 4. runs offline training
 5. periodically evaluates train/validation actor fit
-6. exports snapshots, checkpoints, and a manifest
-7. exports an online-compatible bundle for continued online RL
+6. exports snapshots, checkpoints, and a manifest (no forked config copy)
 """
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,16 +45,15 @@ from _common import SOURCE_CHOICES
 from _common import default_filter_suffix
 from _common import filter_replay_records
 from _common import infer_task_dir_from_replay_path
-from _common import resolve_stats_path
 from _common import write_replay_journal
+from _common import JOINT_LABELS
 
 from rlt_online_rl.action_representation import ActionRepresentationAdapter
 from rlt_online_rl.action_representation import jax_denormalize_to_abs_chunk
+from rlt_online_rl.config import OnlineRLSystemConfig
 from rlt_online_rl.config import RLTOnlineRLConfig
 from rlt_online_rl.config import load_system_config_yaml
 from rlt_online_rl.config import relativize_rl_config_paths
-from rlt_online_rl.config import resolve_rl_config_paths
-from rlt_online_rl.config import save_system_config_yaml
 from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import PyTree
 from rlt_online_rl.networks import TwinCritic
@@ -75,27 +74,25 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         help="Replay journal to train from, usually runs/<task>/replay/replay_journal.pkl",
     )
-    parser.add_argument("--steps", type=int, default=10000)
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--bc-weight", type=float, default=10.0)
-    parser.add_argument("--q-weight", type=float, default=0.1)
-    parser.add_argument("--delta-weight", type=float, default=10)
-    parser.add_argument("--fixed-std", type=float, default=0.002)
-    parser.add_argument("--actor-hidden-dim", type=int, default=256)
-    parser.add_argument("--actor-num-layers", type=int, default=2)
-    parser.add_argument("--critic-hidden-dim", type=int, default=256)
-    parser.add_argument("--critic-num-layers", type=int, default=2)
-    parser.add_argument("--reference-dropout-prob", type=float, default=0.0)
     parser.add_argument(
-        "--critic-loss-mode",
-        choices=("td", "cql"),
-        default="td",
-        help="Critic objective: td = TD only; cql = TD + CQL conservative penalty.",
+        "--config",
+        type=Path,
+        default=None,
+        help="Task YAML shared with online RL (default: configs/tasks/<task>/online_rl.yaml).",
     )
-    parser.add_argument("--cql-alpha", type=float, default=0.1, help="CQL penalty weight when critic-loss-mode=cql.")
-    parser.add_argument("--cql-n-actions", type=int, default=5, help="OOD action samples per transition for CQL.")
-    parser.add_argument("--cql-temp", type=float, default=1.0, help="CQL log-sum-exp temperature.")
+    # None → take value from the shared task YAML (or phase-specific fields).
+    parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--bc-weight", type=float, default=None)
+    parser.add_argument("--q-weight", type=float, default=None)
+    parser.add_argument("--delta-weight", type=float, default=None)
+    parser.add_argument("--fixed-std", type=float, default=None)
+    parser.add_argument("--actor-hidden-dim", type=int, default=None)
+    parser.add_argument("--actor-num-layers", type=int, default=None)
+    parser.add_argument("--critic-hidden-dim", type=int, default=None)
+    parser.add_argument("--critic-num-layers", type=int, default=None)
+    parser.add_argument("--reference-dropout-prob", type=float, default=None)
     parser.add_argument("--eval-every", type=int, default=500)
     parser.add_argument("--val-ratio", type=float, default=0.05)
     parser.add_argument(
@@ -109,13 +106,61 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _load_snapshot_config(task_dir: Path) -> RLTOnlineRLConfig:
-    snapshot_path = task_dir / "actor_snapshot" / "actor_snapshot.pkl"
-    with snapshot_path.open("rb") as f:
-        payload = pickle.load(f)
-    cfg = RLTOnlineRLConfig(**payload["rl_config"])
-    cfg = resolve_rl_config_paths(cfg, str(snapshot_path), require_exists=True)
-    return dataclasses.replace(cfg, action_norm_stats_path=resolve_stats_path(cfg.action_norm_stats_path, task_dir))
+def _default_task_config_path(task_dir: Path) -> Path:
+    return ROOT / "configs" / "tasks" / task_dir.name / "online_rl.yaml"
+
+
+def _resolve_task_config_path(task_dir: Path, config_arg: Path | None) -> Path:
+    if config_arg is not None:
+        path = config_arg.resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Config not found: {path}")
+        return path
+    path = _default_task_config_path(task_dir)
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Shared task config not found: {path}. Pass --config or create configs/tasks/{task_dir.name}/online_rl.yaml"
+        )
+    return path
+
+
+def _load_system_config(config_path: Path) -> OnlineRLSystemConfig:
+    return load_system_config_yaml(str(config_path))
+
+
+def _apply_cli_rl_overrides(rl_config: RLTOnlineRLConfig, args: argparse.Namespace) -> RLTOnlineRLConfig:
+    updates: dict[str, Any] = {}
+    for field_name, attr in (
+        ("fixed_std", "fixed_std"),
+        ("actor_hidden_dim", "actor_hidden_dim"),
+        ("actor_num_layers", "actor_num_layers"),
+        ("critic_hidden_dim", "critic_hidden_dim"),
+        ("critic_num_layers", "critic_num_layers"),
+        ("reference_dropout_prob", "reference_dropout_prob"),
+        ("delta_weight", "delta_weight"),
+    ):
+        value = getattr(args, attr)
+        if value is not None:
+            updates[field_name] = value
+    return dataclasses.replace(rl_config, **updates) if updates else rl_config
+
+
+def _resolve_train_weights(
+    rl_config: RLTOnlineRLConfig,
+    *,
+    phase: str,
+    bc_weight: float | None,
+    q_weight: float | None,
+) -> tuple[float, float]:
+    if phase == "online":
+        default_bc, default_q = float(rl_config.online_bc_weight), float(rl_config.online_q_weight)
+    else:
+        # warmup / all / unknown → warmup weights (offline demo BCQ).
+        default_bc, default_q = float(rl_config.warmup_bc_weight), float(rl_config.warmup_q_weight)
+    return (
+        float(default_bc if bc_weight is None else bc_weight),
+        float(default_q if q_weight is None else q_weight),
+    )
 
 
 def _load_replay_records(path: Path) -> list[dict[str, Any]]:
@@ -173,6 +218,17 @@ def _stack_records(records: list[dict[str, Any]]) -> dict[str, np.ndarray]:
     batch["intervention_flag"] = batch["intervention_flag"].astype(np.bool_, copy=False)
     batch["episode_id"] = batch["episode_id"].astype(np.int32, copy=False)
     batch["step_id"] = batch["step_id"].astype(np.int32, copy=False)
+    if "actual_steps" in records[0]:
+        batch["actual_steps"] = np.stack(
+            [np.asarray(record["actual_steps"], dtype=np.int32) for record in records],
+            axis=0,
+        )
+    else:
+        batch["actual_steps"] = np.full(
+            (len(records),),
+            np.asarray(records[0]["ref_chunk"]).shape[0],
+            dtype=np.int32,
+        )
     return batch
 
 
@@ -253,8 +309,10 @@ def _evaluate_fit(
     }
     for joint_idx in range(abs_delta.shape[-1]):
         joint_vals = abs_delta[:, :, joint_idx]
-        metrics[f"joint{joint_idx + 1}_mean_abs_delta"] = float(joint_vals.mean())
-        metrics[f"joint{joint_idx + 1}_max_abs_delta"] = float(joint_vals.max())
+        # JOINT_LABELS: joint1..joint6, gripper (dim 6) — must match visualize_offline_training.
+        label = JOINT_LABELS[joint_idx] if joint_idx < len(JOINT_LABELS) else f"joint{joint_idx + 1}"
+        metrics[f"{label}_mean_abs_delta"] = float(joint_vals.mean())
+        metrics[f"{label}_max_abs_delta"] = float(joint_vals.max())
     return metrics
 
 
@@ -381,35 +439,18 @@ def _save_bundle_config(
     output_dir: Path,
     run_dir: Path,
     rl_config: RLTOnlineRLConfig,
+    canonical_config_path: Path,
 ) -> Path | None:
-    source_config_candidates = (
-        run_dir / "checkpoints" / "online_rl_config.yaml",
-        ROOT / "configs" / "tasks" / run_dir.name / "online_rl.yaml",
-    )
-    source_config_path = next((path for path in source_config_candidates if path.exists()), None)
-    if source_config_path is None:
+    """Record the shared task YAML path; do not fork a second online_rl_config.yaml.
+
+    Online and warmup both use ``canonical_config_path`` (typically
+    ``configs/tasks/<task>/online_rl.yaml``). Paths in that file already point at
+    ``runs/<task>/...``; deploy copies weights there without rewriting config.
+    """
+    del output_dir, run_dir, rl_config  # kept for call-site compatibility
+    if not canonical_config_path.is_file():
         return None
-    system = load_system_config_yaml(str(source_config_path))
-    bundle_actor_snapshot = (output_dir / "actor_snapshot" / "actor_snapshot.pkl").resolve()
-    bundle_checkpoint_dir = (output_dir / "checkpoints").resolve()
-    bundle_replay_path = (output_dir / "replay" / "replay_journal.pkl").resolve()
-    bundle_wandb_dir = (output_dir / "wandb").resolve()
-    bundle_wandb_dir.mkdir(parents=True, exist_ok=True)
-    system = dataclasses.replace(
-        system,
-        rl=rl_config,
-        actor_service=dataclasses.replace(system.actor_service, snapshot_path=str(bundle_actor_snapshot)),
-        learner_service=dataclasses.replace(
-            system.learner_service,
-            checkpoint_dir=str(bundle_checkpoint_dir),
-            actor_snapshot_path=str(bundle_actor_snapshot),
-        ),
-        replay=dataclasses.replace(system.replay, journal_path=str(bundle_replay_path)),
-        monitoring=dataclasses.replace(system.monitoring, wandb_dir=str(bundle_wandb_dir)),
-    )
-    target_path = bundle_checkpoint_dir / "online_rl_config.yaml"
-    save_system_config_yaml(system, str(target_path))
-    return target_path
+    return canonical_config_path.resolve()
 
 
 def _write_filtered_replay(output_dir: Path, records: list[dict[str, Any]]) -> Path:
@@ -446,7 +487,11 @@ def _write_bundle_manifest(
         "checkpoint_path": _relativize_path(checkpoint_path, output_dir / "manifest.json"),
         "actor_snapshot_path": _relativize_path(actor_snapshot_path, output_dir / "manifest.json"),
         "learner_status_path": _relativize_path(learner_status_path, output_dir / "manifest.json"),
+        # Shared with online: configs/tasks/<task>/online_rl.yaml (not a forked copy).
         "bundle_config_path": None
+        if bundle_config_path is None
+        else _relativize_path(bundle_config_path, output_dir / "manifest.json"),
+        "canonical_config_path": None
         if bundle_config_path is None
         else _relativize_path(bundle_config_path, output_dir / "manifest.json"),
     }
@@ -474,30 +519,98 @@ def _custom_actor_loss(
     action_q01: jax.Array | None,
     action_q99: jax.Array | None,
     action_representation: str,
+    bc_reduction: str,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    dropout_rng, sample_rng = jax.random.split(rng)
+    """Actor loss: L = w_bc * BC - w_q * mean(Q) + w_delta * Delta.
+
+    Shape legend (screw_sorting defaults as example):
+      B = batch size, e.g. 256
+      C = chunk_len, e.g. 10
+      A = action_dim, e.g. 7  (xyz+rot+gripper; delta uses first 6)
+      z_rl:          (B, 2048)
+      proprio:       (B, 7)
+      ref_chunk:     (B, C, A)  VLA reference actions
+      behavior_chunk:(B, C, A)  actually executed / demo actions
+      source_chunk:  (B, C)     per-step TransitionSource enum
+    """
+    # --- 1) Reference conditioning for the actor ---
+    # Binary ref dropout per batch element (same mask for all C*A of that sample).
+    # keep_mask: (B, 1, 1) broadcasts over (B, C, A).
+    # Example: B=2, p_drop=0.5 → keep_mask maybe [[1],[0]] → sample0 keeps ref, sample1 zeros ref.
+    dropout_rng, _ = jax.random.split(rng)
     if reference_dropout_prob > 0.0:
-        keep_mask = jax.random.bernoulli(dropout_rng, 1.0 - reference_dropout_prob, (ref_chunk.shape[0], 1, 1))
-        dropped_ref = ref_chunk * keep_mask.astype(ref_chunk.dtype)
+        keep_mask = jax.random.bernoulli(
+            dropout_rng, 1.0 - reference_dropout_prob, (ref_chunk.shape[0], 1, 1)
+        )
+        dropped_ref = ref_chunk * keep_mask.astype(ref_chunk.dtype)  # (B, C, A)
     else:
         dropped_ref = ref_chunk
-    model_ref_input = jnp.zeros_like(dropped_ref) if disable_ref_input else dropped_ref
-    action_chunk = actor.sample_action(actor_params, sample_rng, z_rl, proprio, model_ref_input, deterministic=False)
-    q1, _ = critic.q_values(critic_params, z_rl, proprio, action_chunk)
+    # Optional ablation: feed zeros so actor cannot rely on VLA ref at all.
+    model_ref_input = jnp.zeros_like(dropped_ref) if disable_ref_input else dropped_ref  # (B, C, A)
+
+    # π_θ(z, proprio, ref) → action mean; Q_φ twin-min of that action.
+    action_chunk = actor.actor_mean(actor_params, z_rl, proprio, model_ref_input)  # (B, C, A)
+    q = critic.min_q(critic_params, z_rl, proprio, action_chunk)  # (B,) or (B, 1)
+
+    # --- 2) Per-step human vs policy mask for BC target selection ---
+    # human_mask: (B, C) True where that step came from HUMAN or MIXED teleop.
+    # Example source_chunk[0] = [POLICY, HUMAN, POLICY, ...] → human_mask[0,1]=True.
     human_mask = jnp.logical_or(
         source_chunk == int(TransitionSource.HUMAN),
         source_chunk == int(TransitionSource.MIXED),
-    )
-    human_mask_f = human_mask.astype(jnp.float32)
-    policy_mask_f = 1.0 - human_mask_f
-    bc_target = jnp.where(human_mask[..., None], behavior_chunk, ref_chunk)
-    bc_error = jnp.mean(jnp.square(action_chunk - bc_target), axis=-1)
-    ref_error = jnp.mean(jnp.square(action_chunk - ref_chunk), axis=-1)
-    human_error = jnp.mean(jnp.square(action_chunk - behavior_chunk), axis=-1)
-    bc_penalty = jnp.mean(bc_error)
-    bc_ref_penalty = jnp.sum(ref_error * policy_mask_f) / jnp.maximum(jnp.sum(policy_mask_f), 1.0)
-    bc_human_penalty = jnp.sum(human_error * human_mask_f) / jnp.maximum(jnp.sum(human_mask_f), 1.0)
-    human_mask_ratio = jnp.mean(human_mask_f)
+    )  # (B, C)
+
+    # Chunk-level flags for metrics only: any human step → whole sample is "human".
+    # human_mask_chunk / policy_mask_chunk: (B,)
+    # Example: human_mask[i] has any True → human_mask_chunk[i]=1, policy_mask_chunk[i]=0.
+    human_mask_chunk = jnp.any(human_mask, axis=-1).astype(jnp.float32)  # (B,)
+    policy_mask_chunk = 1.0 - human_mask_chunk  # (B,)
+
+    # BC target: human/mixed steps → behavior (demo/exec); else → VLA ref.
+    # human_mask[..., None]: (B, C, 1) broadcasts over A.
+    # Example: step t human → bc_target[i,t]=behavior; else bc_target[i,t]=ref.
+    bc_target = jnp.where(human_mask[..., None], behavior_chunk, ref_chunk)  # (B, C, A)
+
+    # --- 3) BC term that enters the loss ---
+    # Squared error then sum over (C, A) → per-sample scalar, then mean over B.
+    # bc_error: (B, C, A); per_sample_bc: (B,)
+    # Example C=10,A=7: sum over 70 dims; "sum" reduction keeps that scale (Evo-RLT/paper β).
+    # bc_error = jnp.square(action_chunk - bc_target)  # (B, C, A)
+    bc_error = jnp.square(action_chunk - ref_chunk)  # (B, C, A)
+    per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))  # (B,)
+    if bc_reduction == "sum":
+        bc_penalty = jnp.mean(per_sample_bc)  # ()  E[||μ - a_bc||_F^2]
+    else:
+        chunk_len = bc_error.shape[-2]  # C
+        action_dim = bc_error.shape[-1]  # A
+        # "mean": divide by C*A so BC magnitude ~ per-dim MSE (e.g. /70).
+        bc_penalty = jnp.mean(per_sample_bc) / jnp.maximum(chunk_len * action_dim, 1.0)  # ()
+
+    # --- 4) Split BC metrics (logging only; do not affect gradients via this path) ---
+    # Compare μ to pure ref / pure behavior, then average over policy-only or human-only samples.
+    ref_error_squared = jnp.square(action_chunk - ref_chunk)  # (B, C, A)
+    human_error_squared = jnp.square(action_chunk - behavior_chunk)  # (B, C, A)
+    per_sample_ref = jnp.sum(ref_error_squared, axis=(-2, -1))  # (B,)
+    per_sample_human = jnp.sum(human_error_squared, axis=(-2, -1))  # (B,)
+    if bc_reduction == "mean":
+        chunk_len = bc_error.shape[-2]
+        action_dim = bc_error.shape[-1]
+        scale = jnp.maximum(chunk_len * action_dim, 1.0)
+        per_sample_ref = per_sample_ref / scale
+        per_sample_human = per_sample_human / scale
+    # Masked means: if no policy samples in batch, denom→1 avoids NaN.
+    # Example: B=4 with masks [0,1,1,0] → bc_ref averages samples 0,3 only.
+    bc_ref_penalty = jnp.sum(per_sample_ref * policy_mask_chunk) / jnp.maximum(
+        jnp.sum(policy_mask_chunk), 1.0
+    )  # ()
+    bc_human_penalty = jnp.sum(per_sample_human * human_mask_chunk) / jnp.maximum(
+        jnp.sum(human_mask_chunk), 1.0
+    )  # ()
+    human_mask_ratio = jnp.mean(human_mask_chunk)  # () fraction of human-tagged samples
+
+    # --- 5) Delta (step-to-step) smoothness penalty ---
+    # Optionally map normalized actions to absolute space before differencing.
+    # pred/target_abs_chunk: (B, C, A) in either normalized or absolute coords.
     if not use_action_adapter:
         pred_abs_chunk = action_chunk
         target_abs_chunk = bc_target
@@ -516,14 +629,20 @@ def _custom_actor_loss(
             action_q99,
             action_representation=action_representation,
         )
+    # Adjacent-step deltas on pose dims only (exclude gripper dim 6).
+    # [:, 1:, :6] - [:, :-1, :6] → (B, C-1, 6); e.g. C=10 → (B, 9, 6).
     pred_step_delta = pred_abs_chunk[:, 1:, :6] - pred_abs_chunk[:, :-1, :6]
     target_step_delta = target_abs_chunk[:, 1:, :6] - target_abs_chunk[:, :-1, :6]
-    delta_penalty = jnp.mean(jnp.square(pred_step_delta - target_step_delta))
-    actor_q = jnp.mean(q1)
+    delta_penalty = jnp.mean(jnp.square(pred_step_delta - target_step_delta))  # ()
+
+    # --- 6) Weighted objective ---
+    # L = w_bc * BC - w_q * Q̄ + w_delta * Delta
+    # Example: w_bc=1, w_q=1, w_delta=0 → classic Evo-style -Q + BC.
+    actor_q = jnp.mean(q)  # ()
     weighted_bc = jnp.asarray(bc_weight, dtype=jnp.float32) * bc_penalty
     weighted_q = jnp.asarray(q_weight, dtype=jnp.float32) * actor_q
     weighted_delta = jnp.asarray(delta_weight, dtype=jnp.float32) * delta_penalty
-    actor_loss = weighted_bc - weighted_q + weighted_delta
+    actor_loss = weighted_bc - weighted_q + weighted_delta  # ()
     metrics = {
         "actor_loss": actor_loss,
         "actor_q": actor_q,
@@ -549,8 +668,6 @@ def _update_critic(
     *,
     disable_ref_input: bool,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
-    critic_rng, next_rng = jax.random.split(state.rng)
-    ref_chunk = jnp.zeros_like(batch["ref_chunk"]) if disable_ref_input else batch["ref_chunk"]
     next_ref_chunk = jnp.zeros_like(batch["next_ref_chunk"]) if disable_ref_input else batch["next_ref_chunk"]
 
     def loss_fn(critic_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
@@ -559,25 +676,23 @@ def _update_critic(
             critic_params,
             actor,
             state.actor_params,
-            state.target_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],
             batch["action_chunk"],
-            ref_chunk,
             batch["rewards"],
             batch["done"],
             batch["next_z_rl"],
             batch["next_proprio"],
             next_ref_chunk,
+            batch["actual_steps"],
             rl_config,
-            critic_rng,
         )
 
     (critic_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.critic_params)
     updates, critic_opt_state = state.critic_tx.update(grads, state.critic_opt_state, state.critic_params)
     critic_params = optax.apply_updates(state.critic_params, updates)
-    new_state = state.replace(critic_params=critic_params, critic_opt_state=critic_opt_state, rng=next_rng)
+    new_state = state.replace(critic_params=critic_params, critic_opt_state=critic_opt_state)
     metrics = {**metrics, "critic_loss": critic_loss}
     return new_state, metrics
 
@@ -656,6 +771,7 @@ def _make_train_step(
                     action_q01=action_q01,
                     action_q99=action_q99,
                     action_representation=rl_config.action_representation,
+                    bc_reduction=rl_config.bc_reduction,
                 )
 
             (actor_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(train_state.actor_params)
@@ -700,9 +816,27 @@ def main() -> None:
     args = _parse_args()
     replay_path = args.replay_path.resolve()
     task_dir = infer_task_dir_from_replay_path(replay_path)
+    config_path = _resolve_task_config_path(task_dir, args.config)
+    system = _load_system_config(config_path)
+    rl_config = _apply_cli_rl_overrides(system.rl, args)
+    bc_weight, q_weight = _resolve_train_weights(
+        rl_config,
+        phase=args.phase,
+        bc_weight=args.bc_weight,
+        q_weight=args.q_weight,
+    )
+    delta_weight = float(rl_config.delta_weight)
+    steps = int(
+        args.steps
+        if args.steps is not None
+        else (rl_config.warmup_post_collect_updates or 10000)
+    )
+    batch_size = int(
+        args.batch_size if args.batch_size is not None else system.learner_service.sample_batch_size
+    )
+    seed = int(args.seed if args.seed is not None else system.replay.seed)
+
     default_output_name = "offline_train_bcq"
-    if args.critic_loss_mode == "cql":
-        default_output_name += "_cql"
     if args.disable_ref_input:
         default_output_name += "_noref"
     default_output_name += default_filter_suffix(phase=args.phase, source=args.source)
@@ -711,26 +845,6 @@ def main() -> None:
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rl_config = _load_snapshot_config(task_dir)
-    if args.actor_hidden_dim is not None:
-        rl_config = dataclasses.replace(rl_config, actor_hidden_dim=args.actor_hidden_dim)
-    if args.actor_num_layers is not None:
-        rl_config = dataclasses.replace(rl_config, actor_num_layers=args.actor_num_layers)
-    if args.fixed_std is not None:
-        rl_config = dataclasses.replace(rl_config, fixed_std=args.fixed_std)
-    if args.critic_hidden_dim is not None:
-        rl_config = dataclasses.replace(rl_config, critic_hidden_dim=args.critic_hidden_dim)
-    if args.critic_num_layers is not None:
-        rl_config = dataclasses.replace(rl_config, critic_num_layers=args.critic_num_layers)
-    if args.reference_dropout_prob is not None:
-        rl_config = dataclasses.replace(rl_config, reference_dropout_prob=args.reference_dropout_prob)
-    rl_config = dataclasses.replace(
-        rl_config,
-        critic_loss_mode=args.critic_loss_mode,
-        cql_alpha=args.cql_alpha,
-        cql_n_actions=args.cql_n_actions,
-        cql_temp=args.cql_temp,
-    )
     records = filter_replay_records(
         _load_replay_records(replay_path),
         phase=args.phase,
@@ -739,7 +853,7 @@ def main() -> None:
     if not records:
         raise RuntimeError(f"No replay samples left after filtering: replay={replay_path}")
     dataset = _stack_records(records)
-    train_ds, val_ds = _split_dataset(dataset, val_ratio=args.val_ratio, seed=args.seed)
+    train_ds, val_ds = _split_dataset(dataset, val_ratio=args.val_ratio, seed=seed)
     collection_phase_counts: dict[str, int] = {}
     source_counts: dict[str, int] = {}
     for record in records:
@@ -748,9 +862,8 @@ def main() -> None:
         source_key = str(int(record["source"]))
         source_counts[source_key] = source_counts.get(source_key, 0) + 1
 
-    state, actor, critic = init_train_state(rl_config, rng=jax.random.PRNGKey(args.seed))
+    state, actor, critic = init_train_state(rl_config, rng=jax.random.PRNGKey(seed))
     adapter = ActionRepresentationAdapter.from_config(rl_config)
-    delta_weight = float(args.delta_weight if args.delta_weight is not None else rl_config.delta_weight)
     if adapter is None:
         action_q01 = None
         action_q99 = None
@@ -761,15 +874,15 @@ def main() -> None:
         actor,
         critic,
         rl_config,
-        bc_weight=args.bc_weight,
-        q_weight=args.q_weight,
+        bc_weight=bc_weight,
+        q_weight=q_weight,
         delta_weight=delta_weight,
         disable_ref_input=args.disable_ref_input,
         use_action_adapter=adapter is not None,
         action_q01=action_q01,
         action_q99=action_q99,
     )
-    rng = np.random.default_rng(args.seed)
+    rng = np.random.default_rng(seed)
 
     metrics_path = output_dir / "metrics.jsonl"
     status_path = output_dir / "status.json"
@@ -782,6 +895,7 @@ def main() -> None:
     experiment_meta = {
         "task_dir": _relativize_path(task_dir, output_dir / "experiment.json"),
         "replay_path": _relativize_path(replay_path, output_dir / "experiment.json"),
+        "config_path": _relativize_path(config_path, output_dir / "experiment.json"),
         "phase": args.phase,
         "source": args.source,
         "collection_phase_counts": collection_phase_counts,
@@ -789,11 +903,11 @@ def main() -> None:
         "num_records": int(len(records)),
         "train_size": int(train_ds["z_rl"].shape[0]),
         "val_size": int(val_ds["z_rl"].shape[0]),
-        "steps": int(args.steps),
-        "batch_size": int(args.batch_size),
-        "seed": int(args.seed),
-        "bc_weight": float(args.bc_weight),
-        "q_weight": float(args.q_weight),
+        "steps": int(steps),
+        "batch_size": int(batch_size),
+        "seed": int(seed),
+        "bc_weight": float(bc_weight),
+        "q_weight": float(q_weight),
         "delta_weight": float(delta_weight),
         "fixed_std": float(rl_config.fixed_std),
         "disable_ref_input": bool(args.disable_ref_input),
@@ -801,34 +915,30 @@ def main() -> None:
         "actor_num_layers": int(rl_config.actor_num_layers),
         "critic_hidden_dim": int(rl_config.critic_hidden_dim),
         "critic_num_layers": int(rl_config.critic_num_layers),
-        "critic_loss_mode": str(rl_config.critic_loss_mode),
-        "cql_alpha": float(rl_config.cql_alpha),
-        "cql_n_actions": int(rl_config.cql_n_actions),
-        "cql_temp": float(rl_config.cql_temp),
         "published_model_tag": "final",
         "rl_config": _portable_rl_config_dict(rl_config, output_dir / "experiment.json"),
     }
     _atomic_write_json(output_dir / "experiment.json", experiment_meta)
     print(
         "offline_train_from_replay "
+        f"config={config_path} "
         f"replay={replay_path.name} phase={args.phase} source={args.source} "
         f"train={train_ds['z_rl'].shape[0]} val={val_ds['z_rl'].shape[0]} "
-        f"steps={args.steps} batch={args.batch_size} bc_weight={args.bc_weight:.3f} q_weight={args.q_weight:.3f} "
-        f"fixed_std={rl_config.fixed_std:.4f} disable_ref_input={args.disable_ref_input} "
-        f"critic_loss_mode={rl_config.critic_loss_mode} cql_alpha={rl_config.cql_alpha:.3f}"
+        f"steps={steps} batch={batch_size} bc_weight={bc_weight:.3f} q_weight={q_weight:.3f} "
+        f"fixed_std={rl_config.fixed_std:.4f} disable_ref_input={args.disable_ref_input}"
     )
 
     best_val = float("inf")
     best_step = 0
-    for step in range(1, args.steps + 1):
-        batch_np = _sample_batch(train_ds, batch_size=args.batch_size, rng=rng)
+    for step in range(1, steps + 1):
+        batch_np = _sample_batch(train_ds, batch_size=batch_size, rng=rng)
         if adapter is not None:
             batch_np = adapter.prepare_training_batch(batch_np)
         batch = {key: jnp.asarray(value) for key, value in batch_np.items()}
         state, raw_metrics = train_step(state, batch)
         metrics = {key: float(value) for key, value in jax.device_get(raw_metrics).items()}
 
-        if step == 1 or step % args.eval_every == 0 or step == args.steps:
+        if step == 1 or step % args.eval_every == 0 or step == steps:
             actor_params_np = jax.tree_util.tree_map(lambda x: np.asarray(jax.device_get(x)), state.actor_params)
             train_fit = _evaluate_fit(
                 actor, actor_params_np, adapter, train_ds, disable_ref_input=args.disable_ref_input
@@ -858,7 +968,7 @@ def main() -> None:
                 },
             )
             print(
-                f"[step {step:>6d}/{args.steps}] "
+                f"[step {step:>6d}/{steps}] "
                 f"critic={metrics['critic_loss']:.4f} "
                 f"actor={metrics['actor_loss']:.4f} "
                 f"q={metrics['actor_q']:.4f} "
@@ -890,6 +1000,7 @@ def main() -> None:
         output_dir=output_dir,
         run_dir=task_dir,
         rl_config=rl_config,
+        canonical_config_path=config_path,
     )
     _write_bundle_manifest(
         output_dir=output_dir,
@@ -907,7 +1018,7 @@ def main() -> None:
     experiment_meta["best_step"] = int(best_step)
     experiment_meta["best_val_mean_abs_delta"] = float(best_val)
     _atomic_write_json(output_dir / "experiment.json", experiment_meta)
-    print(f"wrote offline training artifacts to: {output_dir}")
+    print(f"wrote offline training artifacts to: {output_dir} (shared config={config_path})")
 
 
 if __name__ == "__main__":

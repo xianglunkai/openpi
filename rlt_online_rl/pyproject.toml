@@ -25,6 +25,11 @@ dev = [
 monitor = [
     "wandb>=0.19.0",
 ]
+offline = [
+    # Lightweight LeRobot v2.1 parquet reader for warmup journal building.
+    # Does NOT pull in the HuggingFace lerobot package.
+    "pyarrow>=14.0.0",
+]
 robot = [
     "rclpy",
 ]

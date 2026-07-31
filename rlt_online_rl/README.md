@@ -153,14 +153,19 @@ Each replay transition contains:
 - `HUMAN`: human-controlled execution
 - `MIXED`: a window containing both human and policy steps
 
-The trainer uses `source_chunk` to choose the BC target step by step:
+Replay construction follows RLT Algorithm 1 / Evo-RLT for interventions:
+
+- intervened (`HUMAN` / `intervention_flag`) steps replace VLA rows in
+  `ref_chunk` with the executed `action_chunk` before the transition is stored
+- non-intervened steps keep the Machine A / VLA reference
+
+The trainer still uses `source_chunk` when choosing the BC target:
 
 - `HUMAN / MIXED` steps align to the executed `action_chunk`
-- `BASE / RL` steps align to the VLA `ref_chunk`
+- `BASE / RL` steps align to `ref_chunk` (VLA, or human after the override above)
 
-This is intentionally different from replacing `ref_chunk` with human actions.
-At deployment time the actor still sees VLA references, so human data teaches
-how to edit a VLA reference into the executed correction.
+At deployment the actor still receives live VLA references; only the replay
+buffer reference is overwritten for intervened steps.
 
 ## Learner Objective
 

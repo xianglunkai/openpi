@@ -85,64 +85,26 @@ def test_actor_and_critic_losses_are_scalars() -> None:
         ref,
         1.0,
         cfg.reference_dropout_prob,
+        cfg.bc_reduction,
         jax.random.PRNGKey(5),
     )
+    actual_steps = jnp.full((batch_size,), cfg.chunk_len, dtype=jnp.int32)
     critic_loss, _ = compute_critic_loss(
         critic,
         critic_params,
         actor,
         actor_params,
-        actor_params,
         critic_params,
         z,
         proprio,
         action,
-        ref,
         rewards,
         done,
         z,
         proprio,
         ref,
+        actual_steps,
         cfg,
-        jax.random.PRNGKey(6),
     )
     assert actor_loss.shape == ()
     assert critic_loss.shape == ()
-
-
-def test_cql_critic_loss_is_scalar() -> None:
-    cfg = _config()
-    cfg = dataclasses.replace(cfg, critic_loss_mode="cql", cql_n_actions=2)
-    actor = ChunkActor(cfg.z_dim, cfg.proprio_dim, cfg.chunk_len, cfg.action_dim, 32, 2, cfg.fixed_std)
-    critic = TwinCritic(cfg.z_dim, cfg.proprio_dim, cfg.chunk_len, cfg.action_dim, 32, 2)
-    actor_params = actor.init_params(jax.random.PRNGKey(7))
-    critic_params = critic.init_params(jax.random.PRNGKey(8))
-    batch_size = 4
-    z = jnp.ones((batch_size, cfg.z_dim))
-    proprio = jnp.ones((batch_size, cfg.proprio_dim))
-    ref = jnp.ones((batch_size, cfg.chunk_len, cfg.action_dim))
-    action = jnp.ones((batch_size, cfg.chunk_len, cfg.action_dim))
-    rewards = jnp.ones((batch_size, cfg.chunk_len))
-    done = jnp.zeros((batch_size,))
-    critic_loss, metrics = compute_critic_loss(
-        critic,
-        critic_params,
-        actor,
-        actor_params,
-        actor_params,
-        critic_params,
-        z,
-        proprio,
-        action,
-        ref,
-        rewards,
-        done,
-        z,
-        proprio,
-        ref,
-        cfg,
-        jax.random.PRNGKey(9),
-    )
-    assert critic_loss.shape == ()
-    assert metrics["td_loss"].shape == ()
-    assert metrics["cql_loss"].shape == ()

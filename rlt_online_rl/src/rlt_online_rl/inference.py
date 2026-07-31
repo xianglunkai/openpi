@@ -23,6 +23,7 @@ from websockets import exceptions as websocket_exceptions
 import websockets.sync.client
 
 from rlt_online_rl.action_representation import ActionRepresentationAdapter
+from rlt_online_rl.chunk_horizon import resolve_chunk_exec_horizon
 from rlt_online_rl.config import ActorServiceConfig
 from rlt_online_rl.config import EnvDriverConfig
 from rlt_online_rl.config import RLTOnlineRLConfig
@@ -178,20 +179,22 @@ def normalize_feature_payload(
     rl_config: RLTOnlineRLConfig,
     *,
     observation: dict[str, Any],
+    ref_chunk_len: int | None = None,
 ) -> dict[str, Any]:
     required = {"z_rl", "ref_chunk"}
     missing = sorted(required - set(payload))
     if missing:
         raise ValueError(f"Machine A feature payload missing required keys: {missing}")
 
+    chunk_len = int(ref_chunk_len if ref_chunk_len is not None else rl_config.chunk_len)
     normalized = dict(payload)
     normalized["z_rl"] = _coerce_feature_vector("z_rl", payload["z_rl"], rl_config.z_dim)
     normalized["proprio"] = _proprio_from_observation(observation, rl_config)
     normalized["ref_chunk"] = _coerce_ref_chunk(
         payload["ref_chunk"],
-        min_chunk_len=rl_config.chunk_len,
+        min_chunk_len=chunk_len,
         min_action_dim=rl_config.action_dim,
-    )[: rl_config.chunk_len, : rl_config.action_dim]
+    )[:chunk_len, : rl_config.action_dim]
     return normalized
 
 
@@ -315,7 +318,9 @@ class ActorService:
                 timestamp=time.time(),
                 source=int(TransitionSource.BASE),
             )
-        model_ref_chunk = np.asarray(request.ref_chunk, dtype=np.float32)
+        model_ref_chunk = np.asarray(request.ref_chunk, dtype=np.float32)[
+            : self._rl_config.chunk_len, : self._rl_config.action_dim
+        ]
         if self._action_adapter is not None:
             model_ref_chunk = self._action_adapter.normalize_ref_chunk(model_ref_chunk, request.proprio)
         refined_chunk = self._wrapper.infer(
@@ -711,6 +716,17 @@ class EnvDriver:
         replay_stats = self._replay_client.stats()
         return int(replay_stats.get("max_episode_id", -1)) + 1
 
+    def _ref_chunk_horizon_for_planning(self) -> int:
+        if hasattr(self._env, "current_ref_chunk_horizon"):
+            return int(self._env.current_ref_chunk_horizon())
+        return int(self._rl_config.chunk_len)
+
+    def _chunk_exec_horizon_for_plan(self, plan: PolicyPlan) -> int:
+        if hasattr(self._env, "current_chunk_exec_horizon"):
+            return int(self._env.current_chunk_exec_horizon())
+        uses_rl = int(plan.source) == int(TransitionSource.RL)
+        return resolve_chunk_exec_horizon(self._env_config, self._rl_config, uses_rl_actor=uses_rl)
+
     def run_episode(self, episode_id: int) -> dict[str, Any]:
         logger.info("EnvDriver episode=%s started", episode_id)
         observation = self._env.reset()
@@ -748,8 +764,13 @@ class EnvDriver:
                     self._feature_provider.get_features(plan_observation),
                     self._rl_config,
                     observation=plan_observation,
+                    ref_chunk_len=self._ref_chunk_horizon_for_planning(),
                 )
-                current_features = _chunk_features_from_payload(current, self._rl_config)
+                current_features = ChunkFeatures(
+                    z_rl=np.asarray(current["z_rl"], dtype=np.float32),
+                    proprio=np.asarray(current["proprio"], dtype=np.float32),
+                    ref_chunk=np.asarray(current["ref_chunk"], dtype=np.float32),
+                )
                 ref_chunk = current_features.ref_chunk
                 # 远程 Actor 在 ref_chunk 基础上输出 refined_chunk；失败时可回退 ref
                 refine = maybe_refine_chunk(
@@ -1353,6 +1374,8 @@ class EnvDriver:
         rewards = np.asarray([float(step.reward) for step in window_steps], dtype=np.float32)
         source_chunk = np.asarray([int(step.source) for step in window_steps], dtype=np.uint8)
         source, intervention = self._resolve_window_source(window_steps)
+        actual_steps = len(window_steps)
+
         return RLTTransition(
             z_rl=np.asarray(current_payload["z_rl"], dtype=np.float32),
             proprio=np.asarray(current_payload["proprio"], dtype=np.float32),
@@ -1370,6 +1393,7 @@ class EnvDriver:
             intervention_flag=intervention,
             episode_id=int(first_step.episode_id),
             step_id=int(first_step.step_id),
+            actual_steps=actual_steps,
         )
 
     @staticmethod
@@ -1454,11 +1478,12 @@ class EnvDriver:
 
         plan = policy_planner(observation, 0)
         action_chunk = np.asarray(plan.action_chunk, dtype=np.float32)
+        exec_horizon = self._chunk_exec_horizon_for_plan(plan)
         rewards: list[float] = []
         done = False
         info: dict[str, Any] = {}
         next_obs: dict[str, Any] | None = None
-        for action in action_chunk[: self._env_config.chunk_exec_horizon]:
+        for action in action_chunk[:exec_horizon]:
             next_obs, reward, terminated, truncated, info = self._env.step(action)
             rewards.append(float(reward))
             done = bool(terminated or truncated)

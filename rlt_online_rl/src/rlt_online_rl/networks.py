@@ -206,6 +206,17 @@ class TwinCritic:
         q2 = q_network.apply(params["q2"], z_rl, proprio, action_chunk)
         return q1, q2
 
+    def min_q(
+        self,
+        params: PyTree,
+        z_rl: jax.Array,
+        proprio: jax.Array,
+        action_chunk: jax.Array,
+    ) -> jax.Array:
+        """TD3 / Evo-style conservative Q: min(Q1, Q2)."""
+        q1, q2 = self.q_values(params, z_rl, proprio, action_chunk)
+        return jnp.minimum(q1, q2)
+
 
 def apply_reference_dropout(
     rng: jax.Array,
@@ -223,10 +234,34 @@ def _discounted_chunk_rewards(rewards: jax.Array, gamma: float) -> jax.Array:
     return jnp.sum(rewards * discounts[None, :], axis=-1)
 
 
-# build the TD target，the TD target is the discounted sum of the rewards and the bootstrap
+def clamp_action_chunk(
+    action_chunk: jax.Array,
+    *,
+    action_min: float,
+    action_max: float,
+) -> jax.Array:
+    return jnp.clip(action_chunk, action_min, action_max)
+
+
+def compute_bc_penalty(
+    action_chunk: jax.Array,
+    bc_target: jax.Array,
+    *,
+    reduction: str,
+) -> jax.Array:
+    """BC penalty with Evo-RLT-compatible scaling."""
+    error_squared = jnp.square(action_chunk - bc_target)
+    per_sample = jnp.sum(error_squared, axis=(-2, -1))
+    if reduction == "sum":
+        return jnp.mean(per_sample)
+    chunk_len = error_squared.shape[-2]
+    action_dim = error_squared.shape[-1]
+    return jnp.mean(per_sample) / jnp.maximum(chunk_len * action_dim, 1.0)
+
+
 def build_td_target(
-    target_actor: ChunkActor,
-    target_actor_params: PyTree,
+    actor: ChunkActor,
+    actor_params: PyTree,
     target_critic: TwinCritic,
     target_critic_params: PyTree,
     next_z_rl: jax.Array,
@@ -234,29 +269,30 @@ def build_td_target(
     next_ref_chunk: jax.Array,
     rewards: jax.Array,
     done: jax.Array,
+    actual_steps: jax.Array,
+    *,
     gamma: float,
-    rng: jax.Array,
+    action_clip_min: float,
+    action_clip_max: float,
+    target_q_clip: float,
 ) -> jax.Array:
-    # sample the next action，the action is sampled from the target actor
-    next_action = target_actor.sample_action(
-        target_actor_params,
-        rng,
-        next_z_rl,
-        next_proprio,
-        next_ref_chunk,
-        deterministic=False,
+    """TD3-style chunk TD target with deterministic next action and actual-step bootstrap."""
+    next_action = actor.actor_mean(actor_params, next_z_rl, next_proprio, next_ref_chunk)
+    next_action = clamp_action_chunk(
+        next_action,
+        action_min=action_clip_min,
+        action_max=action_clip_max,
     )
-    # compute the next Q-values，the Q-values are computed from the target critic
     next_q1, next_q2 = target_critic.q_values(target_critic_params, next_z_rl, next_proprio, next_action)
-    # compute the bootstrap，the bootstrap is the discounted sum of the rewards and the minimum of the next Q-values
-    bootstrap = (1.0 - done.astype(rewards.dtype)) * (gamma ** rewards.shape[-1]) * jnp.minimum(next_q1, next_q2)
-    # compute the TD target，the TD target is the discounted sum of the rewards and the bootstrap
+    next_q = jnp.minimum(next_q1, next_q2)
+    if target_q_clip > 0.0:
+        next_q = jnp.clip(next_q, -target_q_clip, target_q_clip)
+    bootstrap_exp = actual_steps.astype(rewards.dtype)
+    bootstrap = (1.0 - done.astype(rewards.dtype)) * jnp.power(gamma, bootstrap_exp) * next_q
     return _discounted_chunk_rewards(rewards, gamma) + bootstrap
 
 
-# compute the actor loss，the loss is the mean of the Q-values minus the mean of the behavior cloning penalty
 def compute_actor_loss(
-    # compute the actor loss，the loss is the mean of the Q-values minus the mean of the behavior cloning penalty
     actor: ChunkActor,
     actor_params: PyTree,
     critic: TwinCritic,
@@ -266,17 +302,18 @@ def compute_actor_loss(
     ref_chunk: jax.Array,
     beta: float,
     reference_dropout_prob: float,
+    bc_reduction: str,
     rng: jax.Array,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    dropout_rng, sample_rng = jax.random.split(rng)
+    dropout_rng, _ = jax.random.split(rng)
     dropped_ref = apply_reference_dropout(dropout_rng, ref_chunk, reference_dropout_prob)
-    action_chunk = actor.sample_action(actor_params, sample_rng, z_rl, proprio, dropped_ref, deterministic=False)
-    q1, _ = critic.q_values(critic_params, z_rl, proprio, action_chunk)
-    bc_penalty = jnp.mean(jnp.square(action_chunk - ref_chunk))
-    actor_loss = -jnp.mean(q1) + beta * bc_penalty
+    action_chunk = actor.actor_mean(actor_params, z_rl, proprio, dropped_ref)
+    q = critic.min_q(critic_params, z_rl, proprio, action_chunk)
+    bc_penalty = compute_bc_penalty(action_chunk, ref_chunk, reduction=bc_reduction)
+    actor_loss = -jnp.mean(q) + beta * bc_penalty
     metrics = {
         "actor_loss": actor_loss,
-        "actor_q": jnp.mean(q1),
+        "actor_q": jnp.mean(q),
         "bc_penalty": bc_penalty,
     }
     return actor_loss, metrics

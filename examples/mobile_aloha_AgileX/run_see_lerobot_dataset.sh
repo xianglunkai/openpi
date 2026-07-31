@@ -7,8 +7,8 @@ set -euo pipefail
 
 export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-/data/huggingface/lerobot}"
 
-REPO_ID="${1:-openpi_hil/hil_screw_sorting_20260701_193107}"
-EPISODE_INDEX="${2:-0}"
+REPO_ID="${1:-openpi/screw_sorting_single_rl}"
+EPISODE_INDEX="${2:-59}"
 
 python .venv/lib/python3.11/site-packages/lerobot/scripts/visualize_dataset.py \
   --repo-id "${REPO_ID}" \
