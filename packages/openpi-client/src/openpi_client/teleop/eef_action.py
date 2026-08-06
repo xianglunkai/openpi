@@ -30,7 +30,7 @@ class EefActionConverter:
         kinematics: EefKinematics,
         get_joint_positions: Callable[[], np.ndarray],
         *,
-        gripper_open: float = 0.03,
+        gripper_open: float = 0.02,
         gripper_close: float = 0.0,
         input_fps: float = 30.0,
         velocity_filter_cutoff_hz: float = 5.0,

@@ -21,7 +21,7 @@ class Args:
     # Episode parameters
     num_episodes: int = 1
     max_episode_time_s: int = 600
-    action_horizon: int = 50
+    action_horizon: int = 32
     
     # Action interpolation parameters
     inference_fps: int = 30

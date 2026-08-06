@@ -19,7 +19,7 @@ RL_TELEOP_TRIGGER_SERVICE = "/teleop_trigger_rl"
 HW_TELEOP_TRIGGER_SERVICE = "/teleop_trigger"
 TELEOP_STATUS_SERVICE = "/teleop_status"
 SHUTDOWN_ROLLOUT_SERVICE = "/shutdown_rollout"
-HW_TELEOP_SETTLE_SEC = 1.0
+HW_TELEOP_SETTLE_SEC = 0.5
 # Ignore repeated Space/t within this window (keyboard auto-repeat / double-tap).
 TELEOP_TOGGLE_DEBOUNCE_SEC = 0.5
 # After a handled toggle, discard any extra Space/t already buffered by the OS.
