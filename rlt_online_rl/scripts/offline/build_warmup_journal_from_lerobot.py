@@ -4,6 +4,7 @@
 Subcommands
 -----------
 init PATH         Read LeRobot and write one CSV row per episode (edit critical bounds).
+auto PATH         Heuristic critical bounds from gripper open/close (+ joint motion).
 template PATH     Write a single-row placeholder CSV (no dataset).
 example PATH      Write a hardcoded 5-episode example CSV (no dataset).
 list              Print episode lengths (helps annotation).
@@ -30,7 +31,10 @@ package. For ``build``, install: ``pip install 'rlt-online-rl[offline]'``.
 
 Examples
 --------
-    # 1) Init CSV from LeRobot (recommended), edit critical bounds, validate
+    # 1a) Auto-detect critical segments from gripper (approach → insert → release)
+    python scripts/offline/build_warmup_journal_from_lerobot.py auto critical_segments.csv --overwrite
+
+    # 1b) Or init full-episode rows and edit by hand
     python scripts/offline/build_warmup_journal_from_lerobot.py init critical_segments.csv
     python scripts/offline/build_warmup_journal_from_lerobot.py validate --critical-path critical_segments.csv
 
@@ -60,14 +64,8 @@ SRC_ROOT = ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from openpi_client import image_tools  # noqa: E402
-
-from rlt_online_rl.config import RLTOnlineRLConfig  # noqa: E402
-from rlt_online_rl.inference import MachineAFeatureClient  # noqa: E402
-from rlt_online_rl.inference import normalize_feature_payload  # noqa: E402
-from rlt_online_rl.replay import RLTTransition  # noqa: E402
-from rlt_online_rl.replay import ReplayManager  # noqa: E402
-from rlt_online_rl.replay import TransitionSource  # noqa: E402
+# Heavy deps (openpi_client / rlt_online_rl inference+replay) are imported lazily in
+# ``run_build`` / image helpers so ``auto|init|list|validate`` stay lightweight.
 
 logger = logging.getLogger("build_warmup_journal")
 
@@ -156,6 +154,8 @@ def load_critical_segments(path: Path) -> list[dict[str, Any]]:
 
 
 def _resize_hwc_u8(image_hwc_u8: np.ndarray, resize_hw: tuple[int, int]) -> np.ndarray:
+    from openpi_client import image_tools
+
     h, w = int(resize_hw[0]), int(resize_hw[1])
     resized = image_tools.resize_with_pad(image_hwc_u8[None, ...], h, w)[0]
     return np.asarray(resized, dtype=np.uint8)
@@ -432,6 +432,23 @@ class LightLeRobotDataset:
             return str(tasks[0])
         return ""
 
+    def get_episode_actions(self, episode_id: int, *, action_dim: int | None = None) -> np.ndarray:
+        """Load full-episode action array ``[T, A]`` from parquet."""
+        ep = self._check_episode(episode_id)
+        table = self._load_episode_parquet(ep)
+        if "action" not in table.column_names:
+            raise KeyError(f"LeRobot parquet missing 'action' column for episode={episode_id}")
+        actions = np.asarray(table.column("action").to_pylist(), dtype=np.float64)
+        if actions.ndim != 2:
+            raise ValueError(f"episode={episode_id}: expected action [T, A], got shape {actions.shape}")
+        if action_dim is not None:
+            if actions.shape[1] < action_dim:
+                raise ValueError(
+                    f"episode={episode_id}: action dim {actions.shape[1]} < action_dim={action_dim}"
+                )
+            actions = actions[:, :action_dim]
+        return actions
+
 
 def load_lerobot_dataset(repo_id: str, dataset_root: Path) -> LightLeRobotDataset:
     """Load a local LeRobot v2.1 dataset without the HuggingFace lerobot package."""
@@ -445,6 +462,26 @@ def episode_global_range(dataset: LightLeRobotDataset, episode_id: int) -> tuple
 # ---------------------------------------------------------------------------
 # Feature encoding
 # ---------------------------------------------------------------------------
+
+
+def _import_build_deps() -> None:
+    """Import Machine-A / replay deps only when building a journal."""
+    global RLTOnlineRLConfig, MachineAFeatureClient, normalize_feature_payload
+    global RLTTransition, ReplayManager, TransitionSource
+
+    from rlt_online_rl.config import RLTOnlineRLConfig as _RLTOnlineRLConfig
+    from rlt_online_rl.inference import MachineAFeatureClient as _MachineAFeatureClient
+    from rlt_online_rl.inference import normalize_feature_payload as _normalize_feature_payload
+    from rlt_online_rl.replay import RLTTransition as _RLTTransition
+    from rlt_online_rl.replay import ReplayManager as _ReplayManager
+    from rlt_online_rl.replay import TransitionSource as _TransitionSource
+
+    RLTOnlineRLConfig = _RLTOnlineRLConfig
+    MachineAFeatureClient = _MachineAFeatureClient
+    normalize_feature_payload = _normalize_feature_payload
+    RLTTransition = _RLTTransition
+    ReplayManager = _ReplayManager
+    TransitionSource = _TransitionSource
 
 
 class FeatureEncoder:
@@ -587,7 +624,7 @@ def build_transitions_for_critical_segment(
     stride: int,
     segment_last_frame: int,
     episode_success: bool = True,
-) -> list[RLTTransition]:
+) -> list:
     """Build Evo v2 warmup transitions for one critical interval.
 
     Mirrors ``evo_rlt`` ``_encoded_to_transitions``:
@@ -597,6 +634,8 @@ def build_transitions_for_critical_segment(
     - ``done`` when ``t + C`` is the segment's last frame
     - terminal reward ``1.0`` on the last step iff ``episode_success``
     """
+    _import_build_deps()
+
     if len(features) != len(anchor_frames):
         raise ValueError(f"features length {len(features)} != anchor_frames {len(anchor_frames)}")
     if stride <= 0:
@@ -691,6 +730,208 @@ def build_transitions_for_critical_segment(
 # ---------------------------------------------------------------------------
 # CSV helpers (template / validate / list)
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Gripper-based critical segment heuristic (screw_sorting-style demos)
+# ---------------------------------------------------------------------------
+
+
+def _smooth_1d(x: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1 or len(x) == 0:
+        return np.asarray(x, dtype=np.float64)
+    w = min(int(window), len(x))
+    kernel = np.ones(w, dtype=np.float64) / float(w)
+    return np.convolve(np.asarray(x, dtype=np.float64), kernel, mode="same")
+
+
+def _find_gripper_open_segments(
+    gripper: np.ndarray,
+    *,
+    open_thresh: float,
+    close_thresh: float,
+    min_len: int,
+) -> list[tuple[int, int, float]]:
+    """Return (start, end_inclusive, peak) for contiguous gripper-open pulses."""
+    g = np.asarray(gripper, dtype=np.float64).reshape(-1)
+    segs: list[tuple[int, int, float]] = []
+    i = 0
+    n = len(g)
+    while i < n:
+        if g[i] < open_thresh:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and g[j + 1] >= close_thresh:
+            j += 1
+        if j - i + 1 >= min_len:
+            segs.append((i, j, float(g[i : j + 1].max())))
+        i = j + 1
+    return segs
+
+
+def detect_pick_and_release(
+    gripper: np.ndarray,
+    *,
+    strong_open: float = 0.008,
+    weak_open: float = 0.004,
+    min_gap_after_pick: int = 40,
+) -> tuple[int, int, int, int] | None:
+    """Locate pick and place-release gripper opens.
+
+    Demo pattern for screw_sorting:
+      1) first strong open/close = pick
+      2) hold closed during transport / approach / insert
+      3) second (often weaker) open = release after insert
+
+    Returns ``(pick_start, pick_end, release_start, release_end)`` or None.
+    """
+    g = np.asarray(gripper, dtype=np.float64).reshape(-1)
+    n = len(g)
+    if n == 0:
+        return None
+
+    strong = _find_gripper_open_segments(g, open_thresh=strong_open, close_thresh=0.003, min_len=8)
+    weak = _find_gripper_open_segments(g, open_thresh=weak_open, close_thresh=0.002, min_len=5)
+    if not strong and not weak:
+        return None
+
+    pick_s, pick_e, _ = strong[0] if strong else weak[0]
+    strong_rel = [s for s in strong if s[0] > pick_e + min_gap_after_pick]
+    weak_rel = [s for s in weak if s[0] > pick_e + min_gap_after_pick]
+    if strong_rel:
+        rel_s, rel_e, _ = strong_rel[-1]
+        return pick_s, pick_e, rel_s, rel_e
+    if weak_rel:
+        rel_s, rel_e, _ = weak_rel[-1]
+        return pick_s, pick_e, rel_s, rel_e
+
+    # Fallback: largest gripper peak in the latter half after pick.
+    from_i = max(pick_e + min_gap_after_pick, int(0.45 * n))
+    if from_i >= n:
+        return pick_s, pick_e, n - 1, n - 1
+    peak_i = from_i + int(np.argmax(g[from_i:]))
+    thr = max(0.003, 0.5 * float(g[peak_i]))
+    rel_s = peak_i
+    while rel_s > from_i and g[rel_s - 1] >= thr:
+        rel_s -= 1
+    rel_e = peak_i
+    while rel_e + 1 < n and g[rel_e + 1] >= thr:
+        rel_e += 1
+    return pick_s, pick_e, rel_s, rel_e
+
+
+def detect_critical_segment_from_actions(
+    actions: np.ndarray,
+    *,
+    gripper_dim: int = 6,
+    start_mode: str = "approach",
+    approach_enter: float = 0.010,
+    settle_thresh: float = 0.004,
+    motion_smooth: int = 15,
+    end_pad: int = 0,
+) -> tuple[int, int]:
+    """Heuristic critical interval: approach(靠近) → insert → release.
+
+    Anchors come from gripper open/close; joint motion (excluding gripper)
+    locates the late approach / insert settle between pick-close and release.
+
+    ``start_mode``:
+      - ``approach``: start when transport decelerates toward the place (靠近)
+      - ``insert``: start when joint motion settles into the precision insert
+      - ``peak``: start at the transport motion peak (earliest approach)
+    """
+    actions = np.asarray(actions, dtype=np.float64)
+    if actions.ndim != 2 or actions.shape[0] == 0:
+        raise ValueError(f"actions must be [T, A] with T>0, got shape {getattr(actions, 'shape', None)}")
+    n, dim = actions.shape
+    if gripper_dim >= dim:
+        raise ValueError(f"gripper_dim={gripper_dim} out of range for action dim={dim}")
+    if start_mode not in {"approach", "insert", "peak"}:
+        raise ValueError(f"start_mode must be approach|insert|peak, got {start_mode!r}")
+
+    joint_dims = [i for i in range(dim) if i != gripper_dim]
+    step = np.linalg.norm(np.diff(actions[:, joint_dims], axis=0), axis=1)
+    step = np.concatenate([[float(step[0]) if len(step) else 0.0], step])
+    sm = _smooth_1d(step, motion_smooth)
+
+    pr = detect_pick_and_release(actions[:, gripper_dim])
+    if pr is None:
+        return int(0.55 * n), n - 1
+    _pick_s, pick_e, rel_s, rel_e = pr
+    end = min(n - 1, int(rel_e) + int(end_pad))
+
+    lo = int(pick_e) + 5
+    hi = max(lo + 1, int(rel_s))
+    window = sm[lo:hi]
+    if len(window) == 0:
+        return max(0, int(rel_s) - 80), end
+
+    peak_i = lo + int(np.argmax(window))
+    after = sm[peak_i : int(rel_s) + 1]
+    settle_hits = np.where(after < settle_thresh)[0]
+    settle_t = peak_i + int(settle_hits[0]) if len(settle_hits) else peak_i
+
+    if start_mode == "insert":
+        start = settle_t
+    elif start_mode == "peak":
+        start = peak_i
+    else:
+        # approach / 靠近: first deceleration below approach_enter after transport peak
+        hits = np.where(after < approach_enter)[0]
+        start = peak_i + int(hits[0]) if len(hits) else peak_i
+        start = min(start, settle_t)
+
+    start = max(int(pick_e) + 5, min(int(start), end))
+    return int(start), int(end)
+
+
+def auto_csv_from_dataset(
+    path: Path,
+    repo_id: str,
+    dataset_root: Path,
+    *,
+    max_episodes: int = 0,
+    start_mode: str = "approach",
+    approach_enter: float = 0.010,
+    settle_thresh: float = 0.004,
+    gripper_dim: int = 6,
+    end_pad: int = 0,
+    overwrite: bool = False,
+) -> None:
+    """Detect critical segments from gripper events and write CSV."""
+    path = Path(path)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"{path} exists; pass --overwrite to replace it.")
+
+    dataset = load_lerobot_dataset(repo_id, dataset_root)
+    n_eps = dataset.num_episodes if max_episodes <= 0 else min(dataset.num_episodes, max_episodes)
+    rows: list[dict[str, int]] = []
+    for ep in range(n_eps):
+        actions = dataset.get_episode_actions(ep)
+        start, end = detect_critical_segment_from_actions(
+            actions,
+            gripper_dim=gripper_dim,
+            start_mode=start_mode,
+            approach_enter=approach_enter,
+            settle_thresh=settle_thresh,
+            end_pad=end_pad,
+        )
+        rows.append(
+            {
+                "episode_id": ep,
+                "start_frame": start,
+                "end_frame": end,
+                "success": 1,
+            }
+        )
+
+    _write_critical_csv(path, rows)
+    print(
+        f"Wrote {path}: {len(rows)} rows from {dataset.root} "
+        f"(gripper heuristic, start_mode={start_mode}). "
+        "Spot-check start_frame/end_frame before build."
+    )
 
 
 def _write_critical_csv(path: Path, rows: list[dict[str, int]]) -> None:
@@ -889,6 +1130,40 @@ def parse_args() -> argparse.Namespace:
     )
     p_init.add_argument("--overwrite", action="store_true")
 
+    p_auto = sub.add_parser(
+        "auto",
+        help="Heuristic critical CSV from gripper open/close (approach→insert→release).",
+    )
+    p_auto.add_argument("path", type=Path, help="Output CSV path.")
+    _add_dataset_args(p_auto)
+    p_auto.add_argument("--max-episodes", type=int, default=0, help="0 = all episodes.")
+    p_auto.add_argument(
+        "--start-mode",
+        choices=("approach", "insert", "peak"),
+        default="approach",
+        help="approach=靠近 deceleration; insert=precision settle; peak=transport peak.",
+    )
+    p_auto.add_argument(
+        "--approach-enter",
+        type=float,
+        default=0.010,
+        help="Joint-motion threshold for approach onset (used when --start-mode=approach).",
+    )
+    p_auto.add_argument(
+        "--settle-thresh",
+        type=float,
+        default=0.004,
+        help="Joint-motion threshold for insert settle.",
+    )
+    p_auto.add_argument("--gripper-dim", type=int, default=6)
+    p_auto.add_argument(
+        "--end-pad",
+        type=int,
+        default=0,
+        help="Extra frames after detected release end.",
+    )
+    p_auto.add_argument("--overwrite", action="store_true")
+
     p_ex = sub.add_parser("example", help="Write hardcoded 5-episode example CSV (no dataset).")
     p_ex.add_argument("path", type=Path, help="Output CSV path.")
 
@@ -962,6 +1237,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_build(args: argparse.Namespace) -> None:
+    _import_build_deps()
+
     if args.stride <= 0:
         raise ValueError("--stride must be > 0")
     if args.chunk_len <= 0:
@@ -1172,6 +1449,20 @@ def main() -> None:
             args.dataset_root,
             max_episodes=args.max_episodes,
             critical_frac=args.critical_frac,
+            overwrite=args.overwrite,
+        )
+        return
+    if args.command == "auto":
+        auto_csv_from_dataset(
+            args.path,
+            args.repo_id,
+            args.dataset_root,
+            max_episodes=args.max_episodes,
+            start_mode=args.start_mode,
+            approach_enter=args.approach_enter,
+            settle_thresh=args.settle_thresh,
+            gripper_dim=args.gripper_dim,
+            end_pad=args.end_pad,
             overwrite=args.overwrite,
         )
         return

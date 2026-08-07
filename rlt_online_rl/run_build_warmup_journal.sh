@@ -4,19 +4,20 @@
 # Optional once: pip install 'rlt-online-rl[offline]'   # or: pip install pyarrow
 #
 # Usage (pick one or more steps):
+#   ./run_build_warmup_journal.sh auto
 #   ./run_build_warmup_journal.sh init
 #   ./run_build_warmup_journal.sh list
 #   ./run_build_warmup_journal.sh validate
 #   ./run_build_warmup_journal.sh build
-#   ./run_build_warmup_journal.sh list validate
+#   ./run_build_warmup_journal.sh auto validate
 #   ./run_build_warmup_journal.sh all
 set -euo pipefail
 cd "$(dirname "$0")"
 
-DATASET_ROOT="${DATASET_ROOT:-/data/huggingface/lerobot/openpi/screw_sorting_single_rl}"
-REPO_ID="${REPO_ID:-openpi/screw_sorting_single_rl}"
-CRITICAL_CSV="${CRITICAL_CSV:-critical_segments.csv}"
-OUTPUT_JOURNAL="${OUTPUT_JOURNAL:-runs/screw_sorting/replay/replay_journal_demo.pkl}"
+DATASET_ROOT="${DATASET_ROOT:-/data/huggingface/lerobot/openpi/screw_sorting_single_sft}"
+REPO_ID="${REPO_ID:-openpi/screw_sorting_single_sft}"
+CRITICAL_CSV="${CRITICAL_CSV:-critical_segments_sft.csv}"
+OUTPUT_JOURNAL="${OUTPUT_JOURNAL:-runs/screw_sorting/replay/replay_journal_sft.pkl}"
 MACHINE_A_URL="${MACHINE_A_URL:-ws://127.0.0.1:8000}"
 
 usage() {
@@ -24,14 +25,16 @@ usage() {
 Usage: $0 <step> [step ...]
 
 Steps:
-  init      Generate critical CSV from LeRobot (edit start/end after)
+  init      Generate full-episode critical CSV from LeRobot (edit start/end after)
+  auto      Heuristic critical CSV from gripper (approach→insert→release)
   list      Print episode frame counts
   validate  Check critical CSV against dataset (edit CSV first)
   build     Encode features and write warmup journal (needs Machine A)
-  all       Run init → list → validate → build
+  all       Run auto → list → validate → build
 
 Env overrides:
   DATASET_ROOT  CRITICAL_CSV  REPO_ID  OUTPUT_JOURNAL  MACHINE_A_URL
+  START_MODE    approach|insert|peak (default: approach)
 EOF
 }
 
@@ -40,6 +43,16 @@ run_init() {
   python scripts/offline/build_warmup_journal_from_lerobot.py init "$CRITICAL_CSV" \
     --dataset-root "$DATASET_ROOT" \
     --repo-id "$REPO_ID" \
+    --overwrite
+}
+
+run_auto() {
+  START_MODE="${START_MODE:-approach}"
+  echo "==> auto: write $CRITICAL_CSV from $DATASET_ROOT (start_mode=$START_MODE)"
+  python scripts/offline/build_warmup_journal_from_lerobot.py auto "$CRITICAL_CSV" \
+    --dataset-root "$DATASET_ROOT" \
+    --repo-id "$REPO_ID" \
+    --start-mode "$START_MODE" \
     --overwrite
 }
 
@@ -77,11 +90,12 @@ fi
 for step in "$@"; do
   case "$step" in
     init) run_init ;;
+    auto) run_auto ;;
     list) run_list ;;
     validate) run_validate ;;
     build) run_build ;;
     all)
-      run_init
+      run_auto
       run_list
       run_validate
       run_build

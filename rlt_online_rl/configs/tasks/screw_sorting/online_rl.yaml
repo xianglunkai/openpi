@@ -36,7 +36,7 @@ experiment:
 
     warmup_min_size: 1200
     warmup_post_collect_updates: 50000
-    freeze_after_warmup: false
+    freeze_after_warmup: true
     grad_updates_per_cycle: 5
 
 runtime:

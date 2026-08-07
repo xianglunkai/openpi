@@ -25,7 +25,7 @@ TASK_DIR="${RLT_TASK_DIR:-runs/${TASK}}"
 TASK_CONFIG="${RLT_TASK_CONFIG:-configs/tasks/${TASK}/online_rl.yaml}"
 
 # Offline bundle directory (output of offline_train_from_replay.py).
-OFFLINE_DIR="${RLT_OFFLINE_DIR:-${TASK_DIR}/offline_train_bcq_phase-demo-beta-5}"
+OFFLINE_DIR="${RLT_OFFLINE_DIR:-${TASK_DIR}/offline_train_bcq_phase-sft-beta-5}"
 
 # Actor artifact: best (default) | final | bundle
 ACTOR_TAG="${RLT_ACTOR_TAG:-best}"
