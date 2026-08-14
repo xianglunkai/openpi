@@ -51,6 +51,9 @@ from rlt_online_rl.inference import PolicyPlan
 from rlt_online_rl.replay import NullReplayClient
 from rlt_online_rl.replay import ReplayClient
 from rlt_online_rl.replay import TransitionSource
+from rlt_online_rl.rtc_runtime import RtcActionRuntime
+from rlt_online_rl.rtc_runtime import resolve_rtc_execution_horizon
+from rlt_online_rl.rtc_runtime import resolve_rtc_refill_threshold
 from rlt_online_rl.runtime_logging import metrics_path_for
 from rlt_online_rl.runtime_logging import setup_process_logging
 
@@ -834,6 +837,23 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                 raise ValueError(f"action_delta_limits must have {system.rl.action_dim} entries, got {limits.shape[0]}")
             self._action_delta_limits = limits
 
+        self._rtc: RtcActionRuntime | None = None
+        if bool(system.env_driver.use_rtc):
+            self._rtc = RtcActionRuntime(
+                fps=float(system.env_driver.control_frequency_hz),
+                action_queue_size_to_get_new_actions=resolve_rtc_refill_threshold(
+                    system.env_driver,
+                    system.rl,
+                ),
+                guided_inference_delay=system.env_driver.rtc_inference_delay,
+            )
+            logger.info(
+                "RTC enabled fps=%.1f vla_guidance=%s guided_d=%s",
+                float(system.env_driver.control_frequency_hz),
+                bool(system.env_driver.rtc_vla_guidance),
+                system.env_driver.rtc_inference_delay,
+            )
+
     def move_to_home_on_shutdown(self) -> None:
         """Move the robot to the configured reset pose during rollout shutdown."""
         self._intervention_state.enter_episode_reset()
@@ -842,6 +862,8 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
     def reset(self) -> dict[str, Any]:
         if self._runtime_context.stop_requested():
             raise KeyboardInterrupt
+        if self._rtc is not None:
+            self._rtc.reset()
         self._episode_chunk_step = 0
         self._last_sent_action = None
         latest_human_action, latest_human_seq = self._human_action_recorder.snapshot_latest()
@@ -870,44 +892,124 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
     def execute_chunk(
         self,
         *,
+        observation: dict[str, Any] | None = None,
         control_hz: float,
-        policy_planner: Callable[[dict[str, Any], int], PolicyPlan] | None = None,
+        policy_planner: Callable[..., PolicyPlan] | None = None,
     ) -> tuple[dict[str, Any], list[float], bool, dict[str, Any]]:
+        """Per-tick: obs → act → sleep. Trailing get gives o_H for step_trace; next chunk reuses it as o0."""
         if self._runtime_context.stop_requested():
             raise KeyboardInterrupt
         self._phase_controller.observe_progress()
         phase = self._phase_controller.episode_phase
         critical_started = self._runtime_context.in_critical_phase()
+        chunk_phase = phase
+        chunk_critical_started = critical_started
         self.refresh_chunk_horizon_state()
+        uses_rl = bool(self.policy_uses_rl_actor())
         period = 1.0 / max(float(control_hz), 1e-6)
         horizon = self.current_chunk_exec_horizon()
 
-        observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
+        if self._rtc is not None:
+            # Evo: one refill threshold for the whole episode; only RTC ``s`` changes per phase.
+            self._rtc.note_phase(
+                phase,
+                critical_started,
+                self._runtime_context.episode_critical_policy_mode(),
+                uses_rl,
+            )
+
         executed: list[np.ndarray] = []
         ref_actions: list[np.ndarray] = []
         human_controlled: list[bool] = []
         step_sources: list[int] = []
         actor_param_versions: list[int] = []
-        step_observations: list[dict[str, Any]] = [observation]
+        # Length H while looping; append o_H after loop → H+1 for step_trace next_obs.
+        step_observations: list[dict[str, Any]] = []
         policy_anchor_offsets: list[int] = []
         policy_anchor_features: list[ChunkFeatures] = []
         chunk_start_features = None
         current_plan: PolicyPlan | None = None
         plan_cursor = 0
+        phase_interrupted = False
+        # First tick may reuse EnvDriver's observation (Evo has no chunk seam).
+        pending_obs = observation
 
         for local_step in range(horizon):
+            tick_start = time.perf_counter()
+
             if self._runtime_context.stop_requested():
                 raise KeyboardInterrupt
             if self._manual_terminal_requested():
                 break
-            step_observation = step_observations[-1]
-            tick_start = time.perf_counter()
-            policy_enabled = bool(self._intervention_state.is_policy_enabled() and not self._intervention_state.in_resume_cooldown())
+
+            # Re-sample phase each tick (Evo resets RTC on set_rl/set_vla/critical).
+            phase = self._phase_controller.episode_phase
+            critical_started = self._runtime_context.in_critical_phase()
+            prev_uses_rl = uses_rl
+            self.refresh_chunk_horizon_state()
+            uses_rl = bool(self.policy_uses_rl_actor())
+            if self._rtc is not None:
+                phase_changed = self._rtc.note_phase(
+                    phase,
+                    critical_started,
+                    self._runtime_context.episode_critical_policy_mode(),
+                    uses_rl,
+                )
+                if phase_changed or uses_rl != prev_uses_rl:
+                    current_plan = None
+                    plan_cursor = 0
+                    if local_step > 0 and phase_changed:
+                        # End this env chunk early so replay windows stay phase-pure.
+                        phase_interrupted = True
+                        break
+
+            policy_enabled = bool(
+                self._intervention_state.is_policy_enabled() and not self._intervention_state.in_resume_cooldown()
+            )
+            if self._rtc is not None:
+                if self._rtc.note_policy_enabled(policy_enabled):
+                    current_plan = None
+                    plan_cursor = 0
             if not policy_enabled:
                 current_plan = None
                 plan_cursor = 0
 
-            if policy_enabled and policy_planner is not None:
+            if pending_obs is not None:
+                step_observation = pending_obs
+                pending_obs = None
+            else:
+                step_observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
+
+            if policy_enabled and policy_planner is not None and self._rtc is not None:
+                # RL: async ActionQueue only — skip leftover-guided VLA (short C thrash / clamp d).
+                rtc_result = self._rtc.ensure_action(
+                    observation=step_observation,
+                    local_step=local_step,
+                    planner=policy_planner,
+                    # use vla guidance if enabled and not using rl
+                    use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance) and not uses_rl,
+                    execution_horizon=resolve_rtc_execution_horizon(
+                        self._system.env_driver,
+                        self._system.rl,
+                        uses_rl_actor=uses_rl,
+                    ),
+                    rl_refine_steps=None,
+                )
+                meta = rtc_result.metadata
+                if local_step == 0 and meta.is_plan_anchor:
+                    chunk_start_features = meta.start_features
+                elif meta.is_plan_anchor:
+                    policy_anchor_offsets.append(local_step)
+                    policy_anchor_features.append(meta.start_features)
+                raw_action = np.asarray(rtc_result.action, dtype=np.float32)[: self._system.rl.action_dim]
+                bounded = self._apply_action_limits(raw_action)
+                self._robot.send_action(bounded)
+                executed.append(bounded)
+                ref_actions.append(np.asarray(meta.ref_action, dtype=np.float32)[: self._system.rl.action_dim])
+                human_controlled.append(bool(meta.source == int(TransitionSource.HUMAN)))
+                step_sources.append(int(meta.source))
+                actor_param_versions.append(int(meta.actor_param_version))
+            elif policy_enabled and policy_planner is not None:
                 if current_plan is None or plan_cursor >= current_plan.action_chunk.shape[0]:
                     current_plan = policy_planner(step_observation, local_step)
                     plan_cursor = 0
@@ -918,16 +1020,22 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                             policy_anchor_offsets.append(local_step)
                             policy_anchor_features.append(current_plan.start_features)
 
-            if policy_enabled and current_plan is not None and plan_cursor < current_plan.action_chunk.shape[0]:
-                raw_action = np.asarray(current_plan.action_chunk[plan_cursor], dtype=np.float32)[: self._system.rl.action_dim]
-                bounded = self._apply_action_limits(raw_action)
-                self._robot.send_action(bounded)
-                executed.append(bounded)
-                ref_actions.append(np.asarray(current_plan.ref_chunk[plan_cursor], dtype=np.float32)[: self._system.rl.action_dim])
-                human_controlled.append(bool(current_plan.source == int(TransitionSource.HUMAN)))
-                step_sources.append(int(current_plan.source))
-                actor_param_versions.append(int(current_plan.actor_param_version))
-                plan_cursor += 1
+                if current_plan is not None and plan_cursor < current_plan.action_chunk.shape[0]:
+                    raw_action = np.asarray(current_plan.action_chunk[plan_cursor], dtype=np.float32)[
+                        : self._system.rl.action_dim
+                    ]
+                    bounded = self._apply_action_limits(raw_action)
+                    self._robot.send_action(bounded)
+                    executed.append(bounded)
+                    ref_actions.append(
+                        np.asarray(current_plan.ref_chunk[plan_cursor], dtype=np.float32)[
+                            : self._system.rl.action_dim
+                        ]
+                    )
+                    human_controlled.append(bool(current_plan.source == int(TransitionSource.HUMAN)))
+                    step_sources.append(int(current_plan.source))
+                    actor_param_versions.append(int(current_plan.actor_param_version))
+                    plan_cursor += 1
             else:
                 human_action = self._sample_latest_human_action(step_observation)
                 bounded_human = self._apply_action_limits(human_action)
@@ -937,30 +1045,46 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                 human_controlled.append(True)
                 step_sources.append(int(TransitionSource.HUMAN))
                 actor_param_versions.append(-1)
+
             elapsed = time.perf_counter() - tick_start
             remaining = period - elapsed
             if remaining > 0:
                 time.sleep(remaining)
-            step_observations.append(self._robot.get_observation(self._resize_hw, self._task_state.get()))
+            else:
+                logger.warning("Tick took too long: %.4f s (period=%.4f)", elapsed, period)
+            step_observations.append(step_observation)
 
-        next_observation = step_observations[-1] if step_observations else self._robot.get_observation(self._resize_hw, self._task_state.get())
+        # o_H after last sleep; EnvDriver reuses it as next chunk o0 (no second get).
+        next_observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
+        if executed:
+            step_observations.append(next_observation)
+
         signal_snapshot = self._runtime_context.snapshot_signals()
         context = {
             "episode_chunk_step": self._episode_chunk_step,
             "executed_steps": len(executed),
-            "interrupted": bool(any(human_controlled)),
-            "phase": phase,
+            "interrupted": bool(any(human_controlled) or phase_interrupted),
+            "phase": chunk_phase,
             "task_mode": self._task_mode,
-            "critical_started": critical_started,
+            "critical_started": chunk_critical_started,
+            "phase_interrupted": phase_interrupted,
             "runtime": self._runtime_context,
             "signals": signal_snapshot,
         }
+        chunk_start_obs = step_observations[0] if step_observations else next_observation
         rewards = _coerce_reward_output(
-            self._reward_fn(observation, np.asarray(executed, dtype=np.float32), next_observation, context),
+            self._reward_fn(
+                chunk_start_obs,
+                np.asarray(executed, dtype=np.float32)
+                if executed
+                else np.zeros((0, self._system.rl.action_dim), dtype=np.float32),
+                next_observation,
+                context,
+            ),
             executed_steps=len(executed),
         )
-        success = int(bool(self._success_fn(observation, next_observation, context)))
-        manual_done = bool(self._done_fn(observation, next_observation, context))
+        success = int(bool(self._success_fn(chunk_start_obs, next_observation, context)))
+        manual_done = bool(self._done_fn(chunk_start_obs, next_observation, context))
         terminal_requested = bool(success or manual_done)
         self._consume_manual_terminal_events(signal_snapshot)
         human_intervened = any(human_controlled)
@@ -992,6 +1116,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                 "policy_anchor_offsets": policy_anchor_offsets,
                 "policy_anchor_features": policy_anchor_features,
                 "chunk_start_features": chunk_start_features,
+                "phase_interrupted": phase_interrupted,
             }
 
         self._episode_chunk_step += 1
@@ -1004,26 +1129,19 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
             source = int(TransitionSource.MIXED if any(not flag for flag in human_controlled) else TransitionSource.HUMAN)
         else:
             source = int(step_sources[0])
-        if not critical_started:
-            return next_observation, rewards, done, {
-                "drop_transition": True,
-                "intervention_flag": human_intervened,
-                "source": source,
-                "success": success,
-                "step_trace": step_trace,
-                "policy_anchor_offsets": policy_anchor_offsets,
-                "policy_anchor_features": policy_anchor_features,
-                "chunk_start_features": chunk_start_features,
-            }
-        return next_observation, rewards, done, {
-            "success": success,
+        info = {
             "intervention_flag": human_intervened,
             "source": source,
+            "success": success,
             "step_trace": step_trace,
             "policy_anchor_offsets": policy_anchor_offsets,
             "policy_anchor_features": policy_anchor_features,
             "chunk_start_features": chunk_start_features,
+            "phase_interrupted": phase_interrupted,
         }
+        if not chunk_critical_started:
+            info["drop_transition"] = True
+        return next_observation, rewards, done, info
 
     def _wait_until_policy_active(self) -> None:
         while not rospy.is_shutdown():
@@ -1077,6 +1195,8 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
         self._robot.move_to_reset(self._reset_target_for_mode())
 
     def _on_episode_done(self, *, terminal_requested: bool) -> None:
+        if self._rtc is not None:
+            self._rtc.reset()
         self._intervention_state.enter_episode_reset()
         self._phase_controller.finish_episode()
         if terminal_requested:

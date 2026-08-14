@@ -109,7 +109,30 @@ class StepTraceRecord:
 
 
 class FeatureProvider(Protocol):
-    def get_features(self, _observation: dict[str, Any]) -> dict[str, Any]: ...
+    def get_features(
+        self,
+        _observation: dict[str, Any],
+        *,
+        use_rtc: bool = False,
+        prev_actions: np.ndarray | None = None,
+        inference_delay: int | None = None,
+        rtc_execution_horizon: int | None = None,
+    ) -> dict[str, Any]: ...
+
+
+def _clone_obs_for_features(observation: dict[str, Any]) -> dict[str, Any]:
+    cloned: dict[str, Any] = {}
+    for key, value in observation.items():
+        if isinstance(value, np.ndarray):
+            cloned[key] = value.copy()
+        elif isinstance(value, dict):
+            cloned[key] = {
+                nested_key: (nested_val.copy() if isinstance(nested_val, np.ndarray) else nested_val)
+                for nested_key, nested_val in value.items()
+            }
+        else:
+            cloned[key] = value
+    return cloned
 
 
 @dataclasses.dataclass(slots=True)
@@ -137,6 +160,10 @@ class PolicyPlan:
     source: int
     start_features: ChunkFeatures
     actor_param_version: int = -1
+    # Optional override for per-step source tagging. Evo-RLT RL phase queues only
+    # the actor chunk (all steps share ``source``); leave None unless a caller
+    # intentionally splits the queued chunk.
+    rl_refine_steps: int | None = None
 
 
 def _coerce_feature_vector(name: str, value: Any, expected_dim: int) -> np.ndarray:
@@ -507,7 +534,32 @@ class ActorClient:
             payload = msgpack_numpy.unpackb(response.read())
         return int(payload["actor_param_version"])
 
-
+# 1) maybe_refine_chunk
+#      │
+# 2) ActorClient.infer
+#      │  msgpack 打包 ActorRequest
+#      │  HTTP POST  http://127.0.0.1:9101/infer
+#      │  timeout = actor_request_timeout_sec (yaml: 2s)
+#      │
+# 3) ActorService (独立进程) Handler.do_POST
+#      │  解包 → service.infer(ActorRequest)
+#      │
+# 4) ActorService.infer
+#      ├─ 无 snapshot → 直接返回 ref_chunk, source=BASE
+#      └─ 有 snapshot →
+#            normalize ref (若 delta)
+#            → RLTPolicyInferenceWrapper / ChunkActor JAX 前向
+#            → denormalize 回绝对动作
+#            → refined_chunk, source=RL
+#      │
+# 5) HTTP 响应 msgpack
+#      │
+# 6) ActorClient 解包 → ActorResponse
+#      │
+# 7) maybe_refine_chunk
+#      ├─ 成功 → RefinementResult(refined, source, version, fallback=False)
+#      └─ URLError/Timeout → 若 on_error_fallback:
+#               用 ref_chunk, source=BASE, fallback=True
 def maybe_refine_chunk(
     actor_client: ActorClient,
     *,
@@ -570,8 +622,27 @@ class MachineAFeatureClient:
         self._packer = msgpack_numpy.Packer()
         self._ws = self._wait_for_server()
 
-    def get_features(self, observation: dict[str, Any]) -> dict[str, Any]:
-        return self._infer(observation)
+    def get_features(
+        self,
+        observation: dict[str, Any],
+        *,
+        use_rtc: bool = False,
+        prev_actions: np.ndarray | None = None,
+        inference_delay: int | None = None,
+        rtc_execution_horizon: int | None = None,
+    ) -> dict[str, Any]:
+        obs = _clone_obs_for_features(observation)
+    
+        if use_rtc:
+            if prev_actions is not None:
+                obs["actions"] = np.asarray(prev_actions, dtype=np.float32)
+            if inference_delay is not None:
+                obs["inference_delay"] = int(inference_delay)
+            if rtc_execution_horizon is not None:
+                obs["rtc_execution_horizon"] = int(rtc_execution_horizon)
+            # Match openpi WebsocketClientPolicy wire format so the server enables guided_inference.
+            return self._infer({"obs": obs, "use_rtc": True})
+        return self._infer(obs)
 
     def get_features_batch(self, observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Batch feature request: send multiple observations in one round-trip.
@@ -756,12 +827,27 @@ class EnvDriver:
         while not done:
             plan_request_count = 0
 
-            def _policy_planner(plan_observation: dict[str, Any], local_step: int) -> PolicyPlan:
-             
+            def _policy_planner(
+                plan_observation: dict[str, Any],
+                local_step: int,
+                *,
+                prev_actions: np.ndarray | None = None,
+                use_rtc: bool = False,
+                inference_delay: int = 0,
+                rtc_execution_horizon: int | None = None,
+            ) -> PolicyPlan:
                 nonlocal fallback_count, intervention_count, plan_request_count
-                # Machine A 特征 + ref_chunk（baseline 动作块）
+
+                # 1. Machine A 特征 + ref_chunk（baseline 动作块）
                 current = normalize_feature_payload(
-                    self._feature_provider.get_features(plan_observation),
+                    # return z_rl, proprio, full_ref  (可 guided)
+                    self._feature_provider.get_features(
+                        plan_observation,
+                        use_rtc=bool(use_rtc),
+                        prev_actions=prev_actions,
+                        inference_delay=int(inference_delay) if use_rtc else None,
+                        rtc_execution_horizon=rtc_execution_horizon if use_rtc else None,
+                    ),
                     self._rl_config,
                     observation=plan_observation,
                     ref_chunk_len=self._ref_chunk_horizon_for_planning(),
@@ -771,13 +857,15 @@ class EnvDriver:
                     proprio=np.asarray(current["proprio"], dtype=np.float32),
                     ref_chunk=np.asarray(current["ref_chunk"], dtype=np.float32),
                 )
-                ref_chunk = current_features.ref_chunk
-                # 远程 Actor 在 ref_chunk 基础上输出 refined_chunk；失败时可回退 ref
+                full_ref_chunk = current_features.ref_chunk
+                actor_ref_chunk = full_ref_chunk[: self._rl_config.chunk_len]
+
+                # 2. 远程 Actor 在 ref_chunk 基础上输出 refined_chunk；失败时可回退 ref
                 refine = maybe_refine_chunk(
                     self._actor_client,
                     z_rl=current_features.z_rl,
                     proprio=current_features.proprio,
-                    ref_chunk=ref_chunk,
+                    ref_chunk=actor_ref_chunk,
                     request_id=f"{episode_id}:{step_id}:{plan_request_count}:{local_step}",
                     episode_id=episode_id,
                     step_id=env_step_id + local_step,
@@ -785,7 +873,7 @@ class EnvDriver:
                     on_error_fallback=self._env_config.safe_fallback_to_ref,
                 )
                 plan_request_count += 1
-                action_chunk = refine.refined_chunk
+                refined_prefix = np.asarray(refine.refined_chunk, dtype=np.float32)
                 source = refine.source
                 actor_param_version = int(refine.actor_param_version)
                 if refine.used_fallback:
@@ -799,9 +887,9 @@ class EnvDriver:
                     )
                 # 遥操作/键盘接管：覆盖 Actor 输出，标记为 HUMAN 来源
                 if self._env_config.enable_human_override and self._human_override_fn is not None:
-                    maybe_human_chunk = self._human_override_fn(plan_observation, ref_chunk, action_chunk)
+                    maybe_human_chunk = self._human_override_fn(plan_observation, actor_ref_chunk, refined_prefix)
                     if maybe_human_chunk is not None:
-                        action_chunk = np.asarray(maybe_human_chunk, dtype=np.float32)
+                        refined_prefix = np.asarray(maybe_human_chunk, dtype=np.float32)
                         source = int(TransitionSource.HUMAN)
                         actor_param_version = -1
                         intervention_count += 1
@@ -812,13 +900,34 @@ class EnvDriver:
                             plan_request_count - 1,
                         )
                 if self._safe_action_filter is not None:
-                    action_chunk = self._safe_action_filter(action_chunk)
+                    refined_prefix = self._safe_action_filter(refined_prefix)
+
+                # VLA/BASE → enqueue full guided VLA chunk for RTC overlap.
+                # RL → enqueue only actor prefix (chunk_len).
+                if (
+                    self._env_config.use_rtc
+                    and int(source) != int(TransitionSource.RL)
+                    and full_ref_chunk.shape[0] > refined_prefix.shape[0]
+                ):
+                    action_chunk = full_ref_chunk
+                    if self._safe_action_filter is not None:
+                        action_chunk = self._safe_action_filter(action_chunk)
+                    plan_ref = action_chunk
+                else:
+                    action_chunk = refined_prefix
+                    plan_ref = actor_ref_chunk
+                plan_features = ChunkFeatures(
+                    z_rl=current_features.z_rl,
+                    proprio=current_features.proprio,
+                    ref_chunk=actor_ref_chunk,
+                )
                 return PolicyPlan(
                     action_chunk=np.asarray(action_chunk, dtype=np.float32),
-                    ref_chunk=np.asarray(ref_chunk, dtype=np.float32),
+                    ref_chunk=np.asarray(plan_ref, dtype=np.float32),
                     source=int(source),
-                    start_features=current_features,
+                    start_features=plan_features,
                     actor_param_version=actor_param_version,
+                    rl_refine_steps=None,
                 )
 
             # 在环境中执行整个 chunk（内部按需回调 _policy_planner）
@@ -872,6 +981,7 @@ class EnvDriver:
                 policy_anchor_offsets=info.get("policy_anchor_offsets") or [],
                 policy_anchor_features=info.get("policy_anchor_features") or [],
             )
+            # update the observation
             observation = next_observation
             step_id += 1
             episode_success = int(info.get("success", episode_success))
@@ -1469,13 +1579,16 @@ class EnvDriver:
         observation: dict[str, Any],
         policy_planner: Callable[[dict[str, Any], int], PolicyPlan],
     ) -> tuple[dict[str, Any], list[float], bool, dict[str, Any]]:
+        # complex case: execute_chunk is defined; step the action through the environment
         if hasattr(self._env, "execute_chunk"):
             next_obs, rewards, done, info = self._env.execute_chunk(
+                observation=observation,
                 control_hz=self._env_config.control_frequency_hz,
                 policy_planner=policy_planner,
             )
             return next_obs, list(rewards), bool(done), dict(info)
 
+        # simple case: no execute_chunk; directly step the action
         plan = policy_planner(observation, 0)
         action_chunk = np.asarray(plan.action_chunk, dtype=np.float32)
         exec_horizon = self._chunk_exec_horizon_for_plan(plan)

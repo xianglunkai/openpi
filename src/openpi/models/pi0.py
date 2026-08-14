@@ -416,10 +416,10 @@ class Pi0(_model.BaseModel):
         rng: at.KeyArrayLike,
         observation: _model.Observation,
         *,
-        num_steps: int | at.Int[at.Array, ""] = 10,  
+        num_steps: int | at.Int[at.Array, ""] = 10,
         prev_action: _model.Actions = None,  # shape (b, ah, ad)
         s: int = 25,
-        d: int = 10,  # for 50hz d = 12
+        d: int = 7,  # for 50hz d = 12
         beta: float = 10.0,
         sigma: float = 0.2,
     ) -> _model.Actions:
@@ -450,48 +450,38 @@ class Pi0(_model.BaseModel):
           
       
         def make_W(start: int, end: int, total: int) -> jnp.ndarray:
-            """
-            generate the weight vector W ∈ ℝ^H
-            parameters
-            ----
-            H : int  # sequence length
-            d : int  # "deterministic region" threshold
-            s : int  # "truncated" window length
-            return
-            ----
-            W : jnp.ndarray, shape (H,)
-            """
-            i = jnp.arange(total)           # 0,1,2,...,H-1
+            """Prefix attention weights (LeRobot ``get_prefix_weights`` EXP schedule).
 
-            # three-segment condition
-            cond_1 = i < start              # first d tokens are all 1
-            cond_2 = (i >= start) & (i < end)   # middle s-d tokens decay exponentially
-            cond_3 = i >= end         # actually can be else
+            ``start`` is inference delay ``d``; ``end`` is execution horizon ``s``.
+            When ``d > s``, ``start`` is clamped to ``end`` so the soft band collapses
+            and the first ``s`` steps are hard-locked (weight=1).
+            """
+            # Match LeRobot: start = min(start, end)
+            start = min(int(start), int(end))
+            end = int(end)
+            i = jnp.arange(total)  # 0,1,2,...,H-1
 
-            # segment (1): all 1
+            cond_1 = i < start  # first d tokens are all 1
+            cond_2 = (i >= start) & (i < end)  # soft decay band (empty when d == s)
+
             w1 = jnp.ones_like(i, dtype=float)
-
-            # segment (2): exponential decay
-            c_i = (end - i) / (end - start + 1) # c_i goes from 1 to 0 as i goes from d to s
-            w2  = jnp.exp(c_i) - 1       # e^{c_i} - 1 goes from e-1 to 0 as c_i goes from 1 to 0
-            w2  = c_i * w2 / (jnp.e - 1) # (e^{c_i} - 1) / (e - 1)
-         
-            # segment (3): all 0
+            # When start == end, cond_2 is empty so this value is unused (denom = 1).
+            c_i = (end - i) / (end - start + 1)
+            w2 = jnp.exp(c_i) - 1
+            w2 = c_i * w2 / (jnp.e - 1)
             w3 = jnp.zeros_like(i, dtype=float)
 
-            # concatenate three segments
-            W = jnp.where(cond_1, w1,
-                jnp.where(cond_2, w2, w3)
-            )
-
+            W = jnp.where(cond_1, w1, jnp.where(cond_2, w2, w3))
             D = jnp.diag(W)
-
-            D_batch = jnp.stack([D] * 1, axis=0)
-            return D_batch
+            return jnp.stack([D] * 1, axis=0)
 
         # create W
         diag_W = make_W(inference_delay, execution_horizon, action_horizon)
 
+        # Debug toggle (Python const → resolved at trace time):
+        #   False → identity Jacobian approx (current deploy default)
+        #   True  → true VJP through a1 = x - t*v  (LeRobot / PI Kinetix)
+        use_rtc_vjp = False
 
         def denoise_step(x_t, time):
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
@@ -522,29 +512,38 @@ class Pi0(_model.BaseModel):
 
             return v_t
 
+        def func_a_1_prime(x_t, time):
+            """Returns (a1, v) so VJP can constrain a1 only (cotangent on v is zeroed)."""
+            v_t = denoise_step(x_t, time)
+            return x_t - time * v_t, v_t
+
         def step_rtc(carry):
             x_t, time = carry
-        
-            v_t = denoise_step(x_t, time)
-            a_1_prime = x_t - time * v_t
 
-            e = prev_chunk_left_over - a_1_prime
-            e = jnp.matmul(diag_W, e)
-            
-            #Compute vector-Jacobian product
-            # grad_a_1_prime_x_t = f_vjp((e, jnp.zeros_like(v_t)))
-            grad_a_1_prime_x_t = e
-            
+            if use_rtc_vjp:
+                # True VJP: correction = (∂a1/∂x)^T e  with a1 = x - t*v
+                (a_1_prime, v_t), f_vjp = jax.vjp(func_a_1_prime, x_t, time)
+                e = prev_chunk_left_over - a_1_prime
+                e = jnp.matmul(diag_W, e)
+                # Cotangents for outputs (a1, v); [0] is grad w.r.t. primal x_t (not batch).
+                correction = f_vjp((e, jnp.zeros_like(v_t)))[0]
+            else:
+                # Identity Jacobian approx: correction ≈ e  (no ∂v/∂x). Fast, weaker merge.
+                v_t = denoise_step(x_t, time)
+                a_1_prime = x_t - time * v_t
+                e = prev_chunk_left_over - a_1_prime
+                e = jnp.matmul(diag_W, e)
+                correction = e
+
             prior_variance = sigma ** 2
             inv_r2 = (time ** 2 + ((1 - time) ** 2) * prior_variance) / ((time ** 2) * prior_variance)
             c = jnp.nan_to_num(time / (1 - time), posinf=beta)
-            guidance_weight = jnp.nan_to_num(c * inv_r2, posinf = beta)
+            guidance_weight = jnp.nan_to_num(c * inv_r2, posinf=beta)
             guidance_weight = jnp.minimum(guidance_weight, beta)
-            a_2_prime = x_t + dt * (v_t - guidance_weight * grad_a_1_prime_x_t[0])
-           
+            a_2_prime = x_t + dt * (v_t - guidance_weight * correction)
+
             return a_2_prime, time + dt
-        
-        
+
         def step_normal(carry):
             x_t, time = carry
             v_t = denoise_step(x_t, time)

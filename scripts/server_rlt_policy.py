@@ -95,22 +95,39 @@ class RLTInferenceModel(nnx.Module):
             return self._infer_shared_prefix(rng, observation)
         return self._infer_legacy(rng, observation)
 
-    # def _infer_legacy(self, rng: at.KeyArrayLike, observation: _model.Observation) -> tuple[jnp.ndarray, jnp.ndarray]:
-    #     prefix_embs, _ = self.vla.extract_prefix_embeddings(rng, observation, train=False, image_only=True)
-    #     prefix_f32 = prefix_embs.astype(jnp.float32)
-    #     rl_token = self.rlt_module(prefix_f32, None, method="encode", train=False)
-    #     actions = self.vla.sample_actions(rng, observation)
-    #     return actions, rl_token
+    def infer_guided(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        prev_action: jnp.ndarray | None = None,
+        s: int = 25,
+        d: int = 7,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """RTC path: guided VLA chunk + RL token from the same observation prefix.
 
-    # def _infer_shared_prefix(
-    #     self, rng: at.KeyArrayLike, observation: _model.Observation
-    # ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    #     prefix_cache = self.vla.prepare_prefix_for_inference(observation)
-    #     prefix_f32 = prefix_cache.image_prefix_out.astype(jnp.float32)
-    #     rl_token = self.rlt_module(prefix_f32, None, method="encode", train=False)
-    #     actions = self.vla.sample_actions_from_prefix_cache(rng, prefix_cache)
+        ``prev_action=None`` matches openpi ``Policy``: still calls ``guided_inference``,
+        which falls back to the unguided ``step_normal`` branch internally.
+        """
+        if self.shared_prefix_inference:
+            prefix_cache = self.vla.prepare_prefix_for_inference(observation)
+            prefix_f32 = prefix_cache.image_prefix_out.astype(jnp.float32)
+            image_prefix_mask = prefix_cache.prefix_mask[:, : prefix_f32.shape[1]]
+            rl_token = self.rlt_module(prefix_f32, image_prefix_mask, method="encode", train=False)
+        else:
+            prefix_embs, prefix_mask = self.vla.extract_prefix_embeddings(
+                rng, observation, train=False, image_only=True
+            )
+            prefix_f32 = prefix_embs.astype(jnp.float32)
+            rl_token = self.rlt_module(prefix_f32, prefix_mask, method="encode", train=False)
+        actions = self.vla.guided_inference(
+            rng,
+            observation,
+            prev_action=prev_action,
+            s=int(s),
+            d=int(d),
+        )
         return actions, rl_token
-
 
     def _infer_legacy(self, rng: at.KeyArrayLike, observation: _model.Observation) -> tuple[jnp.ndarray, jnp.ndarray]:
         prefix_embs, prefix_mask = self.vla.extract_prefix_embeddings(
@@ -138,6 +155,20 @@ CHUNK_LEN = 50
 ACTION_DIM = 7
 
 
+def _pad_prev_action_time(prev_action: jnp.ndarray, action_horizon: int) -> jnp.ndarray:
+    """Pad/truncate leftover actions to ``(B, action_horizon, D)`` for stable JIT shapes."""
+    prev = jnp.asarray(prev_action, dtype=jnp.float32)
+    if prev.ndim != 3:
+        raise ValueError(f"prev_action must be rank-3 (B, T, D), got {prev.shape}")
+    t = int(prev.shape[1])
+    if t == action_horizon:
+        return prev
+    if t > action_horizon:
+        return prev[:, :action_horizon, :]
+    pad = jnp.zeros((prev.shape[0], action_horizon - t, prev.shape[2]), dtype=prev.dtype)
+    return jnp.concatenate([prev, pad], axis=1)
+
+
 class RLTPolicy(_base_policy.BasePolicy):
     """Policy that returns both VLA actions and RL tokens via WebSocket.
 
@@ -160,7 +191,13 @@ class RLTPolicy(_base_policy.BasePolicy):
         self._output_transform = _transforms.compose(output_transforms)
         self._metadata = metadata or {}
         self._rng = rng or jax.random.key(0)
+        self._action_horizon = int(getattr(model.vla, "action_horizon", CHUNK_LEN))
         self._infer_fn = nnx_utils.module_jit(model.infer)
+        # s/d must be static: guided_inference uses them as concrete Python ints, and
+        # deploy warmup intentionally compiles a separate graph per (s, d) pair.
+        self._infer_guided_fn = nnx_utils.module_jit(
+            model.infer_guided, static_argnames=("s", "d")
+        )
 
     @override
     def infer(
@@ -169,10 +206,12 @@ class RLTPolicy(_base_policy.BasePolicy):
         use_rtc: bool = False,
         noise: np.ndarray | None = None,
     ) -> dict:
-        del use_rtc, noise  # RLT feature server does not use RTC or custom noise.
+        del noise  # RLT feature server does not accept custom noise yet.
         if "batch" in obs:
+            if use_rtc:
+                logging.warning("RLT batch inference ignores use_rtc; falling back to sample_actions.")
             return self._infer_batch(obs["batch"])
-        return self._infer_single(obs)
+        return self._infer_single(obs, use_rtc=use_rtc)
 
     @staticmethod
     def _as_action_chunk(actions: np.ndarray) -> np.ndarray:
@@ -186,17 +225,56 @@ class RLTPolicy(_base_policy.BasePolicy):
             raise ValueError(f"Expected action chunk shape (T, D) or (1, T, D), got {arr.shape}")
         return arr
 
-    def _infer_single(self, obs: dict) -> dict:
+    def _infer_single(self, obs: dict, *, use_rtc: bool = False) -> dict:
         """Single observation inference (original behavior)."""
-        inputs = jax.tree.map(lambda x: x, obs)
+        # RTC control knobs are client-side metadata; keep them out of model transforms.
+        inputs = dict(obs)
+        inference_delay = int(inputs.pop("inference_delay", 0) or 7)
+        execution_horizon = int(inputs.pop("rtc_execution_horizon", 25) or 25)
+
         inputs = self._input_transform(inputs)
+        # Match openpi.policies.policy.Policy: leftover actions pass through DeltaActions etc.
+        prev_action = inputs.pop("actions", None) if use_rtc else None
+        if not use_rtc:
+            inputs.pop("actions", None)
+
         inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
         self._rng, sample_rng = jax.random.split(self._rng)
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
-        # actions shape : [1, 50, 32]
-        actions, rl_token = self._infer_fn(sample_rng, observation)
+        if use_rtc:
+            # Align with openpi.policies.policy.Policy: use_rtc alone selects guided_inference.
+            # prev_action may be None on the first chunk; pi0.guided_inference then uses step_normal.
+            guided_prev = None
+            if prev_action is not None:
+                guided_prev = jnp.asarray(prev_action, dtype=jnp.float32)
+                if guided_prev.ndim == 2:
+                    guided_prev = guided_prev[np.newaxis, ...]
+                # Fixed time length keeps module_jit shapes stable across leftover sizes.
+                # Safe only when leftover_len >= s (client refill threshold enforces this);
+                # zero pad then lands in the W=0 tail beyond s.
+                guided_prev = _pad_prev_action_time(guided_prev, self._action_horizon)
+            s = max(1, int(execution_horizon))
+            # LeRobot get_prefix_weights: start = min(start, end). When d >= s the soft
+            # band collapses and the first s steps are hard-locked (weight=1).
+            d = max(0, min(int(inference_delay), s))
+            if d != int(inference_delay):
+                logging.warning(
+                    "Clamping RTC inference_delay %d -> %d for execution_horizon s=%d",
+                    int(inference_delay),
+                    d,
+                    s,
+                )
+            actions, rl_token = self._infer_guided_fn(
+                sample_rng,
+                observation,
+                prev_action=guided_prev,
+                s=s,
+                d=d,
+            )
+        else:
+            actions, rl_token = self._infer_fn(sample_rng, observation)
         infer_time = time.monotonic() - start_time
 
         return self._build_single_result(
@@ -371,6 +449,80 @@ class Args:
     port: int = 8000
     default_prompt: str | None = None
     shared_prefix_inference: bool = False
+    # Pre-compile guided_inference graphs before serving.
+    # Server uses d_eff=min(d, s) (LeRobot-style). Pass multiple s/d to cover latency + leftover clamps.
+    rtc_warmup_s: tuple[int, ...] = (10, 25)
+    rtc_warmup_d: tuple[int, ...] = (7,)
+    skip_rtc_warmup: bool = False
+
+
+def warmup_rlt_policy_graphs(
+    policy: RLTPolicy,
+    model_config: _model.BaseModelConfig,
+    *,
+    rtc_s_values: Sequence[int],
+    rtc_d_values: Sequence[int],
+) -> None:
+    """JIT-warm sample_actions + guided_inference for each deploy (s, d)."""
+    observation = model_config.fake_obs(batch_size=1)
+    policy._rng, sample_rng = jax.random.split(policy._rng)
+    logging.info("Warming up sample_actions / infer ...")
+    t0 = time.monotonic()
+    policy._infer_fn(sample_rng, observation)
+    logging.info("sample_actions warmup done in %.1fs", time.monotonic() - t0)
+
+    action_dim = int(getattr(policy._model.vla, "action_dim", ACTION_DIM))
+    prev = jnp.zeros((1, policy._action_horizon, action_dim), dtype=jnp.float32)
+    pairs: list[tuple[int, int]] = []
+    for s_raw in rtc_s_values:
+        s = max(1, int(s_raw))
+        for d_raw in rtc_d_values:
+            d_eff = max(0, min(int(d_raw), s))
+            pairs.append((s, d_eff))
+    # Deduplicate while preserving order.
+    seen: set[tuple[int, int]] = set()
+    unique_pairs: list[tuple[int, int]] = []
+    for pair in pairs:
+        if pair not in seen:
+            seen.add(pair)
+            unique_pairs.append(pair)
+    logging.info(
+        "Warming up %d guided_inference (s,d) graphs (+ first-chunk prev=None): %s",
+        len(unique_pairs),
+        ", ".join(f"({s},{d_eff})" for s, d_eff in unique_pairs),
+    )
+    for s, d_eff in unique_pairs:
+        policy._rng, sample_rng = jax.random.split(policy._rng)
+        logging.info("Warming up guided_inference s=%d d=%d (with prev) ...", s, d_eff)
+        t0 = time.monotonic()
+        policy._infer_guided_fn(
+            sample_rng,
+            observation,
+            prev_action=prev,
+            s=s,
+            d=d_eff,
+        )
+        logging.info("guided_inference s=%d d=%d warmup done in %.1fs", s, d_eff, time.monotonic() - t0)
+
+    # First RTC chunk has no leftover: still calls guided_inference (step_normal). Warm that
+    # specialization for the largest s (VLA preferred) to avoid a cold compile on episode start.
+    s0, d0 = max(unique_pairs, key=lambda sd: sd[0])
+    policy._rng, sample_rng = jax.random.split(policy._rng)
+    logging.info("Warming up guided_inference s=%d d=%d (prev=None / first chunk) ...", s0, d0)
+    t0 = time.monotonic()
+    policy._infer_guided_fn(
+        sample_rng,
+        observation,
+        prev_action=None,
+        s=s0,
+        d=d0,
+    )
+    logging.info(
+        "guided_inference s=%d d=%d prev=None warmup done in %.1fs",
+        s0,
+        d0,
+        time.monotonic() - t0,
+    )
 
 
 def main(args: Args) -> None:
@@ -422,9 +574,18 @@ def main(args: Args) -> None:
             "action_dim": ACTION_DIM,
             "supports_batch": True,
             "shared_prefix_inference": args.shared_prefix_inference,
+            "rtc_warmup_s": list(args.rtc_warmup_s),
+            "rtc_warmup_d": list(args.rtc_warmup_d),
         },
     )
 
+    if not args.skip_rtc_warmup:
+        warmup_rlt_policy_graphs(
+            policy,
+            config.model,
+            rtc_s_values=args.rtc_warmup_s,
+            rtc_d_values=args.rtc_warmup_d,
+        )
 
     # Serve
     hostname = socket.gethostname()

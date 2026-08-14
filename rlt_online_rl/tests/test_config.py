@@ -166,5 +166,5 @@ def test_paper_aligned_defaults_are_exposed_in_system_config() -> None:
     assert system.rl.warmup_post_collect_updates is None
     assert system.rl.freeze_after_warmup is False
     assert system.rl.grad_updates_per_cycle == 5
-    assert system.env_driver.control_frequency_hz == 50.0
+    assert system.env_driver.control_frequency_hz == 30.0
     assert system.env_driver.replay_request_timeout_sec == 30.0

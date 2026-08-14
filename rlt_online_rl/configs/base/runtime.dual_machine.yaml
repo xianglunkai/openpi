@@ -27,7 +27,11 @@ runtime:
     episode_start_control_mode: policy
     vla_chunk_exec_horizon: 25
     rl_chunk_exec_horizon: null
-    control_frequency_hz: 50.0
+    use_rtc: false
+    # Evo-RLT collect defaults when RTC is enabled later:
+    # rtc_execution_horizon_vla=25, rtc_execution_horizon_rl=10,
+    # action_queue_size_to_get_new_actions=30, rtc_inference_delay=null
+    control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16
     safe_fallback_to_ref: true

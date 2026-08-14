@@ -95,9 +95,17 @@ runtime:
     - -0.00209808349609375
     - 0.09
     actor_deterministic: true
+    # Paper screw vla_horizon=50; RL chunk_length=10 (Evo ac_paper_screw.yaml).
     vla_chunk_exec_horizon: 50
-    # null → rl.chunk_len (10 for screw_sorting)
     rl_chunk_exec_horizon: null
+    # RTC defaults match Evo-RLT ``record collect`` CLI.
+    use_rtc: true
+    rtc_vla_guidance: true
+    rtc_execution_horizon_vla: 25
+    rtc_execution_horizon_rl: 10
+    # null → latency_tracker (Evo); set int only if you need a fixed JIT ``d``.
+    rtc_inference_delay: null
+    action_queue_size_to_get_new_actions: 30
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16

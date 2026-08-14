@@ -27,7 +27,8 @@ runtime:
     episode_start_control_mode: policy
     vla_chunk_exec_horizon: 25
     rl_chunk_exec_horizon: null
-    control_frequency_hz: 50.0
+    use_rtc: false
+    control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16
     safe_fallback_to_ref: true

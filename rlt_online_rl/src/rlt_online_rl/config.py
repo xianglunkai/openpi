@@ -112,12 +112,25 @@ class EnvDriverConfig:
     full_task_reset_action: list[float] | None = None
     critical_phase_reset_action: list[float] | None = None
     actor_deterministic: bool = True
-    # Asymmetric deploy horizons (Evo-RLT): VLA phase executes longer chunks than RL phase.
+    # Asymmetric deploy horizons (Evo-RLT collect / paper screw: VLA exec longer than RL).
     vla_chunk_exec_horizon: int = 25
-    # None → use experiment.rl.chunk_len (typically 10 or 20).
+    # None → use experiment.rl.chunk_len (Evo chunk_length, typically 10).
     rl_chunk_exec_horizon: int | None = None
-    # RLT experiments run the robot at 50 Hz.
-    control_frequency_hz: float = 50.0
+    # Evo-RLT collect ``--fps`` default.
+    control_frequency_hz: float = 30.0
+    # Client-side RTC (ActionQueue + async refill). Shared queue for VLA/RL; reset on phase switch.
+    use_rtc: bool = False
+    # Pass leftover actions into Machine A guided_inference (both VLA and RL phases).
+    rtc_vla_guidance: bool = True
+    # Evo ``--vla-rtc-execution-horizon`` / ``--rtc-execution-horizon`` defaults (collect).
+    rtc_execution_horizon_vla: int = 25
+    rtc_execution_horizon_rl: int | None = 10
+    # Evo: measured latency → d. Set an int for JIT-stable fixed d (openpi extension).
+    # Merge still uses real queue index delay regardless of this value.
+    rtc_inference_delay: int | None = None
+    # Evo collect ``--rtc-action-queue-size-to-get-new-actions`` default (30).
+    # Explicit null in yaml → max(1, rl.chunk_len - 1) like configure_rtc when unset.
+    action_queue_size_to_get_new_actions: int | None = 30
     step_trace_stride: int = 0
     replay_feature_batch_size: int = 16
     enable_human_override: bool = False
@@ -282,7 +295,6 @@ _LEGACY_RL_CONFIG_KEYS = frozenset(
     }
 )
 
-
 def _dataclass_from_mapping(cls: type[Any], data: Mapping[str, Any]) -> Any:
     default_value = cls()
     allowed_keys = {field.name for field in dataclasses.fields(default_value)}
@@ -290,6 +302,15 @@ def _dataclass_from_mapping(cls: type[Any], data: Mapping[str, Any]) -> Any:
     if cls is RLTOnlineRLConfig:
         for key in _LEGACY_RL_CONFIG_KEYS:
             incoming.pop(key, None)
+    if cls is EnvDriverConfig:
+        legacy_vla = incoming.pop("action_queue_size_to_get_new_actions_vla", None)
+        legacy_rl = incoming.pop("action_queue_size_to_get_new_actions_rl", None)
+        if incoming.get("action_queue_size_to_get_new_actions") is None:
+            # Prefer RL (Evo's primary horizon), then VLA, when migrating old yaml.
+            if legacy_rl is not None:
+                incoming["action_queue_size_to_get_new_actions"] = legacy_rl
+            elif legacy_vla is not None:
+                incoming["action_queue_size_to_get_new_actions"] = legacy_vla
     _validate_mapping_keys(cls.__name__, incoming, allowed_keys)
     field_types = get_type_hints(cls)
 

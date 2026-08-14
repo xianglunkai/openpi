@@ -39,7 +39,14 @@ def resolve_ref_chunk_horizon(
     *,
     uses_rl_actor: bool,
 ) -> int:
-    """How many VLA ref steps to request from Machine A for the current chunk."""
+    """How many VLA ref steps to request from Machine A for the current chunk.
+
+    With RTC enabled we always request the longer VLA horizon so Machine A can
+    run leftover-guided VLA inference (Evo always calls full pi0.5 predict).
+    RL still only *executes* ``chunk_len`` actor steps — see EnvDriver planner.
+    """
+    if bool(getattr(env_config, "use_rtc", False)):
+        return int(env_config.vla_chunk_exec_horizon)
     if uses_rl_actor:
         return int(rl_config.chunk_len)
     return int(env_config.vla_chunk_exec_horizon)

@@ -75,6 +75,9 @@ class RuntimeRTC:
         
         # State tracking
         self._inference_warmup_steps = 0
+        # Cache last discarded chunk so later warmup steps can inject a leftover
+        # of length ~= refill threshold and JIT the real guided (step_rtc) path.
+        self._warmup_prev_actions: Optional[np.ndarray] = None
     
     def run(self) -> None:
         """Run the runtime with RTC."""
@@ -116,39 +119,37 @@ class RuntimeRTC:
         if self._interpolator:
             self._interpolator.reset()
         
-        # Reset statistics and state
+        # Reset statistics and state (keep warmup counter across episodes — guided JIT
+        # is already hot after the first leftover warmup).
         self._episode_steps = 0
         self._total_inference_time = 0
         self._total_control_time = 0
         self._inference_count = 0
-        self._inference_warmup_steps = 0
-      
-        
+
         # Notify subscribers
         for subscriber in self._subscribers:
             subscriber.on_episode_start()
-        
-               # Start worker threads
+
+        # Start worker threads
         self._shutdown_event.clear()
-        
+
         get_action_thread = threading.Thread(
             target=self._get_action_worker,
             daemon=True,
-            name="GetActionThread"
+            name="GetActionThread",
         )
-        
+
         actor_control_thread = threading.Thread(
             target=self._actor_control_worker,
             daemon=True,
-            name="ActorControlThread"
+            name="ActorControlThread",
         )
-        
+
         get_action_thread.start()
-        
-        time.sleep(3)
-        
+        # Wait for guided leftover warmup + first real chunk (not a fixed sleep(3)).
+        self._wait_for_action_queue_ready(timeout_s=120.0)
         actor_control_thread.start()
-        
+
         # Main thread monitors episode completion
         start_time = time.perf_counter()
         while not self._shutdown_event.is_set():
@@ -182,7 +183,23 @@ class RuntimeRTC:
             subscriber.on_episode_end()
         
         print(f"Episode {episode_idx + 1} completed. Steps: {self._episode_steps}")
-    
+
+    def _wait_for_action_queue_ready(self, timeout_s: float = 120.0) -> None:
+        """Block until leftover guided warmup finished and the first chunk is queued."""
+        deadline = time.perf_counter() + timeout_s
+        while time.perf_counter() < deadline and not self._shutdown_event.is_set():
+            if self._inference_warmup_steps > 3 and self._action_queue.qsize() > 0:
+                print(
+                    f"[RuntimeRTC] Warmup done, action queue ready "
+                    f"(qsize={self._action_queue.qsize()}); starting actor."
+                )
+                return
+            time.sleep(0.05)
+        print(
+            "[RuntimeRTC] Warning: timed out waiting for warmup/first chunk; starting actor anyway "
+            f"(warmup_steps={self._inference_warmup_steps}, qsize={self._action_queue.qsize()})"
+        )
+
     def _get_action_worker(self):
         """Worker thread that gets observations and runs policy inference.
         
@@ -197,7 +214,7 @@ class RuntimeRTC:
         # Calculate time per step
         time_per_step = 1.0 / self._fps
         
-       # Determine when to get new actions
+        # Determine when to get new actions
         # For RTC: wait until queue is low enough
         # For non-RTC: always get new actions when queue is empty
         if self._rtc_config.enabled:
@@ -219,16 +236,22 @@ class RuntimeRTC:
                     
                     # Get leftover actions for RTC continuity
                     prev_actions = self._action_queue.get_left_over()
+                    # Warmup with empty queue would only hit guided_inference(step_normal).
+                    # Reuse a prefix of the last discarded chunk (len≈refill threshold) so
+                    # step_rtc is JIT'd before the first mid-motion refill.
+                    if (
+                        prev_actions is None
+                        and self._rtc_config.enabled
+                        and self._warmup_prev_actions is not None
+                    ):
+                        n = max(1, int(self._action_queue_size_to_get_new_actions))
+                        cached = np.asarray(self._warmup_prev_actions)
+                        prev_actions = cached[: min(n, cached.shape[0])]
                     
-                    # Calculate expected inference delay based on latency history
-                    inference_latency = self._latency_tracker.max()
-                    inference_delay = math.ceil(inference_latency / time_per_step)
-                  
                     # Get observation from environment
                     obs = self._environment.get_observation()
                     if prev_actions is not None:
                         obs["actions"] = prev_actions
-                        # obs["inference_delay"] = inference_delay
                  
                     # Unified infer interface - policy handles RTC internally
                     result = self._policy.infer(
@@ -238,6 +261,13 @@ class RuntimeRTC:
                     
                     if self._inference_warmup_steps <= 3:
                         self._inference_warmup_steps += 1
+                        if "actions" in result:
+                            warm_actions = np.asarray(result["actions"])
+                            if warm_actions.ndim == 1:
+                                warm_actions = warm_actions[np.newaxis, ...]
+                            self._warmup_prev_actions = warm_actions
+                        if self._inference_warmup_steps > 3:
+                            self._warmup_prev_actions = None
                         continue
                     
                     # Extract actions from result
@@ -253,7 +283,6 @@ class RuntimeRTC:
                     
                     # Ensure actions are 2D (time_steps, action_dim)
                     if len(actions.shape) == 1:
-                        print(f"[GetActionThread] Inference result received. Actions shape: {actions.shape}")
                         actions = actions[np.newaxis, ...]
                     
                     
@@ -274,13 +303,13 @@ class RuntimeRTC:
                     )
                     
                     # Log inference details (debug level)
-                    if self._inference_count % 10 == 0:
-                        print(
-                            f"[GetActionThread] Inference {self._inference_count}: "
-                            f"time={new_latency*1000:.1f}ms, "
-                            f"delay={new_delay} steps, "
-                            f"queue_size={self._action_queue.qsize()}",
-                        )
+                    # if self._inference_count % 10 == 0:
+                    #     print(
+                    #         f"[GetActionThread] Inference {self._inference_count}: "
+                    #         f"time={new_latency*1000:.1f}ms, "
+                    #         f"delay={new_delay} steps, "
+                    #         f"queue_size={self._action_queue.qsize()}",
+                    #     )
                 else:
                     # Small sleep to prevent busy waiting
                     precise_sleep(time_per_step)
