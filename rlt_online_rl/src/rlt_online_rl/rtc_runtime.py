@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 from openpi_client.action_queue import ActionQueue
+from openpi_client.action_queue import pad_rtc_prev_actions_hold_last
 from openpi_client.latency_tracker import LatencyTracker
 
 from rlt_online_rl.inference import ChunkFeatures
@@ -320,6 +321,7 @@ class RtcActionRuntime:
         observation_fn: Callable[[], dict[str, Any]] | None = None,
         *,
         allow_warmup_prev: bool = True,
+        execution_horizon: int,
     ) -> tuple[dict[str, Any], np.ndarray | None, int, int, float, int]:
         with self._lock:
             prev_actions = self._queue.get_left_over()
@@ -329,6 +331,12 @@ class RtcActionRuntime:
                 n = max(1, int(self._refill_threshold))
                 cached = np.asarray(self._warmup_prev_actions, dtype=np.float32)
                 prev_actions = cached[: min(n, cached.shape[0])].copy()
+            if prev_actions is not None and int(np.asarray(prev_actions).shape[0]) == 0:
+                prev_actions = None
+            if prev_actions is not None:
+                # Hold-pad to ``s`` so RTC weights on ``[T, s)`` lock the last command
+                # instead of shrinking ``s`` or leaking zeros into the prefix.
+                prev_actions = pad_rtc_prev_actions_hold_last(prev_actions, execution_horizon)
             action_index_before = self._queue.get_action_index()
             generation = self._generation
         inference_delay = self.guided_inference_delay_steps()
@@ -362,13 +370,15 @@ class RtcActionRuntime:
                 _action_index_before,
                 _request_start,
                 generation,
-            ) = self._prepare_request(observation, observation_fn, allow_warmup_prev=True)
+            ) = self._prepare_request(
+                observation,
+                observation_fn,
+                allow_warmup_prev=True,
+                execution_horizon=execution_horizon,
+            )
             if generation != self._generation:
                 return
-            guidance_s = effective_rtc_guidance_s(
-                preferred_s=execution_horizon,
-                prev_actions=prev_actions if use_vla_guidance else None,
-            )
+            guidance_s = max(1, int(execution_horizon))
             plan = planner(
                 obs,
                 local_step,
@@ -407,11 +417,13 @@ class RtcActionRuntime:
             action_index_before,
             request_start,
             generation,
-        ) = self._prepare_request(observation, observation_fn, allow_warmup_prev=False)
-        guidance_s = effective_rtc_guidance_s(
-            preferred_s=execution_horizon,
-            prev_actions=prev_actions if use_vla_guidance else None,
+        ) = self._prepare_request(
+            observation,
+            observation_fn,
+            allow_warmup_prev=False,
+            execution_horizon=execution_horizon,
         )
+        guidance_s = max(1, int(execution_horizon))
         plan = planner(
             obs,
             local_step,
@@ -447,7 +459,12 @@ class RtcActionRuntime:
         if self._queue.qsize() > self._refill_threshold:
             return
         # Snapshot leftover/index now; refresh images/state inside the worker.
-        request = self._prepare_request(observation, observation_fn=None, allow_warmup_prev=False)
+        request = self._prepare_request(
+            observation,
+            observation_fn=None,
+            allow_warmup_prev=False,
+            execution_horizon=execution_horizon,
+        )
         self._worker = threading.Thread(
             target=self._run_worker,
             args=(
@@ -482,10 +499,7 @@ class RtcActionRuntime:
                 obs = _clone_obs(observation_fn())
                 request_start = time.perf_counter()
 
-            guidance_s = effective_rtc_guidance_s(
-                preferred_s=execution_horizon,
-                prev_actions=prev_actions if use_vla_guidance else None,
-            )
+            guidance_s = max(1, int(execution_horizon))
 
             plan = planner(
                 obs,
@@ -571,26 +585,8 @@ def _clone_obs(observation: dict[str, Any]) -> dict[str, Any]:
     return cloned
 
 
-def effective_rtc_guidance_s(
-    *,
-    preferred_s: int,
-    prev_actions: np.ndarray | None,
-) -> int:
-    """Runtime ``s``: keep phase preference; clamp to leftover (LeRobot / Evo-RTC).
-
-    When ``d > s``, prefix weights clamp ``d = min(d, s)`` (hard lock, no soft band).
-    We do not raise ``s`` to absorb delay spikes.
-    """
-    s = max(1, int(preferred_s))
-    if prev_actions is not None:
-        leftover_len = int(np.asarray(prev_actions).shape[0])
-        if leftover_len > 0:
-            s = min(s, leftover_len)
-    return max(1, s)
-
-
 def resolve_rtc_execution_horizon(env_config: Any, rl_config: Any | None = None, *, uses_rl_actor: bool = False) -> int:
-    """Preferred guidance ``s`` for the current phase (leftover clamp applied later)."""
+    """Preferred guidance ``s`` for the current phase."""
     if uses_rl_actor:
         if env_config.rtc_execution_horizon_rl is not None:
             return max(1, int(env_config.rtc_execution_horizon_rl))

@@ -29,6 +29,28 @@ from openpi_client.rtc_config import RTCConfig
 logger = logging.getLogger(__name__)
 
 
+def pad_rtc_prev_actions_hold_last(prev_actions: np.ndarray, target_steps: int) -> np.ndarray:
+    """Pad/truncate leftover to execution horizon ``s`` by holding the last action.
+
+    Matches LeRobot HIL ``_normalize_prev_actions_length``: pad before the policy so
+    leftover length is already ``s`` and RTC weights on ``[T, s)`` lock the last
+    command instead of zeros. Truncation past ``s`` is unused (``W=0``).
+    """
+    prev = np.asarray(prev_actions, dtype=np.float32)
+    if prev.ndim != 2:
+        raise ValueError(f"prev_actions must be rank-2 (T, D), got {prev.shape}")
+    target_steps = max(1, int(target_steps))
+    t = int(prev.shape[0])
+    if t == 0:
+        raise ValueError("prev_actions must be non-empty to hold-pad")
+    if t == target_steps:
+        return prev
+    if t > target_steps:
+        return prev[:target_steps]
+    hold = np.repeat(prev[-1:], target_steps - t, axis=0)
+    return np.concatenate([prev, hold], axis=0)
+
+
 class ActionQueue:
     """Thread-safe queue for managing action chunks in real-time control.
 
@@ -128,7 +150,10 @@ class ActionQueue:
         with self.lock:
             if self.original_queue is None:
                 return None
-            return self.original_queue[self.last_index :]
+            leftover = self.original_queue[self.last_index :]
+            if len(leftover) == 0:
+                return None
+            return leftover
     
     def get_processed_left_over(self) -> np.ndarray | None:
         """Get leftover processed actions (the actions currently executed by the robot).
@@ -214,26 +239,34 @@ class ActionQueue:
 
         self.last_index = 0
 
-    def _check_delays(self, real_delay: int, action_index_before_inference: int | None = None) -> int:
-        """Validate that computed delays match expectations.
+    def _check_delays(
+            self, real_delay: int, action_index_before_inference: int | None = None
+        ) -> int:
+            """Validate that computed delays match expectations.
 
-        Compares the delay computed from inference latency with the actual
-        number of actions consumed during inference.
+            Compares the delay computed from inference latency with the actual
+            number of actions consumed during inference.
 
-        Args:
-            real_delay: Delay computed from inference latency.
-            action_index_before_inference: Action index when inference started.
-        """
-        if action_index_before_inference is None:
-            return max(0, real_delay)
+            Args:
+                real_delay: Delay computed from inference latency.
+                action_index_before_inference: Action index when inference started.
 
-        indexes_diff = max(0, self.last_index - action_index_before_inference)
-        if indexes_diff != real_delay:
-            # Let's check that action index difference (real delay calculated based on action queue)
-            # is the same as delay calculated based on inference latency
-            logger.debug(
-                f"[ACTION_QUEUE] Using index-based delay instead of latency-based delay. "
-                f"Indexes diff: {indexes_diff}, real delay: {real_delay}"
-            )
-        return indexes_diff
+            Returns:
+                int: Delay to use.
+            """
+            effective_delay = max(0, real_delay)
+
+            if action_index_before_inference is not None:
+                indexes_diff = max(0, self.last_index - action_index_before_inference)
+                if indexes_diff != real_delay:
+                    logger.info(
+                        "Indexes diff is not equal to real delay. indexes_diff=%d, real_delay=%d",
+                        indexes_diff,
+                        real_delay,
+                    )
+                    # Never discard more than was actually consumed, or the queue splices ahead
+                    # of the physical pose.
+                    return min(real_delay, indexes_diff)
+
+            return effective_delay
 

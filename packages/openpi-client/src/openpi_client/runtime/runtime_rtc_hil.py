@@ -22,6 +22,7 @@ from openpi_client.runtime import environment as _environment
 from openpi_client.runtime import subscriber as _subscriber
 from openpi_client import base_policy as _base_policy
 from openpi_client.rtc_config import RTCConfig
+from openpi_client.action_queue import pad_rtc_prev_actions_hold_last
 from openpi_client.runtime.runtime_rtc import RuntimeRTC
 from openpi_client.teleop.eef_action import EefActionConverter, teleop_eef_to_actions
 from openpi_client.teleop.kinematics import EefKinematics, EefKinematicsConfig
@@ -629,6 +630,10 @@ class RuntimeRTCHil(RuntimeRTC):
                     current_time = time.perf_counter()
                     action_index_before = self._action_queue.get_action_index()
                     prev_actions = self._action_queue.get_left_over()
+                    if prev_actions is not None and self._rtc_config.enabled:
+                        prev_actions = pad_rtc_prev_actions_hold_last(
+                            prev_actions, self._rtc_config.execution_horizon
+                        )
                     obs = _copy_observation(shared_obs)
                     if prev_actions is not None:
                         obs["actions"] = prev_actions

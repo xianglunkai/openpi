@@ -251,9 +251,8 @@ class RLTPolicy(_base_policy.BasePolicy):
                 guided_prev = jnp.asarray(prev_action, dtype=jnp.float32)
                 if guided_prev.ndim == 2:
                     guided_prev = guided_prev[np.newaxis, ...]
-                # Fixed time length keeps module_jit shapes stable across leftover sizes.
-                # Safe only when leftover_len >= s (client refill threshold enforces this);
-                # zero pad then lands in the W=0 tail beyond s.
+                # Client hold-pads leftover to ``s``; remaining ``H - s`` is W=0, so
+                # zero-pad here is only for a stable JIT time dimension.
                 guided_prev = _pad_prev_action_time(guided_prev, self._action_horizon)
             s = max(1, int(execution_horizon))
             # LeRobot get_prefix_weights: start = min(start, end). When d >= s the soft
@@ -450,7 +449,8 @@ class Args:
     default_prompt: str | None = None
     shared_prefix_inference: bool = False
     # Pre-compile guided_inference graphs before serving.
-    # Server uses d_eff=min(d, s) (LeRobot-style). Pass multiple s/d to cover latency + leftover clamps.
+    # ``s`` is phase-stable after client hold-pad (VLA 25 / RL 10), not leftover-clamped.
+    # ``d`` is a separate graph only if inference_delay is not a single fixed value.
     rtc_warmup_s: tuple[int, ...] = (10, 25)
     rtc_warmup_d: tuple[int, ...] = (7,)
     skip_rtc_warmup: bool = False
@@ -463,7 +463,12 @@ def warmup_rlt_policy_graphs(
     rtc_s_values: Sequence[int],
     rtc_d_values: Sequence[int],
 ) -> None:
-    """JIT-warm sample_actions + guided_inference for each deploy (s, d)."""
+    """JIT-warm sample_actions + guided_inference for each deploy (s, d).
+
+    ``s``/``d`` are static JIT args (``make_W``). After client hold-pad, leftover
+    length no longer changes ``s``; warm one graph per phase ``s`` and each
+    expected ``d``. ``prev_action=None`` is a second trace (first chunk).
+    """
     observation = model_config.fake_obs(batch_size=1)
     policy._rng, sample_rng = jax.random.split(policy._rng)
     logging.info("Warming up sample_actions / infer ...")

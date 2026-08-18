@@ -10,10 +10,12 @@ from openpi_client.runtime import subscriber as _subscriber
 from openpi_client import base_policy as _base_policy
 from openpi_client.rtc_config import RTCConfig, RTCAttentionSchedule
 from openpi_client.action_queue import ActionQueue
+from openpi_client.action_queue import pad_rtc_prev_actions_hold_last
 from openpi_client.latency_tracker import LatencyTracker
 from openpi_client.action_interpolator import ActionInterpolator
 from openpi_client.time_utils import precise_sleep
 from openpi_client.process import ProcessSignalHandler
+
 
 class RuntimeRTC:
     """Runtime with integrated RTC functionality using dual-thread architecture.
@@ -247,7 +249,13 @@ class RuntimeRTC:
                         n = max(1, int(self._action_queue_size_to_get_new_actions))
                         cached = np.asarray(self._warmup_prev_actions)
                         prev_actions = cached[: min(n, cached.shape[0])]
-                    
+                    # Hold-pad to ``s`` before Policy.infer (HIL). DeltaActions in the
+                    # policy already re-anchors this leftover to the current state.
+                    if prev_actions is not None and self._rtc_config.enabled:
+                        prev_actions = pad_rtc_prev_actions_hold_last(
+                            prev_actions, self._rtc_config.execution_horizon
+                        )
+
                     # Get observation from environment
                     obs = self._environment.get_observation()
                     if prev_actions is not None:

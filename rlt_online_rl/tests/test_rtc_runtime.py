@@ -17,7 +17,6 @@ from rlt_online_rl.inference import ChunkFeatures
 from rlt_online_rl.inference import PolicyPlan
 from rlt_online_rl.replay import TransitionSource
 from rlt_online_rl.rtc_runtime import RtcActionRuntime
-from rlt_online_rl.rtc_runtime import effective_rtc_guidance_s
 from rlt_online_rl.rtc_runtime import resolve_rtc_execution_horizon
 from rlt_online_rl.rtc_runtime import resolve_rtc_refill_threshold
 
@@ -66,14 +65,51 @@ def test_rtc_refill_threshold_none_falls_back_to_chunk_len_minus_one() -> None:
     assert resolve_rtc_refill_threshold(env_small, rl_config) == 5
 
 
-def test_effective_guidance_s_keeps_preference_and_clamps_to_leftover() -> None:
-    leftover = np.zeros((8, 2), dtype=np.float32)
-    # Delay spikes do not raise s (LeRobot clamps d in weights instead).
-    assert effective_rtc_guidance_s(preferred_s=10, prev_actions=leftover) == 8
-    # Long leftover keeps the reactive RL preference.
-    long_leftover = np.zeros((12, 2), dtype=np.float32)
-    assert effective_rtc_guidance_s(preferred_s=10, prev_actions=long_leftover) == 10
-    assert effective_rtc_guidance_s(preferred_s=10, prev_actions=None) == 10
+def test_prepare_request_hold_pads_short_leftover_to_s() -> None:
+    runtime = RtcActionRuntime(
+        fps=30.0,
+        action_queue_size_to_get_new_actions=2,
+        inference_warmup_steps=0,
+    )
+    plan = _make_plan(length=8, source=int(TransitionSource.BASE))
+    runtime.merge_plan(
+        plan,
+        request_start_time=0.0,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=10,
+    )
+    _obs, prev, *_rest = runtime._prepare_request(
+        {"state": np.zeros(2, dtype=np.float32)},
+        allow_warmup_prev=False,
+        execution_horizon=10,
+    )
+    assert prev is not None
+    assert prev.shape[0] == 10
+    np.testing.assert_array_equal(prev[:8], plan.action_chunk)
+    np.testing.assert_array_equal(prev[8:], np.repeat(plan.action_chunk[-1:], 2, axis=0))
+
+
+def test_prepare_request_empty_leftover_is_none() -> None:
+    runtime = RtcActionRuntime(
+        fps=30.0,
+        action_queue_size_to_get_new_actions=2,
+        inference_warmup_steps=0,
+    )
+    runtime.merge_plan(
+        _make_plan(length=1, source=int(TransitionSource.BASE)),
+        request_start_time=0.0,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=10,
+    )
+    assert runtime.pop() is not None
+    _obs, prev, *_rest = runtime._prepare_request(
+        {"state": np.zeros(2, dtype=np.float32)},
+        allow_warmup_prev=False,
+        execution_horizon=10,
+    )
+    assert prev is None
 
 
 def test_rtc_runtime_phase_reset_and_pop_metadata() -> None:

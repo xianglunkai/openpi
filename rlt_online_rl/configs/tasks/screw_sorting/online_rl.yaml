@@ -104,8 +104,8 @@ runtime:
     rtc_execution_horizon_vla: 25
     rtc_execution_horizon_rl: 10
     # null → latency_tracker (Evo); set int only if you need a fixed JIT ``d``.
-    rtc_inference_delay: null
-    action_queue_size_to_get_new_actions: 30
+    rtc_inference_delay: 7
+    action_queue_size_to_get_new_actions: 28
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16

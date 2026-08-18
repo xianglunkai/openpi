@@ -987,7 +987,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                     local_step=local_step,
                     planner=policy_planner,
                     # use vla guidance if enabled and not using rl
-                    use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance) and not uses_rl,
+                    use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance),
                     execution_horizon=resolve_rtc_execution_horizon(
                         self._system.env_driver,
                         self._system.rl,
