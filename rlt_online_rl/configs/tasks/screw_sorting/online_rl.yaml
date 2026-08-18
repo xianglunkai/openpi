@@ -19,15 +19,15 @@ experiment:
     action_clip_min: -1.0
     action_clip_max: 1.0
     delta_weight: 0.0
-    warmup_bc_weight: 5.0
+    warmup_bc_weight: 3.0
     warmup_q_weight: 1.0
-    online_bc_weight: 5.0
+    online_bc_weight: 3.0
     online_q_weight: 1.0
 
     actor_hidden_dim: 256
-    actor_num_layers: 3
+    actor_num_layers: 2
     critic_hidden_dim: 256
-    critic_num_layers: 3
+    critic_num_layers: 2
 
     actor_lr: 0.0001
     critic_lr: 0.0001
@@ -103,9 +103,9 @@ runtime:
     rtc_vla_guidance: true
     rtc_execution_horizon_vla: 25
     rtc_execution_horizon_rl: 10
-    # null → latency_tracker (Evo); set int only if you need a fixed JIT ``d``.
+    # null → latency tracker (skips first samples / JIT); set int for a fixed JIT ``d``.
     rtc_inference_delay: 7
-    action_queue_size_to_get_new_actions: 28
+    action_queue_size_to_get_new_actions: 25
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16

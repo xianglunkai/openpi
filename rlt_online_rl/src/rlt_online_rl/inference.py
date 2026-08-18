@@ -358,6 +358,11 @@ class ActorService:
             rng=infer_rng,
             deterministic=request.deterministic,
         )
+        refined_chunk = np.clip(
+            np.asarray(refined_chunk, dtype=np.float32),
+            float(self._rl_config.action_clip_min),
+            float(self._rl_config.action_clip_max),
+        )
         if self._action_adapter is not None:
             refined_chunk = self._action_adapter.denormalize_to_abs_chunk(refined_chunk, request.proprio)
         return ActorResponse(
@@ -549,6 +554,7 @@ class ActorClient:
 #      └─ 有 snapshot →
 #            normalize ref (若 delta)
 #            → RLTPolicyInferenceWrapper / ChunkActor JAX 前向
+#            → clip 到 [action_clip_min, action_clip_max]（对齐 Evo compute_chunk）
 #            → denormalize 回绝对动作
 #            → refined_chunk, source=RL
 #      │

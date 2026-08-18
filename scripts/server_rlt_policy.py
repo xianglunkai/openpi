@@ -467,7 +467,8 @@ def warmup_rlt_policy_graphs(
 
     ``s``/``d`` are static JIT args (``make_W``). After client hold-pad, leftover
     length no longer changes ``s``; warm one graph per phase ``s`` and each
-    expected ``d``. ``prev_action=None`` is a second trace (first chunk).
+    expected ``d``. ``prev_action=None`` is a second trace (first chunk / empty
+    leftover) and is warmed for every ``(s, d)``.
     """
     observation = model_config.fake_obs(batch_size=1)
     policy._rng, sample_rng = jax.random.split(policy._rng)
@@ -492,7 +493,7 @@ def warmup_rlt_policy_graphs(
             seen.add(pair)
             unique_pairs.append(pair)
     logging.info(
-        "Warming up %d guided_inference (s,d) graphs (+ first-chunk prev=None): %s",
+        "Warming up %d guided_inference (s,d) graphs x2 (with prev + prev=None): %s",
         len(unique_pairs),
         ", ".join(f"({s},{d_eff})" for s, d_eff in unique_pairs),
     )
@@ -509,25 +510,25 @@ def warmup_rlt_policy_graphs(
         )
         logging.info("guided_inference s=%d d=%d warmup done in %.1fs", s, d_eff, time.monotonic() - t0)
 
-    # First RTC chunk has no leftover: still calls guided_inference (step_normal). Warm that
-    # specialization for the largest s (VLA preferred) to avoid a cold compile on episode start.
-    s0, d0 = max(unique_pairs, key=lambda sd: sd[0])
-    policy._rng, sample_rng = jax.random.split(policy._rng)
-    logging.info("Warming up guided_inference s=%d d=%d (prev=None / first chunk) ...", s0, d0)
-    t0 = time.monotonic()
-    policy._infer_guided_fn(
-        sample_rng,
-        observation,
-        prev_action=None,
-        s=s0,
-        d=d0,
-    )
-    logging.info(
-        "guided_inference s=%d d=%d prev=None warmup done in %.1fs",
-        s0,
-        d0,
-        time.monotonic() - t0,
-    )
+        # First chunk / empty leftover: Python ``prev_action=None`` is a different JIT
+        # trace from a padded array (guided_inference uses step_normal). Warm both
+        # VLA ``s=25`` and RL ``s=10`` so phase switches are not a cold compile.
+        policy._rng, sample_rng = jax.random.split(policy._rng)
+        logging.info("Warming up guided_inference s=%d d=%d (prev=None / first chunk) ...", s, d_eff)
+        t0 = time.monotonic()
+        policy._infer_guided_fn(
+            sample_rng,
+            observation,
+            prev_action=None,
+            s=s,
+            d=d_eff,
+        )
+        logging.info(
+            "guided_inference s=%d d=%d prev=None warmup done in %.1fs",
+            s,
+            d_eff,
+            time.monotonic() - t0,
+        )
 
 
 def main(args: Args) -> None:

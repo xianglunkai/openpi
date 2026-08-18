@@ -57,6 +57,7 @@ class RtcActionRuntime:
         action_queue_size_to_get_new_actions: int,
         guided_inference_delay: int | None = None,
         inference_warmup_steps: int = 4,
+        latency_skip_samples: int = 4,
     ) -> None:
         if fps <= 0:
             raise ValueError(f"fps must be positive, got {fps}")
@@ -68,6 +69,8 @@ class RtcActionRuntime:
             raise ValueError(f"guided_inference_delay must be >= 0, got {guided_inference_delay}")
         if inference_warmup_steps < 0:
             raise ValueError(f"inference_warmup_steps must be >= 0, got {inference_warmup_steps}")
+        if latency_skip_samples < 0:
+            raise ValueError(f"latency_skip_samples must be >= 0, got {latency_skip_samples}")
         self._fps = float(fps)
         self._refill_threshold = int(action_queue_size_to_get_new_actions)
         self._guided_inference_delay = (
@@ -75,6 +78,8 @@ class RtcActionRuntime:
         )
         self._inference_warmup_total = int(inference_warmup_steps)
         self._inference_warmup_remaining = int(inference_warmup_steps)
+        self._latency_skip_total = int(latency_skip_samples)
+        self._latency_skip_remaining = int(latency_skip_samples)
         self._warmup_prev_actions: np.ndarray | None = None
         self._queue = ActionQueue(enabled=True)
         self._latency = LatencyTracker()
@@ -133,6 +138,7 @@ class RtcActionRuntime:
             self._generation += 1
             self._queue = ActionQueue(enabled=True)
             self._latency.reset()
+            self._latency_skip_remaining = self._latency_skip_total
             self._step_metadata.clear()
             self._worker_error = None
         self._join_finished_worker()
@@ -144,7 +150,9 @@ class RtcActionRuntime:
         return self._queue.empty()
 
     def estimated_inference_delay_steps(self) -> int:
-        """Latency-derived delay (logging / diagnostics). Prefer ``guided_inference_delay_steps`` for RTC ``d``."""
+        """Latency-derived delay after skipping the first cold-start samples."""
+        if len(self._latency) == 0:
+            return 0
         time_per_step = 1.0 / self._fps
         return int(math.ceil(self._latency.max() / time_per_step))
 
@@ -198,7 +206,19 @@ class RtcActionRuntime:
         new_latency = time.perf_counter() - request_start_time
         time_per_step = 1.0 / self._fps
         estimated_delay = int(math.ceil(new_latency / time_per_step))
-        self._latency.add(new_latency)
+        # Drop the first few samples so JIT / cold-start (~seconds) cannot set RTC ``d``.
+        skipped_latency_sample = self._latency_skip_remaining > 0
+        if skipped_latency_sample:
+            self._latency_skip_remaining -= 1
+            logger.info(
+                "[RLT RTC] skip latency sample remaining=%d latency=%.1fms estimated_delay=%d "
+                "(excluded from auto d)",
+                self._latency_skip_remaining,
+                new_latency * 1000.0,
+                estimated_delay,
+            )
+        else:
+            self._latency.add(new_latency)
 
         with self._lock:
             if generation != self._generation:
@@ -225,7 +245,8 @@ class RtcActionRuntime:
         )
         # Match Evo-RLT ChunkACPolicy: warn when refill fires too late vs s + delay.
         horizon = int(execution_horizon) if execution_horizon is not None else 0
-        min_refill_threshold = horizon + estimated_delay
+        delay_for_warn = estimated_delay if not skipped_latency_sample else self.estimated_inference_delay_steps()
+        min_refill_threshold = horizon + delay_for_warn
         if horizon > 0 and self._refill_threshold < min_refill_threshold:
             logger.warning(
                 "[RLT RTC] action_queue_size_to_get_new_actions=%d is smaller than "

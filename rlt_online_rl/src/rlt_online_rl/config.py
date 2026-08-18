@@ -126,7 +126,7 @@ class EnvDriverConfig:
     rtc_execution_horizon_vla: int = 25
     rtc_execution_horizon_rl: int | None = 10
     # Evo: measured latency → d. Set an int for JIT-stable fixed d (openpi extension).
-    # Merge still uses real queue index delay regardless of this value.
+    # Auto-d skips the first few samples (JIT/cold-start). Merge still uses real_delay.
     rtc_inference_delay: int | None = None
     # Evo collect ``--rtc-action-queue-size-to-get-new-actions`` default (30).
     # Explicit null in yaml → max(1, rl.chunk_len - 1) like configure_rtc when unset.

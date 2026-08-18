@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 
@@ -113,7 +114,11 @@ def test_prepare_request_empty_leftover_is_none() -> None:
 
 
 def test_rtc_runtime_phase_reset_and_pop_metadata() -> None:
-    runtime = RtcActionRuntime(fps=30.0, action_queue_size_to_get_new_actions=2)
+    runtime = RtcActionRuntime(
+        fps=30.0,
+        action_queue_size_to_get_new_actions=2,
+        inference_warmup_steps=0,
+    )
     calls = {"n": 0}
 
     def planner(obs, local_step, **kwargs):
@@ -221,15 +226,97 @@ def test_rtc_fixed_guided_inference_delay() -> None:
         fps=30.0,
         action_queue_size_to_get_new_actions=2,
         guided_inference_delay=7,
+        latency_skip_samples=0,
     )
     runtime._latency.add(1.0)  # would imply a large estimated delay
     assert runtime.guided_inference_delay_steps() == 7
     assert runtime.estimated_inference_delay_steps() >= 7
 
 
+def test_rtc_skips_first_latency_samples_for_auto_d() -> None:
+    runtime = RtcActionRuntime(
+        fps=30.0,
+        action_queue_size_to_get_new_actions=2,
+        inference_warmup_steps=0,
+        latency_skip_samples=2,
+    )
+    plan = _make_plan(length=4, source=int(TransitionSource.BASE))
+    now = time.perf_counter()
+    runtime.merge_plan(
+        plan,
+        request_start_time=now - 8.0,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=25,
+    )
+    assert runtime.estimated_inference_delay_steps() == 0
+    assert runtime.guided_inference_delay_steps() == 0
+
+    runtime.merge_plan(
+        plan,
+        request_start_time=now - 8.0,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=25,
+    )
+    assert runtime.estimated_inference_delay_steps() == 0
+
+    runtime.merge_plan(
+        plan,
+        request_start_time=now - 0.25,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=25,
+    )
+    # 250ms at 30Hz → 8 steps; the 8s JIT samples must not set d.
+    assert runtime.estimated_inference_delay_steps() == 8
+    assert runtime.guided_inference_delay_steps() == 8
+
+
+def test_rtc_latency_skip_resets_with_queue() -> None:
+    runtime = RtcActionRuntime(
+        fps=30.0,
+        action_queue_size_to_get_new_actions=2,
+        inference_warmup_steps=0,
+        latency_skip_samples=1,
+    )
+    plan = _make_plan(length=3, source=int(TransitionSource.BASE))
+    now = time.perf_counter()
+    runtime.merge_plan(
+        plan,
+        request_start_time=now - 8.0,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=25,
+    )
+    runtime.merge_plan(
+        plan,
+        request_start_time=now - 0.25,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=25,
+    )
+    assert runtime.estimated_inference_delay_steps() == 8
+    runtime.reset()
+    assert runtime.estimated_inference_delay_steps() == 0
+    runtime.merge_plan(
+        plan,
+        request_start_time=time.perf_counter() - 8.0,
+        action_index_before_inference=0,
+        generation=runtime._generation,
+        execution_horizon=25,
+    )
+    # Cold-start skip quota is restored; 8s sample is dropped again.
+    assert runtime.estimated_inference_delay_steps() == 0
+
+
 def test_rtc_refill_uses_fixed_threshold() -> None:
     """Evo compares qsize to a fixed threshold (no runtime d+1 bump)."""
-    runtime = RtcActionRuntime(fps=30.0, action_queue_size_to_get_new_actions=3)
+    runtime = RtcActionRuntime(
+        fps=30.0,
+        action_queue_size_to_get_new_actions=3,
+        inference_warmup_steps=0,
+    )
     calls = {"n": 0}
 
     def planner(obs, local_step, **kwargs):

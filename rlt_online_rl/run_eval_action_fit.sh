@@ -25,7 +25,7 @@ cd "${SCRIPT_DIR}"
 # ── Paths (must match runtime.* in the task YAML) ─────────────────────────────
 TASK="${RLT_TASK:-screw_sorting}"
 TASK_DIR="${RLT_TASK_DIR:-runs/${TASK}}"
-REPLAY_PATH="${RLT_REPLAY_PATH:-${TASK_DIR}/replay/replay_journal.pkl}"
+REPLAY_PATH="${RLT_REPLAY_PATH:-${TASK_DIR}/replay/replay_journal_sft.pkl}"
 TASK_CONFIG="${RLT_TASK_CONFIG:-configs/tasks/${TASK}/online_rl.yaml}"
 
 # ── Replay filters / output naming ────────────────────────────────────────────
