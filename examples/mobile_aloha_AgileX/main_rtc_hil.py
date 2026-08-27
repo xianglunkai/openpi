@@ -21,8 +21,8 @@ class Args:
 
     # RTC parameters
     use_rtc: bool = True
-    execution_horizon: int = 25
-    action_queue_size_to_get_new_actions: int = 25
+    execution_horizon: int = 20
+    action_queue_size_to_get_new_actions: int = 30
 
     # Action interpolation parameters
     inference_fps: int = 30

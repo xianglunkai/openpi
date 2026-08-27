@@ -9,6 +9,7 @@ import logging
 import shutil
 import threading
 import time
+import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from enum import Enum
@@ -438,8 +439,7 @@ class RuntimeRTCHil(RuntimeRTC):
         self._get_action_thread = threading.Thread(
             target=self._get_action_worker, daemon=True, name="GetActionThread"
         )
-        self._actor_thread.start()
-        time.sleep(self._inference_start_delay_s)
+    
         self._get_action_thread.start()
 
         episode_idx = 0
@@ -462,7 +462,7 @@ class RuntimeRTCHil(RuntimeRTC):
             self._episode_active.clear()
             self._policy_active.clear()
             self._shutdown_event.set()
-            if self._actor_thread is not None:
+            if self._actor_thread is not None and self._actor_thread.is_alive():
                 self._actor_thread.join()
             if self._get_action_thread is not None:
                 self._get_action_thread.join()
@@ -510,8 +510,17 @@ class RuntimeRTCHil(RuntimeRTC):
         print(f"Starting episode {episode_idx + 1}/{self._num_episodes}...")
         self._say(f"Starting episode {episode_idx + 1} of {self._num_episodes}.")
         self._reset_episode_state(episode_idx)
+        actor_pending = self._actor_thread is not None and not self._actor_thread.is_alive()
+        if actor_pending:
+            # GetActionThread does not read the env itself; prime one observation so
+            # warmup can run before the actor thread exists.
+            self._poll_observation_from_env()
+            self._last_obs_poll_t = time.perf_counter()
         self._episode_active.set()
         self._sync_policy_active()
+        if actor_pending:
+            self._wait_for_action_queue_ready(timeout_s=120.0)
+            self._actor_thread.start()
 
         start_time = time.perf_counter()
         terminal_status: Optional[EpisodeEndStatus] = None
@@ -630,10 +639,25 @@ class RuntimeRTCHil(RuntimeRTC):
                     current_time = time.perf_counter()
                     action_index_before = self._action_queue.get_action_index()
                     prev_actions = self._action_queue.get_left_over()
+
+                    # Warmup with empty queue would only hit guided_inference(step_normal).
+                    # Reuse a prefix of the last discarded chunk (len≈refill threshold) so
+                    # step_rtc is JIT'd before the first mid-motion refill.
+                    if (
+                        prev_actions is None
+                        and self._rtc_config.enabled
+                        and self._warmup_prev_actions is not None
+                    ):
+                        n = max(1, int(self._action_queue_size_to_get_new_actions))
+                        cached = np.asarray(self._warmup_prev_actions)
+                        prev_actions = cached[: min(n, cached.shape[0])]
+                    # Hold-pad to ``s`` before Policy.infer (HIL). DeltaActions in the
+                    # policy already re-anchors this leftover to the current state.
                     if prev_actions is not None and self._rtc_config.enabled:
                         prev_actions = pad_rtc_prev_actions_hold_last(
                             prev_actions, self._rtc_config.execution_horizon
                         )
+
                     obs = _copy_observation(shared_obs)
                     if prev_actions is not None:
                         obs["actions"] = prev_actions
@@ -642,8 +666,20 @@ class RuntimeRTCHil(RuntimeRTC):
 
                     if self._inference_warmup_steps <= 3:
                         self._inference_warmup_steps += 1
+                        if "actions" in result:
+                            warm_actions = np.asarray(result["actions"])
+                            if warm_actions.ndim == 1:
+                                warm_actions = warm_actions[np.newaxis, ...]
+                            self._warmup_prev_actions = warm_actions
+                        if self._inference_warmup_steps > 3:
+                            self._warmup_prev_actions = None
                         continue
+                    
+                    # Extract actions from result
+                    # Note: policy should return dict with at least "actions"
+                    # For RTC, it should also return "origin_actions"
                     if "actions" not in result:
+                        print("Policy inference result missing 'actions' key")
                         precise_sleep(0.01)
                         continue
 
@@ -652,15 +688,28 @@ class RuntimeRTCHil(RuntimeRTC):
                         actions = actions[np.newaxis, ...]
 
                     latency = time.perf_counter() - current_time
+                    delay = math.ceil(latency / time_per_step)
                     self._total_inference_time += latency
                     self._inference_count += 1
+
                     self._latency_tracker.add(latency)
+
+                    # Merge new actions into queue
                     self._action_queue.merge(
                         original_actions=actions,
                         processed_actions=actions,
-                        real_delay=int(np.ceil(latency / time_per_step)),
+                        real_delay=delay,
                         action_index_before_inference=action_index_before,
                     )
+
+                    # Log inference details (debug level)
+                    if self._inference_count % 10 == 0:
+                        print(
+                            f"[GetActionThread] Inference {self._inference_count}: "
+                            f"time={latency*1000:.1f}ms, "
+                            f"delay={delay} steps, "
+                            f"queue_size={self._action_queue.qsize()}",
+                        )
                 else:
                     precise_sleep(time_per_step)
             except Exception as e:

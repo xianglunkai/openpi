@@ -311,13 +311,13 @@ class RuntimeRTC:
                     )
                     
                     # Log inference details (debug level)
-                    # if self._inference_count % 10 == 0:
-                    #     print(
-                    #         f"[GetActionThread] Inference {self._inference_count}: "
-                    #         f"time={new_latency*1000:.1f}ms, "
-                    #         f"delay={new_delay} steps, "
-                    #         f"queue_size={self._action_queue.qsize()}",
-                    #     )
+                    if self._inference_count % 10 == 0:
+                        print(
+                            f"[GetActionThread] Inference {self._inference_count}: "
+                            f"time={new_latency*1000:.1f}ms, "
+                            f"delay={new_delay} steps, "
+                            f"queue_size={self._action_queue.qsize()}",
+                        )
                 else:
                     # Small sleep to prevent busy waiting
                     precise_sleep(time_per_step)

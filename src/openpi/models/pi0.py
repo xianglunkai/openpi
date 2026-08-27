@@ -419,7 +419,7 @@ class Pi0(_model.BaseModel):
         num_steps: int | at.Int[at.Array, ""] = 10,
         prev_action: _model.Actions = None,  # shape (b, ah, ad)
         s: int = 25,
-        d: int = 7,  # for 50hz d = 12
+        d: int = 6,  # for 50hz d = 12
         beta: float = 10.0,
         sigma: float = 0.2,
     ) -> _model.Actions:
