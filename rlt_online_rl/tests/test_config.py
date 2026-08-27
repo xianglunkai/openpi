@@ -141,6 +141,13 @@ def test_replay_stratified_sampler_config_loads(tmp_path) -> None:
     assert restored.replay.human_intervention_ratio == 0.15
 
 
+def test_screw_sorting_yaml_enables_stage1_human_bc() -> None:
+    path = ROOT / "configs" / "tasks" / "screw_sorting" / "online_rl.yaml"
+    restored = load_system_config_yaml(str(path))
+    assert restored.rl.bc_imitate_human is True
+    assert restored.replay.sample_strategy == "uniform"
+
+
 def test_resolved_config_is_saved_next_to_checkpoints(tmp_path) -> None:
     module = _load_run_online_rl_module()
     checkpoint_dir = tmp_path / "ckpts"

@@ -110,7 +110,26 @@ The current actor loss is:
 
 ```text
 actor_loss = bc_weight * bc_penalty - q_weight * actor_q + delta_weight * delta_penalty
+           + acc_jerk_penalty + l2c2_policy_weight * l2c2_policy_penalty
 ```
+
+`delta_penalty` is mean ``||Δμ - Δref||²`` on absolute pose (first 6 dims, after
+denormalize when using ``delta_chunk``). ``delta_weight`` scales this term.
+
+Acc/jerk use OpenPI ``OptimizeActionsQP`` stencils with physical units
+(``dt = 1/control_frequency_hz``):
+
+```text
+a_phys = D2(x)/dt^2 ,  j_phys = D3(x)/dt^3
+acc_jerk = delta_acc_weight*dt^4*mean(a_phys^2) + delta_jerk_weight*dt^6*mean(j_phys^2)
+```
+
+``delta_acc_weight=delta_jerk_weight=100`` matches OpenPI ``w_acc/w_jerk`` at the
+same ``dt``. Logs show ``w_delta``, raw ``acc`` / ``jerk``, and ``acc_jerk_penalty``.
+
+`l2c2_*_weight` default to `0` (disabled). When enabled, L2C2 follows HoST:
+mix `s̄ = s + α(s' - s)` with `α ∈ [-1, 1]` (zeroed on `done`) and penalize
+`||π(s)-π(s̄)||²` / `||Q(s,a)-Q(s̄,a)||²`.
 
 For `HUMAN / MIXED` steps the BC target is the executed action. For other steps
 the BC target is the Machine A / VLA reference.

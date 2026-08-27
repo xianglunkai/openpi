@@ -18,11 +18,22 @@ experiment:
     grad_clip_norm: 1.0
     action_clip_min: -1.0
     action_clip_max: 1.0
+    # delta_weight scales ||Δμ - Δref||²; acc/jerk use OpenPI-style weights (dt=1/control_frequency_hz).
     delta_weight: 0.0
+    control_frequency_hz: 30.0
+    delta_acc_weight: 500.0
+    delta_jerk_weight: 500.0
+    # L2C2 smoothness (HoST). 0 = off. Try policy=1.0, critic=0.1 to start.
+    l2c2_policy_weight: 0.0
+    l2c2_critic_weight: 0.0
     warmup_bc_weight: 3.0
     warmup_q_weight: 1.0
     online_bc_weight: 3.0
     online_q_weight: 1.0
+    # Phased ablations. Enable one extra stage at a time; restart the learner.
+    # Stage 1 (this run): HUMAN/MIXED steps BC to executed action. Actor still sees VLA ref.
+    #   Set false to restore the previous "BC always to VLA" run.
+    bc_imitate_human: true
 
     actor_hidden_dim: 256
     actor_num_layers: 2
@@ -36,7 +47,7 @@ experiment:
 
     warmup_min_size: 1200
     warmup_post_collect_updates: 50000
-    freeze_after_warmup: true
+    freeze_after_warmup: false
     grad_updates_per_cycle: 5
 
 runtime:
@@ -66,11 +77,12 @@ runtime:
     bind_host: 127.0.0.1
     port: 9102
     seed: 0
+    # Stage 2 (after Stage 1): stratified mix so warmup does not dominate the batch.
     # sample_strategy: stratified
     # recent_episode_window: 20
-    # recent_online_ratio: 0.5
-    # warmup_demo_ratio: 0.5
-    # human_intervention_ratio: 0.0
+    # recent_online_ratio: 0.4
+    # warmup_demo_ratio: 0.3
+    # human_intervention_ratio: 0.3
 
   env_driver:
     machine_a_ws_url: ws://0.0.0.0:8000
@@ -101,16 +113,21 @@ runtime:
     # RTC defaults match Evo-RLT ``record collect`` CLI.
     use_rtc: true
     rtc_vla_guidance: true
-    rtc_execution_horizon_vla: 25
+    rtc_execution_horizon_vla: 20
     rtc_execution_horizon_rl: 10
     # null → latency tracker (skips first samples / JIT); set int for a fixed JIT ``d``.
     rtc_inference_delay: 7
-    action_queue_size_to_get_new_actions: 25
+    action_queue_size_to_get_new_actions: 30
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16
     enable_human_override: false
     safe_fallback_to_ref: true
+    # Policy action LPF (deploy + offline smoothness sim). Same flag gates both.
+    # false → deploy off, smooth skips LPF sim; true → both on (cutoff below).
+    use_actions_filter: true
+    action_lpf_cutoff_freq: 5.0
+    action_lpf_dt: null
     machine_a_connect_timeout_sec: 10.0
     machine_a_recv_timeout_sec: 10.0
     machine_a_retry_interval_sec: 0.5

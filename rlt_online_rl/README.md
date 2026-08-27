@@ -174,16 +174,19 @@ networks, and reference-action dropout. The current actor loss is:
 
 ```text
 actor_loss = bc_weight * bc_penalty - q_weight * actor_q + delta_weight * delta_penalty
+           + acc_jerk_penalty + l2c2_policy_weight * l2c2_policy_penalty
 ```
 
+`l2c2_policy_weight` / `l2c2_critic_weight` default to `0` (off). HoST-style start: `1.0` / `0.1`.
 The warmup and online stages can use different BC/Q weights:
 
 - `warmup_bc_weight`, `warmup_q_weight`
 - `online_bc_weight`, `online_q_weight`
 
-`delta_penalty` is computed after converting normalized training actions back to
-executable absolute chunks, and currently compares step-to-step deltas for the
-first six arm joints.
+`delta_penalty` is mean ``||Δμ - Δref||²`` on absolute pose (first 6 dims); scaled by
+``delta_weight``. Acc/jerk on predicted absolute pose use OpenPI-style physical units
+with ``dt=1/control_frequency_hz``; ``delta_acc_weight=delta_jerk_weight=100`` match
+``OptimizeActionsQP``.
 
 ## Replay Windows
 

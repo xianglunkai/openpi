@@ -14,6 +14,12 @@ experiment:
     action_clip_min: -1.0
     action_clip_max: 1.0
     delta_weight: 0.0
+    delta_acc_weight: 100.0
+    delta_jerk_weight: 100.0
+    control_frequency_hz: 30.0
+    # L2C2 (HoST): set >0 to enable; paper uses policy≈1.0, critic≈0.1
+    l2c2_policy_weight: 0.0
+    l2c2_critic_weight: 0.0
 
     actor_hidden_dim: 256
     actor_num_layers: 2

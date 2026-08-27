@@ -243,6 +243,88 @@ def clamp_action_chunk(
     return jnp.clip(action_chunk, action_min, action_max)
 
 
+def l2c2_mix_alpha(rng: jax.Array, done: jax.Array) -> jax.Array:
+    """Sample α ∈ [-1, 1] for L2C2 state mixing; zero when the transition is terminal."""
+    done_f = jnp.asarray(done, dtype=jnp.float32).reshape(-1)
+    cont = 1.0 - done_f
+    return cont * (jax.random.uniform(rng, done_f.shape) * 2.0 - 1.0)
+
+
+def mix_between(x: jax.Array, next_x: jax.Array, alpha: jax.Array) -> jax.Array:
+    """Interpolate ``x̄ = x + α (x' - x)`` with α broadcast over trailing dims."""
+    alpha_b = alpha.reshape((alpha.shape[0],) + (1,) * (x.ndim - 1)).astype(x.dtype)
+    return x + alpha_b * (next_x - x)
+
+
+def mean_squared_l2(a: jax.Array, b: jax.Array) -> jax.Array:
+    """Batch mean of ||a - b||_2^2 over all non-batch dimensions (HoST L2C2 distance)."""
+    diff = (a - b).reshape((a.shape[0], -1))
+    return jnp.mean(jnp.sum(jnp.square(diff), axis=-1))
+
+
+def compute_delta_ref_match_penalty(
+    pred_abs_chunk: jax.Array,
+    ref_abs_chunk: jax.Array,
+    *,
+    pose_dim: int = 6,
+) -> jax.Array:
+    """Mean squared error between consecutive pose deltas of μ and ref.
+
+    Both chunks must be in absolute pose space (after denormalize if needed).
+    Only the first ``pose_dim`` dims (xyz + rot) are used; gripper is ignored.
+    """
+    pred_pose = pred_abs_chunk[..., :pose_dim]
+    ref_pose = ref_abs_chunk[..., :pose_dim]
+    pred_delta = pred_pose[:, 1:, :] - pred_pose[:, :-1, :]
+    ref_delta = ref_pose[:, 1:, :] - ref_pose[:, :-1, :]
+    return jnp.mean(jnp.square(pred_delta - ref_delta))
+
+
+def compute_abs_chunk_acc_jerk_penalty(
+    abs_chunk: jax.Array,
+    *,
+    pose_dim: int = 6,
+    acc_weight: float = 1.0,
+    jerk_weight: float = 1.0,
+    dt: float = 1.0 / 30.0,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Physical acc/jerk penalties aligned with OpenPI ``OptimizeActionsQP``.
+
+    Stencils match ``src/openpi/transforms.py`` (``D2=[1,-2,1]``, ``D3=[1,-3,3,-1]``).
+    Hard acc limits there use ``|D2 x| <= a_max * dt^2``; we expose physical units:
+
+      a_phys = D2(x) / dt^2
+      j_phys = D3(x) / dt^3
+
+    Metrics return ``mean(a_phys^2)`` and ``mean(j_phys^2)``.
+
+    OpenPI penalizes ``w_acc * ||D2 x||^2 + w_jerk * ||D3 x||^2`` (no dt in the
+    objective). With ``acc_weight=jerk_weight=100`` and ``dt=1/f_hz``, the combined
+    training term is equivalent:
+
+      acc_weight * dt^4 * mean(a_phys^2) + jerk_weight * dt^6 * mean(j_phys^2)
+
+    Returns ``(combined, acc_penalty, jerk_penalty)``.
+    """
+    dt_f = max(float(dt), 1e-8)
+    dt2 = dt_f * dt_f
+    dt4 = dt2 * dt2
+    dt6 = dt4 * dt2
+    inv_dt2 = 1.0 / dt2
+    inv_dt3 = inv_dt2 / dt_f
+    pose = abs_chunk[..., :pose_dim]
+    d1 = pose[:, 1:, :] - pose[:, :-1, :]
+    d2 = d1[:, 1:, :] - d1[:, :-1, :]
+    d3 = d2[:, 1:, :] - d2[:, :-1, :]
+    acc_penalty = jnp.mean(jnp.square(d2 * inv_dt2))
+    jerk_penalty = jnp.mean(jnp.square(d3 * inv_dt3))
+    combined = (
+        jnp.asarray(acc_weight, dtype=jnp.float32) * dt4 * acc_penalty
+        + jnp.asarray(jerk_weight, dtype=jnp.float32) * dt6 * jerk_penalty
+    )
+    return combined, acc_penalty, jerk_penalty
+
+
 def compute_bc_penalty(
     action_chunk: jax.Array,
     bc_target: jax.Array,

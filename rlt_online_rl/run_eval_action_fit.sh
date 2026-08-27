@@ -42,6 +42,8 @@ COMPARE_TARGET="${RLT_COMPARE_TARGET:-snapshot}"
 TOP_K="${RLT_TOP_K:-5}"
 EVAL_DISABLE_REF_INPUT="${RLT_EVAL_DISABLE_REF_INPUT:-0}"
 EVAL_Q_BATCH_SIZE="${RLT_EVAL_Q_BATCH_SIZE:-256}"
+# Optional LPF overrides for smooth eval (unset → TASK_CONFIG env_driver.*)
+# RLT_LPF_CUTOFF_FREQ / RLT_LPF_DT / RLT_SIMULATE_LPF=0|1
 EPISODE_IDS=()
 
 _filter_suffix() {
@@ -77,6 +79,7 @@ Commands:
   train     offline_train_from_replay.py only
   eval      eval_action_fit.py only
   viz       visualize_offline_training.py only
+  smooth    eval_action_smoothness.py (intra/inter-chunk + vs gt plots)
   eval-q    eval_episode_q.py (requires --episode-ids)
 
 Options:
@@ -98,6 +101,11 @@ Optional train overrides (unset = YAML):
 
 Eval env:
   RLT_ACTOR_MODE / RLT_COMPARE_TARGET / RLT_EVAL_EVERY / RLT_VAL_RATIO
+  RLT_LPF_CUTOFF_FREQ / RLT_LPF_DT / RLT_SIMULATE_LPF=0|1
+  (smooth; default follows YAML use_actions_filter; RLT_SIMULATE_LPF overrides)
+
+Deploy LPF (in ${TASK_CONFIG} runtime.env_driver):
+  use_actions_filter / action_lpf_cutoff_freq / action_lpf_dt
 
 Resolved:
   config=${TASK_CONFIG}
@@ -170,6 +178,30 @@ cmd_viz() {
     --train-dir "${TRAIN_DIR}"
 }
 
+cmd_smooth() {
+  echo "==> Action smoothness eval: actor_mode=${ACTOR_MODE} model=${MODEL_DIR} config=${TASK_CONFIG}"
+  local smooth_args=(
+    --replay-path "${REPLAY_PATH}"
+    --model-dir "${MODEL_DIR}"
+    --config "${TASK_CONFIG}"
+    --actor-mode "${ACTOR_MODE}"
+    --actor-seed "${ACTOR_SEED}"
+    --phase "${PHASE}"
+  )
+  # Default: follow YAML use_actions_filter. Override with RLT_SIMULATE_LPF=0|1.
+  if [[ -n "${RLT_SIMULATE_LPF:-}" ]]; then
+    if [[ "${RLT_SIMULATE_LPF}" == "0" ]]; then
+      smooth_args+=(--no-simulate-lpf)
+    else
+      smooth_args+=(--simulate-lpf)
+    fi
+  fi
+  [[ -n "${RLT_LPF_CUTOFF_FREQ:-}" ]] && smooth_args+=(--lpf-cutoff-freq "${RLT_LPF_CUTOFF_FREQ}")
+  [[ -n "${RLT_LPF_DT:-}" ]] && smooth_args+=(--lpf-dt "${RLT_LPF_DT}")
+  smooth_args+=("${_source_args[@]}" "${_ref_input_eval_args[@]}")
+  python scripts/offline/eval_action_smoothness.py "${smooth_args[@]}"
+}
+
 cmd_eval_q() {
   if ((${#EPISODE_IDS[@]} == 0)); then
     echo "eval-q requires --episode-ids, e.g.: bash run_eval_action_fit.sh eval-q --episode-ids 1 2 3" >&2
@@ -221,6 +253,7 @@ case "${COMMAND}" in
   train)  cmd_train ;;
   eval)   cmd_eval ;;
   viz)    cmd_viz ;;
+  smooth) cmd_smooth ;;
   eval-q) cmd_eval_q ;;
   -h|--help)
     usage

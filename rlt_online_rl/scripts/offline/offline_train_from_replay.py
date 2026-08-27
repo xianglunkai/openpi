@@ -57,6 +57,11 @@ from rlt_online_rl.config import relativize_rl_config_paths
 from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import PyTree
 from rlt_online_rl.networks import TwinCritic
+from rlt_online_rl.networks import compute_abs_chunk_acc_jerk_penalty
+from rlt_online_rl.networks import compute_delta_ref_match_penalty
+from rlt_online_rl.networks import l2c2_mix_alpha
+from rlt_online_rl.networks import mean_squared_l2
+from rlt_online_rl.networks import mix_between
 from rlt_online_rl.critic_loss import compute_critic_loss
 from rlt_online_rl.replay import TransitionSource
 from rlt_online_rl.trainer import RLTTrainState
@@ -508,10 +513,18 @@ def _custom_actor_loss(
     ref_chunk: jax.Array,
     behavior_chunk: jax.Array,
     source_chunk: jax.Array,
+    next_z_rl: jax.Array,
+    next_proprio: jax.Array,
+    next_ref_chunk: jax.Array,
+    done: jax.Array,
     *,
     bc_weight: float,
     q_weight: float,
     delta_weight: float,
+    delta_acc_weight: float,
+    delta_jerk_weight: float,
+    control_frequency_hz: float,
+    l2c2_policy_weight: float,
     reference_dropout_prob: float,
     disable_ref_input: bool,
     rng: jax.Array,
@@ -520,13 +533,14 @@ def _custom_actor_loss(
     action_q99: jax.Array | None,
     action_representation: str,
     bc_reduction: str,
+    bc_imitate_human: bool,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """Actor loss: L = w_bc * BC - w_q * mean(Q) + w_delta * Delta.
+    """Actor loss: L = w_bc*BC - w_q*Q + w_delta*||Δμ-Δref||² + acc/jerk + w_l2c2*L2C2.
 
     Shape legend (screw_sorting defaults as example):
       B = batch size, e.g. 256
       C = chunk_len, e.g. 10
-      A = action_dim, e.g. 7  (xyz+rot+gripper; delta uses first 6)
+      A = action_dim, e.g. 7  (xyz+rot+gripper; smoothness uses first 6)
       z_rl:          (B, 2048)
       proprio:       (B, 7)
       ref_chunk:     (B, C, A)  VLA reference actions
@@ -537,7 +551,7 @@ def _custom_actor_loss(
     # Binary ref dropout per batch element (same mask for all C*A of that sample).
     # keep_mask: (B, 1, 1) broadcasts over (B, C, A).
     # Example: B=2, p_drop=0.5 → keep_mask maybe [[1],[0]] → sample0 keeps ref, sample1 zeros ref.
-    dropout_rng, _ = jax.random.split(rng)
+    dropout_rng, mix_rng = jax.random.split(rng)
     if reference_dropout_prob > 0.0:
         keep_mask = jax.random.bernoulli(
             dropout_rng, 1.0 - reference_dropout_prob, (ref_chunk.shape[0], 1, 1)
@@ -566,17 +580,16 @@ def _custom_actor_loss(
     human_mask_chunk = jnp.any(human_mask, axis=-1).astype(jnp.float32)  # (B,)
     policy_mask_chunk = 1.0 - human_mask_chunk  # (B,)
 
-    # BC target: human/mixed steps → behavior (demo/exec); else → VLA ref.
-    # human_mask[..., None]: (B, C, 1) broadcasts over A.
-    # Example: step t human → bc_target[i,t]=behavior; else bc_target[i,t]=ref.
-    bc_target = jnp.where(human_mask[..., None], behavior_chunk, ref_chunk)  # (B, C, A)
-
     # --- 3) BC term that enters the loss ---
     # Squared error then sum over (C, A) → per-sample scalar, then mean over B.
     # bc_error: (B, C, A); per_sample_bc: (B,)
     # Example C=10,A=7: sum over 70 dims; "sum" reduction keeps that scale (Evo-RLT/paper β).
-    # bc_error = jnp.square(action_chunk - bc_target)  # (B, C, A)
-    bc_error = jnp.square(action_chunk - ref_chunk)  # (B, C, A)
+    # BC currently targets VLA ref unless bc_imitate_human is on.
+    if bc_imitate_human:
+        bc_target = jnp.where(human_mask[..., None], behavior_chunk, ref_chunk)
+    else:
+        bc_target = ref_chunk
+    bc_error = jnp.square(action_chunk - bc_target)  # (B, C, A)
     per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))  # (B,)
     if bc_reduction == "sum":
         bc_penalty = jnp.mean(per_sample_bc)  # ()  E[||μ - a_bc||_F^2]
@@ -608,12 +621,10 @@ def _custom_actor_loss(
     )  # ()
     human_mask_ratio = jnp.mean(human_mask_chunk)  # () fraction of human-tagged samples
 
-    # --- 5) Delta (step-to-step) smoothness penalty ---
-    # Optionally map normalized actions to absolute space before differencing.
-    # pred/target_abs_chunk: (B, C, A) in either normalized or absolute coords.
+    # --- 5) Δμ vs Δref on absolute pose (first 6 dims) ---
     if not use_action_adapter:
         pred_abs_chunk = action_chunk
-        target_abs_chunk = bc_target
+        ref_abs_chunk = ref_chunk
     else:
         pred_abs_chunk = jax_denormalize_to_abs_chunk(
             action_chunk,
@@ -622,27 +633,39 @@ def _custom_actor_loss(
             action_q99,
             action_representation=action_representation,
         )
-        target_abs_chunk = jax_denormalize_to_abs_chunk(
-            bc_target,
+        ref_abs_chunk = jax_denormalize_to_abs_chunk(
+            ref_chunk,
             proprio,
             action_q01,
             action_q99,
             action_representation=action_representation,
         )
-    # Adjacent-step deltas on pose dims only (exclude gripper dim 6).
-    # [:, 1:, :6] - [:, :-1, :6] → (B, C-1, 6); e.g. C=10 → (B, 9, 6).
-    pred_step_delta = pred_abs_chunk[:, 1:, :6] - pred_abs_chunk[:, :-1, :6]
-    target_step_delta = target_abs_chunk[:, 1:, :6] - target_abs_chunk[:, :-1, :6]
-    delta_penalty = jnp.mean(jnp.square(pred_step_delta - target_step_delta))  # ()
+    delta_penalty = compute_delta_ref_match_penalty(pred_abs_chunk, ref_abs_chunk, pose_dim=6)
+    acc_jerk_penalty, acc_penalty, jerk_penalty = compute_abs_chunk_acc_jerk_penalty(
+        pred_abs_chunk,
+        pose_dim=6,
+        acc_weight=delta_acc_weight,
+        jerk_weight=delta_jerk_weight,
+        dt=1.0 / control_frequency_hz,
+    )
 
     # --- 6) Weighted objective ---
-    # L = w_bc * BC - w_q * Q̄ + w_delta * Delta
-    # Example: w_bc=1, w_q=1, w_delta=0 → classic Evo-style -Q + BC.
+    # L = w_bc*BC - w_q*Q + w_delta*||Δμ-Δref||² + acc/jerk + w_l2c2*L2C2
+    l2c2_penalty = jnp.asarray(0.0, dtype=jnp.float32)
+    if l2c2_policy_weight != 0.0:
+        alpha = l2c2_mix_alpha(mix_rng, done)
+        mix_z = mix_between(z_rl, next_z_rl, alpha)
+        mix_proprio = mix_between(proprio, next_proprio, alpha)
+        mix_next_ref = jnp.zeros_like(next_ref_chunk) if disable_ref_input else next_ref_chunk
+        mix_ref = mix_between(model_ref_input, mix_next_ref, alpha)
+        mix_action = actor.actor_mean(actor_params, mix_z, mix_proprio, mix_ref)
+        l2c2_penalty = mean_squared_l2(action_chunk, mix_action)
     actor_q = jnp.mean(q)  # ()
     weighted_bc = jnp.asarray(bc_weight, dtype=jnp.float32) * bc_penalty
     weighted_q = jnp.asarray(q_weight, dtype=jnp.float32) * actor_q
     weighted_delta = jnp.asarray(delta_weight, dtype=jnp.float32) * delta_penalty
-    actor_loss = weighted_bc - weighted_q + weighted_delta  # ()
+    weighted_l2c2 = jnp.asarray(l2c2_policy_weight, dtype=jnp.float32) * l2c2_penalty
+    actor_loss = weighted_bc - weighted_q + weighted_delta + acc_jerk_penalty + weighted_l2c2  # ()
     metrics = {
         "actor_loss": actor_loss,
         "actor_q": actor_q,
@@ -652,8 +675,13 @@ def _custom_actor_loss(
         "human_mask_ratio": human_mask_ratio,
         "policy_mask_ratio": 1.0 - human_mask_ratio,
         "delta_penalty": delta_penalty,
+        "acc_penalty": acc_penalty,
+        "jerk_penalty": jerk_penalty,
+        "acc_jerk_penalty": acc_jerk_penalty,
+        "l2c2_policy_penalty": l2c2_penalty,
         "weighted_bc": weighted_bc,
         "weighted_delta": weighted_delta,
+        "weighted_l2c2_policy": weighted_l2c2,
         "weighted_q": weighted_q,
     }
     return actor_loss, metrics
@@ -669,6 +697,7 @@ def _update_critic(
     disable_ref_input: bool,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
     next_ref_chunk = jnp.zeros_like(batch["next_ref_chunk"]) if disable_ref_input else batch["next_ref_chunk"]
+    critic_rng, next_rng = jax.random.split(state.rng)
 
     def loss_fn(critic_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
         return compute_critic_loss(
@@ -687,12 +716,13 @@ def _update_critic(
             next_ref_chunk,
             batch["actual_steps"],
             rl_config,
+            rng=critic_rng,
         )
 
     (critic_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.critic_params)
     updates, critic_opt_state = state.critic_tx.update(grads, state.critic_opt_state, state.critic_params)
     critic_params = optax.apply_updates(state.critic_params, updates)
-    new_state = state.replace(critic_params=critic_params, critic_opt_state=critic_opt_state)
+    new_state = state.replace(critic_params=critic_params, critic_opt_state=critic_opt_state, rng=next_rng)
     metrics = {**metrics, "critic_loss": critic_loss}
     return new_state, metrics
 
@@ -709,8 +739,13 @@ def _zero_metrics() -> dict[str, jax.Array]:
         "human_mask_ratio": nan,
         "policy_mask_ratio": nan,
         "delta_penalty": nan,
+        "acc_penalty": nan,
+        "jerk_penalty": nan,
+        "acc_jerk_penalty": nan,
+        "l2c2_policy_penalty": nan,
         "weighted_bc": nan,
         "weighted_delta": nan,
+        "weighted_l2c2_policy": nan,
         "weighted_q": nan,
     }
 
@@ -761,9 +796,17 @@ def _make_train_step(
                     batch["ref_chunk"],
                     batch["action_chunk"],
                     batch["source_chunk"],
+                    batch["next_z_rl"],
+                    batch["next_proprio"],
+                    batch["next_ref_chunk"],
+                    batch["done"],
                     bc_weight=bc_weight,
                     q_weight=q_weight,
                     delta_weight=delta_weight,
+                    delta_acc_weight=rl_config.delta_acc_weight,
+                    delta_jerk_weight=rl_config.delta_jerk_weight,
+                    control_frequency_hz=rl_config.control_frequency_hz,
+                    l2c2_policy_weight=rl_config.l2c2_policy_weight,
                     reference_dropout_prob=rl_config.reference_dropout_prob,
                     disable_ref_input=disable_ref_input,
                     rng=actor_rng,
@@ -772,6 +815,7 @@ def _make_train_step(
                     action_q99=action_q99,
                     action_representation=rl_config.action_representation,
                     bc_reduction=rl_config.bc_reduction,
+                    bc_imitate_human=rl_config.bc_imitate_human,
                 )
 
             (actor_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(train_state.actor_params)
@@ -973,7 +1017,10 @@ def main() -> None:
                 f"actor={metrics['actor_loss']:.4f} "
                 f"q={metrics['actor_q']:.4f} "
                 f"bc={metrics['bc_penalty']:.4f} "
-                f"delta={metrics['delta_penalty']:.4f} "
+                f"w_delta={metrics.get('weighted_delta', float('nan')):.4f} "
+                f"delta={metrics.get('delta_penalty', float('nan')):.2e} "
+                f"acc={metrics.get('acc_penalty', float('nan')):.2e} "
+                f"jerk={metrics.get('jerk_penalty', float('nan')):.2e} "
                 f"train_fit={metrics['train_mean_abs_delta']:.4f} "
                 f"val_fit={metrics['val_mean_abs_delta']:.4f} "
                 f"val_max={metrics['val_max_abs_delta']:.4f} "

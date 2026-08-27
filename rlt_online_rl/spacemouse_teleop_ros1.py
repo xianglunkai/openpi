@@ -193,6 +193,12 @@ def main() -> None:
                 if mode in {"teleop", "policy", "reset"} and mode != last_announced_mode:
                     log_say(f"Control mode {mode}.")
                     last_announced_mode = mode
+                    if mode == "reset":
+                        # Episode boundary: force gripper CLOSE so the next teleop
+                        # session does not need a mode switch + button press.
+                        teleop._gripper_state = 0  # GripperAction.CLOSE
+                        teleop._prev_button_state = 1
+                        last_cmd = None
                 publish_allowed = mode == "teleop"
 
             if publish_allowed:

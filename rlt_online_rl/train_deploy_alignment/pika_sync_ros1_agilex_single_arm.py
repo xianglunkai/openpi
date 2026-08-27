@@ -37,6 +37,7 @@ if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
 from examples.mobile_aloha_AgileX import robot_utils
+from examples.mobile_aloha_AgileX.td_filter import MultiJointLowPassFilter
 from openpi_client import image_tools
 
 from rlt_online_rl.chunk_horizon import ChunkHorizonEnvMixin
@@ -703,6 +704,15 @@ class AgilexSingleArmROS1Bridge:
         self._right_reset = np.asarray(args.right_reset, dtype=np.float32).reshape(7)
         self._last_left = self._left_reset.copy()
         self._last_right = self._right_reset.copy()
+        # Optional first-order LPF on commanded actions (same as real_env low_pass path).
+        self._action_lpf: MultiJointLowPassFilter | None = None
+        if bool(getattr(args, "use_actions_filter", False)):
+            cutoff = float(getattr(args, "action_lpf_cutoff_freq", 1.5))
+            dt = float(getattr(args, "action_lpf_dt", 0.0) or 0.0)
+            if dt <= 0.0:
+                dt = 1.0 / 30.0
+            self._action_lpf = MultiJointLowPassFilter(num_joints=7, cutoff_freq=cutoff, dt=dt)
+            logger.info("Action low-pass filter enabled cutoff_freq=%.3f Hz dt=%.4f s", cutoff, dt)
 
     @staticmethod
     def _to_rgb_u8_hwc(image: np.ndarray, resize_hw: tuple[int, int]) -> np.ndarray:
@@ -752,19 +762,47 @@ class AgilexSingleArmROS1Bridge:
             "prompt": task,
         }
 
-    def send_action(self, action7: np.ndarray) -> None:
+    def current_arm_state7(self) -> np.ndarray:
+        """Latest puppet joint state for the active single arm (7,)."""
+        if self._single_arm == "left":
+            return self._last_left.copy()
+        return self._last_right.copy()
+
+    def reset_action_filter(self, initial_values: np.ndarray | None = None) -> None:
+        """Reset LPF state (call on episode start). Defaults to current arm pose."""
+        if self._action_lpf is None:
+            return
+        if initial_values is None:
+            initial_values = self.current_arm_state7()
+        init = np.asarray(initial_values, dtype=np.float32).reshape(-1)[:7]
+        if init.shape[0] < 7:
+            raise ValueError(f"action filter reset expects dim >= 7, got {init.shape}")
+        self._action_lpf.reset_all_filters(init)
+
+    def send_action(self, action7: np.ndarray) -> np.ndarray:
+        """Publish arm command; optionally low-pass filter first. Returns the commanded 7-d action.
+
+        Return value is post-LPF / pre-gripper-offset (matches RL action space used in logs).
+        """
         action = np.asarray(action7, dtype=np.float32).reshape(-1)
         if action.shape[0] < 7:
             raise ValueError(f"Expected action dim >= 7, got {action.shape}")
         arm_target = action[:7].copy()
-        arm_target[6] = float(np.clip(arm_target[6] + self._gripper_offset, 0.0, self._max_gripper_m))
+        if self._action_lpf is not None:
+            arm_target = np.asarray(
+                self._action_lpf.update_all_joints(arm_target.astype(np.float64, copy=False)),
+                dtype=np.float32,
+            )
+        publish_target = arm_target.copy()
+        publish_target[6] = float(np.clip(publish_target[6] + self._gripper_offset, 0.0, self._max_gripper_m))
         left_target = self._last_left.copy()
         right_target = self._last_right.copy()
         if self._single_arm == "left":
-            left_target = arm_target
+            left_target = publish_target
         else:
-            right_target = arm_target
+            right_target = publish_target
         self._ros_operator.puppet_arm_publish(left_target.tolist(), right_target.tolist())
+        return arm_target
 
     def move_to_reset(self, target_action: np.ndarray | None) -> None:
         left_target = self._left_reset.copy()
@@ -875,6 +913,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
         self._robot.wait_for_observation_ready(timeout_s=self._obs_ready_timeout_s)
   
         self._reset_robot_to_mode_start()
+        self._robot.reset_action_filter()
         self._phase_controller.begin_episode()
         logger.info("Waiting for next episode request task_mode=%s", self._task_mode)
         self._runtime_context.wait_for_next_episode_request()
@@ -988,6 +1027,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                     planner=policy_planner,
                     # use vla guidance if enabled and not using rl
                     use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance),
+                    # use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance) and not uses_rl,
                     execution_horizon=resolve_rtc_execution_horizon(
                         self._system.env_driver,
                         self._system.rl,
@@ -1003,8 +1043,9 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                     policy_anchor_features.append(meta.start_features)
                 raw_action = np.asarray(rtc_result.action, dtype=np.float32)[: self._system.rl.action_dim]
                 bounded = self._apply_action_limits(raw_action)
-                self._robot.send_action(bounded)
-                executed.append(bounded)
+                sent = self._robot.send_action(bounded)
+                self._last_sent_action = sent.copy()
+                executed.append(sent)
                 ref_actions.append(np.asarray(meta.ref_action, dtype=np.float32)[: self._system.rl.action_dim])
                 human_controlled.append(bool(meta.source == int(TransitionSource.HUMAN)))
                 step_sources.append(int(meta.source))
@@ -1025,8 +1066,9 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                         : self._system.rl.action_dim
                     ]
                     bounded = self._apply_action_limits(raw_action)
-                    self._robot.send_action(bounded)
-                    executed.append(bounded)
+                    sent = self._robot.send_action(bounded)
+                    self._last_sent_action = sent.copy()
+                    executed.append(sent)
                     ref_actions.append(
                         np.asarray(current_plan.ref_chunk[plan_cursor], dtype=np.float32)[
                             : self._system.rl.action_dim
@@ -1251,6 +1293,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--done_factory", type=str, default=None)
     parser.add_argument("--safe_action_filter_factory", type=str, default=None)
     parser.add_argument("--action_delta_limits", type=float, nargs=7, default=None)
+    parser.add_argument(
+        "--use_actions_filter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override runtime.env_driver.use_actions_filter from --config "
+        "(MultiJointLowPassFilter on policy publish). Default: use YAML.",
+    )
+    parser.add_argument(
+        "--action_lpf_cutoff_freq",
+        type=float,
+        default=None,
+        help="Override runtime.env_driver.action_lpf_cutoff_freq (default: use YAML).",
+    )
+    parser.add_argument(
+        "--action_lpf_dt",
+        type=float,
+        default=None,
+        help="Override runtime.env_driver.action_lpf_dt; null YAML → 1/control_frequency_hz.",
+    )
     parser.add_argument("--image_h", type=int, default=224)
     parser.add_argument("--image_w", type=int, default=224)
     parser.add_argument("--max_gripper_m", type=float, default=0.097)
@@ -1322,6 +1383,18 @@ def main() -> None:
 
     task_state = TaskState(args.task)
     intervention_state = HumanInterventionState(policy_enabled=not args.start_in_human_mode)
+    # Resolve LPF settings: CLI overrides YAML env_driver.*.
+    env_cfg = system.env_driver
+    if args.use_actions_filter is None:
+        args.use_actions_filter = bool(env_cfg.use_actions_filter)
+    if args.action_lpf_cutoff_freq is None:
+        args.action_lpf_cutoff_freq = float(env_cfg.action_lpf_cutoff_freq)
+    if args.action_lpf_dt is None:
+        args.action_lpf_dt = (
+            float(env_cfg.action_lpf_dt)
+            if env_cfg.action_lpf_dt is not None
+            else 1.0 / max(float(env_cfg.control_frequency_hz), 1e-6)
+        )
     robot = AgilexSingleArmROS1Bridge(args)
     human_action_topic = args.right_cmd_topic if args.single_arm == "right" else args.left_cmd_topic
     human_action_recorder = Ros1HumanActionRecorder(human_action_topic)
@@ -1405,6 +1478,12 @@ def main() -> None:
     logger.info("Actor service: %s", system.env_driver.actor_service_url)
     logger.info("Replay service: %s", system.env_driver.replay_service_url)
     logger.info("Task mode: %s single_arm=%s", system.env_driver.task_mode, args.single_arm)
+    logger.info(
+        "Action LPF: enabled=%s cutoff_freq=%.3f Hz dt=%.4f s",
+        bool(args.use_actions_filter),
+        float(args.action_lpf_cutoff_freq),
+        float(args.action_lpf_dt),
+    )
     logger.info("Eval actor only: %s", args.eval_actor_only)
 
     try:

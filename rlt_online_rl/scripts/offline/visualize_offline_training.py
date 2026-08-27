@@ -105,16 +105,20 @@ def _moving_average(y: np.ndarray, window: int) -> np.ndarray:
 
 
 def _plot_losses(rows: list[dict], output_path: Path) -> None:
-    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    fig, axes = plt.subplots(3, 3, figsize=(15, 11))
     plot_specs = [
         ("critic_loss", "Critic Loss", False),
         ("actor_loss", "Actor Loss", True),
         ("actor_q", "Actor Q", True),
         ("bc_penalty", "BC Penalty", True),
-        ("delta_penalty", "Delta Penalty", True),
+        ("delta_penalty", "Delta Penalty (Δμ vs Δref)", True),
+        ("acc_penalty", "Acc Penalty", True),
+        ("jerk_penalty", "Jerk Penalty", True),
+        ("acc_jerk_penalty", "Acc+Jerk Penalty", True),
         ("weighted_delta", "Weighted Delta", True),
     ]
-    for ax, (key, title, actor_only) in zip(axes.reshape(-1), plot_specs, strict=True):
+    flat_axes = axes.reshape(-1)
+    for ax, (key, title, actor_only) in zip(flat_axes, plot_specs):
         x, y = _series(rows, key, actor_only=actor_only)
         if x.size == 0:
             ax.set_title(title)
@@ -132,6 +136,8 @@ def _plot_losses(rows: list[dict], output_path: Path) -> None:
         ax.set_ylabel(key)
         ax.legend(frameon=False, fontsize=8, loc="upper right")
         ax.grid(True, alpha=0.25)
+    for ax in flat_axes[len(plot_specs) :]:
+        ax.axis("off")
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)

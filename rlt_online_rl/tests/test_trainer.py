@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 import pickle
@@ -85,7 +86,7 @@ def test_train_step_runs_and_actor_update_period_works() -> None:
 
 
 def test_train_step_bc_target_switches_to_human_actions() -> None:
-    cfg = _config()
+    cfg = dataclasses.replace(_config(), bc_imitate_human=True)
     state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(0))
     batch_np = _batch(cfg)
     batch_np["ref_chunk"] = np.zeros_like(batch_np["ref_chunk"])
@@ -101,6 +102,25 @@ def test_train_step_bc_target_switches_to_human_actions() -> None:
     assert np.isclose(float(metrics["policy_mask_ratio"]), 0.0)
     assert np.isclose(float(metrics["bc_penalty"]), float(metrics["bc_human_penalty"]))
     assert np.isclose(float(metrics["bc_ref_penalty"]), 0.0)
+
+
+def test_train_step_bc_stays_on_ref_when_human_imitate_disabled() -> None:
+    cfg = dataclasses.replace(_config(), bc_imitate_human=False)
+    state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(0))
+    batch_np = _batch(cfg)
+    batch_np["ref_chunk"] = np.zeros_like(batch_np["ref_chunk"])
+    batch_np["action_chunk"] = np.ones_like(batch_np["action_chunk"])
+    batch_np["source_chunk"] = np.full_like(batch_np["source_chunk"], int(TransitionSource.HUMAN), dtype=np.uint8)
+    batch = {k: jax.numpy.asarray(v) for k, v in batch_np.items()}
+
+    state, _ = train_step(state, batch, actor=actor, critic=critic, rl_config=cfg)
+    _state, metrics = train_step(state, batch, actor=actor, critic=critic, rl_config=cfg)
+
+    assert int(metrics["did_actor_update"]) == 1
+    assert np.isclose(float(metrics["human_mask_ratio"]), 1.0)
+    # Policy-only metric is undefined on an all-human batch (mask sum=0 → 0).
+    # Disabled path BCs to ref (zeros), not executed (ones), so the two penalties differ.
+    assert not np.isclose(float(metrics["bc_penalty"]), float(metrics["bc_human_penalty"]))
 
 
 def test_soft_update_changes_target_params() -> None:

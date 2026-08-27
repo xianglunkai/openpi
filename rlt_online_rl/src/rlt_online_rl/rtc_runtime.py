@@ -90,6 +90,7 @@ class RtcActionRuntime:
         self._worker_error: Exception | None = None
         self._step_metadata: deque[RtcStepMetadata] = deque()
         self._policy_was_enabled = True
+        self._inference_count = 0
 
     @property
     def refill_threshold(self) -> int:
@@ -131,6 +132,7 @@ class RtcActionRuntime:
         self._policy_was_enabled = True
         self._inference_warmup_remaining = self._inference_warmup_total
         self._warmup_prev_actions = None
+        self._inference_count = 0
 
     def _invalidate_queue(self) -> None:
         """Drop queued actions / metadata and cancel in-flight refill workers."""
@@ -234,14 +236,25 @@ class RtcActionRuntime:
                 action_index_before_inference,
             )
             self._step_metadata = deque(metadata[clamped_delay:])
+            self._inference_count += 1
 
+        ls = self._queue.qsize()
+        print(
+            f"[RltRtc] Inference {self._inference_count}: "
+            f"time={new_latency * 1000.0:.1f}ms, "
+            f"delay={estimated_delay} steps, "
+            f"real_delay={real_delay} steps, "
+            f"start queue_size={queue_before}, "
+            f"end queue_size={ls}",
+            flush=True,
+        )
         logger.info(
             "[RLT RTC] latency=%.1fms estimated_delay=%d real_delay=%d queue_before=%d queued=%d",
             new_latency * 1000.0,
             estimated_delay,
             real_delay,
             queue_before,
-            self._queue.qsize(),
+            ls,
         )
         # Match Evo-RLT ChunkACPolicy: warn when refill fires too late vs s + delay.
         horizon = int(execution_horizon) if execution_horizon is not None else 0

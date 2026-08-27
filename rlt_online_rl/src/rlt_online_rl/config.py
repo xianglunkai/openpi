@@ -32,7 +32,19 @@ class RLTOnlineRLConfig:
     warmup_q_weight: float = 1.0
     online_bc_weight: float = 5.0
     online_q_weight: float = 1.0
+    # If True, BC target is executed action on HUMAN/MIXED steps (VLA ref otherwise).
+    # Actor still conditions on live VLA ref_chunk. Matches the trainer path README.
+    bc_imitate_human: bool = False
+    # Scales ||Δμ - Δref||² on absolute pose (first 6 dims); 0 disables.
     delta_weight: float = 0.0
+    # OpenPI-style acc/jerk on predicted absolute pose; 0 disables each term.
+    delta_acc_weight: float = 100.0
+    delta_jerk_weight: float = 100.0
+    # Control rate for physical acc/jerk (OpenPI OptimizeActionsQP dt convention).
+    control_frequency_hz: float = 30.0
+    # L2C2 smoothness (HoST / Kobayashi IROS'22). 0 disables. Typical: policy=1.0, critic=0.1.
+    l2c2_policy_weight: float = 0.0
+    l2c2_critic_weight: float = 0.0
     # TD3-style target action clamp and Q-value clip (Evo-RLT defaults).
     action_clip_min: float = -1.0
     action_clip_max: float = 1.0
@@ -140,6 +152,12 @@ class EnvDriverConfig:
     machine_a_retry_interval_sec: float = 0.5
     actor_request_timeout_sec: float = 1.0
     replay_request_timeout_sec: float = 30.0
+    # Deploy-time first-order LPF on policy actions (MultiJointLowPassFilter).
+    # Also used as defaults for offline eval_action_smoothness --simulate-lpf.
+    use_actions_filter: bool = False
+    action_lpf_cutoff_freq: float = 3.0
+    # None → 1 / control_frequency_hz. apply() still uses wall-clock dt at runtime.
+    action_lpf_dt: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)

@@ -106,6 +106,23 @@ python launch/launch_machine_b.py \
   --config runs/agilex_ethernet/offline_train_bcq/online_bundle/online_rl_config.yaml
 ```
 
+### `eval_action_smoothness.py`
+
+Measures actor action-chunk smoothness on a replay journal and plots vs GT:
+
+- intra-chunk step velocity / acceleration
+- inter-chunk boundary jump and overlap consistency
+- fit vs smoothness scatter, jerky-chunk overlays, stitched episode trajectories
+
+```bash
+bash run_eval_action_fit.sh smooth
+# or
+python scripts/offline/eval_action_smoothness.py \
+  --replay-path runs/screw_sorting/replay/replay_journal_sft.pkl \
+  --model-dir runs/screw_sorting/offline_train_bcq \
+  --actor-mode mean
+```
+
 ### `eval_action_fit.py`
 
 Compares actor outputs or recorded actions against replay references.
