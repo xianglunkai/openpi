@@ -76,6 +76,17 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
+    if default_prompt is None:
+        default_prompt = getattr(train_config.data, "default_prompt", None)
+
+    recap = train_config.recap
+    if recap.enable:
+        logging.info(
+            "RECAP serving from train config: guidance_scale=%.2f guidance_type=%s",
+            recap.cfg_guidance_scale,
+            recap.guidance_type,
+        )
+
     return _policy.Policy(
         model,
         transforms=[
@@ -97,4 +108,6 @@ def create_trained_policy(
         metadata=train_config.policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
+        recap=recap,
+        default_prompt=default_prompt,
     )

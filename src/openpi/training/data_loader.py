@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import dataclasses
 import logging
 import multiprocessing
 import os
@@ -12,6 +13,7 @@ import numpy as np
 import torch
 
 import openpi.models.model as _model
+from openpi.recap import transforms as recap_transforms
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
@@ -169,8 +171,10 @@ def create_rlds_dataset(
     )
 
 
-def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
-    """Transform the dataset by applying the data transforms."""
+def _build_input_transforms(
+    data_config: _config.DataConfig, *, skip_norm_stats: bool = False
+) -> list[_transforms.DataTransformFn]:
+    """Assemble the training transform chain, optionally injecting RECAP tags."""
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
         if data_config.norm_stats is None:
@@ -180,15 +184,58 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             )
         norm_stats = data_config.norm_stats
 
-    return TransformedDataset(
-        dataset,
-        [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
-            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-            *data_config.model_transforms.inputs,
-        ],
-    )
+    recap = data_config.recap
+    recap_enabled = recap is not None and recap.enable
+    pre: list[_transforms.DataTransformFn] = []
+    repack = list(data_config.repack_transforms.inputs)
+    model_inputs = list(data_config.model_transforms.inputs)
+    if recap_enabled:
+        pre.append(
+            recap_transforms.LoadAdvantageLabel(
+                path=recap.advantage_path,
+                column=recap.advantage_column,
+                positive_fraction=recap.positive_fraction,
+            )
+        )
+        keep_fields = ("advantage", "prompt", "index", "episode_index", "frame_index")
+        if repack:
+            repack = [recap_transforms.keep_fields(repack, keep_fields)]
+        injected: list[_transforms.DataTransformFn] = []
+        inserted = False
+        for transform in model_inputs:
+            injected.append(transform)
+            if isinstance(transform, _transforms.InjectDefaultPrompt):
+                injected.append(
+                    recap_transforms.InjectAdvantagePrompt(
+                        positive_only_conditional=recap.positive_only_conditional,
+                        unconditional_prob=recap.unconditional_prob,
+                        seed=recap.dropout_seed,
+                    )
+                )
+                inserted = True
+        if not inserted:
+            injected.insert(
+                0,
+                recap_transforms.InjectAdvantagePrompt(
+                    positive_only_conditional=recap.positive_only_conditional,
+                    unconditional_prob=recap.unconditional_prob,
+                    seed=recap.dropout_seed,
+                ),
+            )
+        model_inputs = injected
+
+    return [
+        *pre,
+        *repack,
+        *data_config.data_transforms.inputs,
+        _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+        *model_inputs,
+    ]
+
+
+def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
+    """Transform the dataset by applying the data transforms."""
+    return TransformedDataset(dataset, _build_input_transforms(data_config, skip_norm_stats=skip_norm_stats))
 
 
 def transform_iterable_dataset(
@@ -199,23 +246,9 @@ def transform_iterable_dataset(
     is_batched: bool = False,
 ) -> IterableDataset:
     """Transform the dataset by applying the data transforms."""
-    norm_stats = {}
-    if data_config.repo_id != "fake" and not skip_norm_stats:
-        if data_config.norm_stats is None:
-            raise ValueError(
-                "Normalization stats not found. "
-                "Make sure to run `scripts/compute_norm_stats.py --config-name=<your-config>`."
-            )
-        norm_stats = data_config.norm_stats
-
     return IterableTransformedDataset(
         dataset,
-        [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
-            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-            *data_config.model_transforms.inputs,
-        ],
+        _build_input_transforms(data_config, skip_norm_stats=skip_norm_stats),
         is_batched=is_batched,
     )
 
@@ -240,6 +273,8 @@ def create_data_loader(
         framework: The framework to use ("jax" or "pytorch").
     """
     data_config = config.data.create(config.assets_dirs, config.model)
+    if config.recap.enable:
+        data_config = dataclasses.replace(data_config, recap=config.recap)
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:

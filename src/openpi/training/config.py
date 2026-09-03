@@ -23,6 +23,7 @@ import openpi.policies.mobile_cobot_policy as mobile_cobot_policy
 import openpi.policies.cobot_single_arm_policy as cobot_single_arm_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+from openpi.recap.config import RecapConfig
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -92,6 +93,9 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # JAX RECAP / π*0.6 advantage-conditioned CFG training. Copied from TrainConfig.recap.
+    recap: RecapConfig | None = None
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -684,6 +688,9 @@ class TrainConfig:
 
     # Used to pass metadata to the policy server.
     policy_metadata: dict[str, Any] | None = None
+
+    # JAX RECAP / π*0.6. Labels come from scripts/recap/* sidecar or a dataset column.
+    recap: RecapConfig = dataclasses.field(default_factory=RecapConfig)
 
     # RLT (Representation Learning Token) configuration fields.
     rlt_num_tokens: int | None = None
@@ -1635,6 +1642,55 @@ _CONFIGS = [
 
         # If true, will enable wandb logging.
         wandb_enabled = True,
+    ),
+
+    TrainConfig(
+        name="pi05_cobot_screw_sorting_single_recap",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotSingleArmDataConfig(
+            repo_id="screw_sorting_single",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_cobot_screw_sorting_single",
+                asset_id="screw_sorting_single",
+            ),
+            default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/workspace/openpi/checkpoints/pi05_cobot_screw_sorting_single/pi05_cobot_screw_sorting_single/20000/params"
+        ),
+        recap=RecapConfig(
+            enable=True,
+            # Default sidecar written by scripts/recap/compute_advantages.py.
+            # Override with --recap.advantage-path=...
+            advantage_path=None,
+            positive_only_conditional=True,
+            unconditional_prob=0.1,
+            cfg_enable=True,
+            cfg_guidance_scale=1.5,
+        ),
+        batch_size=64,
+        num_workers=8,
+        num_train_steps=20_000,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        wandb_enabled=True,
     ),
 
     #

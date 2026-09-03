@@ -15,6 +15,8 @@ from typing_extensions import override
 
 from openpi import transforms as _transforms
 from openpi.models import model as _model
+from openpi.recap.config import RecapConfig
+from openpi.recap.tags import build_acp_tagged_task
 from openpi.shared import array_typing as at
 from openpi.shared import nnx_utils
 
@@ -49,6 +51,8 @@ class Policy(BasePolicy):
         metadata: dict[str, Any] | None = None,
         pytorch_device: str = "cpu",
         is_pytorch: bool = False,
+        recap: RecapConfig | None = None,
+        default_prompt: str | None = None,
     ):
         """Initialize the Policy.
 
@@ -62,6 +66,8 @@ class Policy(BasePolicy):
             pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda:0").
                           Only relevant when is_pytorch=True.
             is_pytorch: Whether the model is a PyTorch model. If False, assumes JAX model.
+            recap: Loaded from ``TrainConfig.recap``. Serving uses this automatically.
+            default_prompt: Fallback language prompt used when the observation has none.
         """
         self._model = model
         self._input_transform = _transforms.compose(transforms)
@@ -70,82 +76,108 @@ class Policy(BasePolicy):
         self._metadata = metadata or {}
         self._is_pytorch_model = is_pytorch
         self._pytorch_device = pytorch_device
+        self._recap = recap if recap is not None and recap.active_at_inference else None
+        self._default_prompt = default_prompt
 
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
             self._model.eval()
             self._sample_actions = model.sample_actions
             self._guided_inference = model.guided_inference
+            self._sample_actions_cfg = getattr(model, "sample_actions_cfg", None) if self._recap else None
         else:
-            # JAX model setup
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._guided_inference = nnx_utils.module_jit(model.guided_inference)
             self._rng = rng or jax.random.key(0)
+            self._sample_actions_cfg = None
+            if self._recap is not None and hasattr(model, "sample_actions_cfg"):
+                self._sample_actions_cfg = nnx_utils.module_jit(model.sample_actions_cfg)
+
+    def _prompt_of(self, obs: dict) -> str:
+        prompt = obs.get("prompt")
+        if prompt is None:
+            return self._default_prompt or ""
+        if not isinstance(prompt, str):
+            prompt = prompt.item() if hasattr(prompt, "item") else str(prompt)
+        return prompt
+
+    def _encode(self, obs: dict, prompt: str | None = None):
+        """Apply input transforms and add a batch dimension."""
+        inputs = jax.tree.map(lambda x: x, obs)
+        if prompt is not None:
+            inputs["prompt"] = prompt
+        inputs = self._input_transform(inputs)
+        if self._is_pytorch_model:
+            inputs = jax.tree.map(
+                lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs
+            )
+        else:
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+        return inputs, _model.Observation.from_dict(inputs)
+
+    def _predict(self, obs: dict, rng, sample_kwargs: dict[str, Any]):
+        """Sample actions. Recap CFG is selected from TrainConfig at construction."""
+        recap = self._recap
+        if recap is None:
+            inputs, observation = self._encode(obs)
+            return inputs, self._sample_actions(rng, observation, **sample_kwargs)
+
+        base_prompt = self._prompt_of(obs)
+        if recap.guidance_type == "no_guide":
+            inputs, observation = self._encode(obs, base_prompt)
+            return inputs, self._sample_actions(rng, observation, **sample_kwargs)
+
+        inputs, observation_cond = self._encode(obs, build_acp_tagged_task(base_prompt, True))
+        if recap.cfg_guidance_scale == 1.0 or self._sample_actions_cfg is None:
+            return inputs, self._sample_actions(rng, observation_cond, **sample_kwargs)
+
+        _, observation_uncond = self._encode(obs, base_prompt)
+        cfg_kwargs = {key: value for key, value in sample_kwargs.items() if key in {"num_steps", "noise"}}
+        cfg_kwargs["guidance_scale"] = recap.cfg_guidance_scale
+        return inputs, self._sample_actions_cfg(rng, observation_uncond, observation_cond, **cfg_kwargs)
 
     @override
     def infer(
-        self, 
-        obs: dict, 
+        self,
+        obs: dict,
         use_rtc: bool = False,
         noise: np.ndarray | None = None,
     ) -> dict:  # type: ignore[misc]
-        # Make a copy since transformations may modify the inputs in place.
-        inputs = jax.tree.map(lambda x: x, obs)
-        inputs = self._input_transform(inputs)
-        if not self._is_pytorch_model:
-            # Make a batch and convert to jax.Array.
-            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
-            self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
-        else:
-            # Convert inputs to PyTorch tensors and move to correct device
-            inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
-            sample_rng_or_pytorch_device = self._pytorch_device
-
-        # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
-
-            if noise.ndim == 2:  # If noise is (action_horizon, action_dim), add batch dimension
-                noise = noise[None, ...]  # Make it (1, action_horizon, action_dim)
+            if noise.ndim == 2:
+                noise = noise[None, ...]
             sample_kwargs["noise"] = noise
-        
-        # Add prev_action to sample_kwargs if it exists and we're not using RTC (since for RTC it will be passed to guided_inference instead)
-        prev_action = inputs.get("actions") if ("actions" in inputs) else None
-        # sample_kwargs["d"] = inputs.get("inference_delay", 0)
-        
-        observation = _model.Observation.from_dict(inputs)
-        start_time = time.monotonic()
-        
-        if use_rtc:
-            # Subsequent RTC call: use guided_inference. This API returns only actions,
-            # so we construct a simple timing dict here.
-            if prev_action is not None:
-                if self._is_pytorch_model:
-                    prev_action = torch.as_tensor(prev_action).to(self._pytorch_device)
-                else:
-                    prev_action = jnp.asarray(prev_action)
-        
-            origin_actions = self._guided_inference(
-                sample_rng_or_pytorch_device,
-                prev_action = prev_action,
-                observation = observation,
-                **sample_kwargs,
-            )
-            
+
+        if not self._is_pytorch_model:
+            self._rng, rng = jax.random.split(self._rng)
         else:
-            # Non-RTC path: standard sampling with full sample_kwargs (including s/d/noise).
-            origin_actions = self._sample_actions(
-                sample_rng_or_pytorch_device,
-                observation,
+            rng = self._pytorch_device
+
+        start_time = time.monotonic()
+        if use_rtc:
+            inputs, observation = self._encode(obs)
+            prev_action = inputs.get("actions")
+            if prev_action is not None:
+                prev_action = (
+                    torch.as_tensor(prev_action).to(self._pytorch_device)
+                    if self._is_pytorch_model
+                    else jnp.asarray(prev_action)
+                )
+            origin_actions = self._guided_inference(
+                rng,
+                prev_action=prev_action,
+                observation=observation,
                 **sample_kwargs,
             )
-          
+        else:
+            inputs, origin_actions = self._predict(obs, rng, sample_kwargs)
+
         outputs = {
             "state": inputs["state"],
             "actions": origin_actions,
         }
-        
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
@@ -153,11 +185,7 @@ class Policy(BasePolicy):
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
 
         outputs = self._output_transform(outputs)
-    
-        outputs["policy_timing"] = {
-            "infer_ms": model_time * 1000,
-        }
-       
+        outputs["policy_timing"] = {"infer_ms": model_time * 1000}
         return outputs
 
     @property
