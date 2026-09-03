@@ -15,20 +15,20 @@ experiment:
     reference_dropout_prob: 0.5
     bc_reduction: sum
     target_q_clip: 100.0
-    grad_clip_norm: 1.0
+    grad_clip_norm: 10.0
     action_clip_min: -1.0
     action_clip_max: 1.0
     # delta_weight scales ||Δμ - Δref||²; acc/jerk use OpenPI-style weights (dt=1/control_frequency_hz).
     delta_weight: 0.0
     control_frequency_hz: 30.0
-    delta_acc_weight: 500.0
-    delta_jerk_weight: 500.0
+    delta_acc_weight: 300.0
+    delta_jerk_weight: 300.0
     # L2C2 smoothness (HoST). 0 = off. Try policy=1.0, critic=0.1 to start.
     l2c2_policy_weight: 0.0
     l2c2_critic_weight: 0.0
-    warmup_bc_weight: 3.0
+    warmup_bc_weight: 1.0
     warmup_q_weight: 1.0
-    online_bc_weight: 3.0
+    online_bc_weight: 1.0
     online_q_weight: 1.0
     # Phased ablations. Enable one extra stage at a time; restart the learner.
     # Stage 1 (this run): HUMAN/MIXED steps BC to executed action. Actor still sees VLA ref.
@@ -79,7 +79,7 @@ runtime:
     seed: 0
     # Stage 2 (after Stage 1): stratified mix so warmup does not dominate the batch.
     # sample_strategy: stratified
-    # recent_episode_window: 20
+    # recent_episode_window: 30
     # recent_online_ratio: 0.4
     # warmup_demo_ratio: 0.3
     # human_intervention_ratio: 0.3
@@ -117,7 +117,7 @@ runtime:
     rtc_execution_horizon_rl: 10
     # null → latency tracker (skips first samples / JIT); set int for a fixed JIT ``d``.
     rtc_inference_delay: 7
-    action_queue_size_to_get_new_actions: 30
+    action_queue_size_to_get_new_actions: 25
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16
