@@ -30,7 +30,7 @@ class Args:
     # Action interpolation parameters
     inference_fps: int = 30
     use_action_interpolation: bool = True
-    multiplier: int = 2
+    multiplier: int = 3
     
     # Use single arm
     use_single_arm: bool = True
