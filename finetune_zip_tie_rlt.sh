@@ -25,8 +25,8 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 # 设置 Hugging Face 镜像端点
 export HF_ENDPOINT=https://hf-mirror.com
 
-export repo_id=screw_sorting_single_sft_ep279_annotated
-export config_name=pi05_cobot_screw_sorting_single
+export repo_id=zip_tie_annotated
+export config_name=pi05_zip_tie
 export HF_LEROBOT_HOME=/workspace/huggingface/lerobot
 export HF_HOME=/workspace/huggingface
 

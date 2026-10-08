@@ -26,7 +26,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 export HF_ENDPOINT=https://hf-mirror.com
 
 export repo_id=screw_sorting_single_sft_ep279_annotated
-export config_name=pi05_cobot_screw_sorting_single
+export config_name=pi05_cobot_screw_sorting_single_two_staged_rlt
 export HF_LEROBOT_HOME=/workspace/huggingface/lerobot
 export HF_HOME=/workspace/huggingface
 
@@ -63,7 +63,7 @@ fi
 # 步骤4: 开始微调训练
 if [ "$DO_STEP4" -eq 1 ]; then
     echo "执行步骤4: 开始微调训练..."
-    uv run --no-sync scripts/train.py "$config_name" \
+    uv run --no-sync scripts/train_rlt.py "$config_name" \
         --exp-name="$config_name" \
         # --resume \
         

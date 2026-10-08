@@ -3,7 +3,7 @@
 # 配置变量 - 设置为 1 表示执行，0 表示跳过
 DO_STEP1=0  # 转换数据到 LeRobot 数据集
 DO_STEP2=0 # 定义训练配置（此步骤主要是编辑文件，这里保留为提醒）
-DO_STEP3=1  # 计算归一化统计量
+DO_STEP3=0  # 计算归一化统计量
 DO_STEP4=1  # 开始微调训练
 
 export RAYON_NUM_THREADS=1
@@ -25,8 +25,8 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 # 设置 Hugging Face 镜像端点
 export HF_ENDPOINT=https://hf-mirror.com
 
-export repo_id=screw_sorting_single_sft_ep279_annotated
-export config_name=pi05_cobot_screw_sorting_single
+export repo_id=zip_tie_annotated
+export config_name=pi05_zip_tie
 export HF_LEROBOT_HOME=/workspace/huggingface/lerobot
 export HF_HOME=/workspace/huggingface
 

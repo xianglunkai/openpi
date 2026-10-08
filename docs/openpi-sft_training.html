@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SFT 训练开发文档 · π0.5 螺丝分拣</title>
+<link rel="stylesheet" href="devdoc.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,460;7..72,680&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false});"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="sft_training.html">OpenPI · AgileX Cobot Magic</a>
+  <nav class="nav">
+    <a class="active" href="sft_training.html">SFT 训练</a>
+    <a href="sft_inference.html">SFT 推理</a>
+    <a href="rtc.html">RTC</a>
+    <a href="rlt.html">RLT</a>
+  </nav>
+</header>
+
+<main class="wrap">
+<article>
+<header class="hero">
+  <p class="kicker">Supervised Fine-Tuning · 数据驱动</p>
+  <h1>SFT 训练开发文档</h1>
+  <p class="lede">把 AgileX Cobot Magic 上采集的示教轨迹，变成 π0.5 流匹配策略。本文以数据集 <code>screw_sorting_single_sft_ep280_v30_steam</code> 为唯一落地例子：280 条单臂右臂螺丝分拣、按 30&nbsp;Hz 对齐的修订版，真实机器人是 AgileX Cobot Magic。</p>
+  <div class="meta">
+    <span class="chip">配置 pi05_cobot_screw_sorting_single</span>
+    <span class="chip">动作 7 维 · 视野 50</span>
+    <span class="chip alt">基座 pi05_base</span>
+    <span class="chip alt">30 000 step · batch 64</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#system">系统总图</a></li>
+    <li><a href="#contract">数据契约</a></li>
+    <li><a href="#steps">可落地步骤</a></li>
+    <li><a href="#pipeline">变换流水线</a></li>
+    <li><a href="#model">模型与损失</a></li>
+    <li><a href="#run">训练循环与产物</a></li>
+    <li><a href="#analysis">逐张量核对</a></li>
+    <li><a href="#appendix">附录 · 数学推导</a></li>
+  </ol>
+</nav>
+
+<h2 id="system">1. 系统总图</h2>
+<p>SFT 不接触真机控制环。它只消费已经落盘的示教。训练机读 LeRobot，写出 JAX checkpoint；推理机以后再把这个 checkpoint 接到 Cobot Magic。两条链路只通过权重和 <code>norm_stats</code> 耦合。</p>
+
+<figure class="figure">
+<svg viewBox="0 0 920 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SFT 训练系统图">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#243044"/>
+    </marker>
+  </defs>
+  <rect width="920" height="430" rx="16" fill="#fffdf8"/>
+  <text x="24" y="32" font-family="Source Sans 3, sans-serif" font-size="15" font-weight="700" fill="#9a4e1c">数据采集（真机，离线）</text>
+  <text x="470" y="32" font-family="Source Sans 3, sans-serif" font-size="15" font-weight="700" fill="#0e6b66">训练机（不连机器人）</text>
+
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <rect x="24" y="52" width="180" height="64" rx="10" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="36" y="78">AgileX Cobot Magic</text>
+    <text x="36" y="98" fill="#5c564c">右臂遥操作 · ROS</text>
+
+    <rect x="230" y="52" width="190" height="64" rx="10" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="242" y="78">HDF5 episode</text>
+    <text x="242" y="98" fill="#5c564c">qpos / action / 三相机</text>
+
+    <rect x="24" y="150" width="396" height="58" rx="10" fill="#fff" stroke="#c9bba6"/>
+    <text x="36" y="174">convert_aloha_data_to_lerobot.py</text>
+    <text x="36" y="194" fill="#5c564c">repo_id = screw_sorting_single_sft_ep280_v30_steam</text>
+
+    <rect x="470" y="52" width="200" height="72" rx="10" fill="#e6f3f1" stroke="#c5e4e0"/>
+    <text x="482" y="78">LeRobot 样本</text>
+    <text x="482" y="98" fill="#5c564c">state 14→取右臂 7</text>
+    <text x="482" y="114" fill="#5c564c">action chunk H = 50</text>
+
+    <rect x="700" y="52" width="196" height="72" rx="10" fill="#e6f3f1" stroke="#c5e4e0"/>
+    <text x="712" y="78">compute_norm_stats</text>
+    <text x="712" y="98" fill="#5c564c">q01 / q99</text>
+    <text x="712" y="114" fill="#5c564c">π0.5 用分位数</text>
+
+    <rect x="470" y="160" width="426" height="86" rx="10" fill="#243044"/>
+    <text x="486" y="186" fill="#fff" font-weight="700">π0.5  flow matching</text>
+    <text x="486" y="208" fill="#d7efe9">SigLIP 图像 + 离散 state 文本 → Gemma 2B</text>
+    <text x="486" y="228" fill="#d7efe9">动作专家 Gemma 300M + adaRMS 时间条件</text>
+
+    <rect x="470" y="272" width="200" height="64" rx="10" fill="#fff" stroke="#c9bba6"/>
+    <text x="482" y="298">AdamW + cosine</text>
+    <text x="482" y="318" fill="#5c564c">EMA 0.99 · FSDP</text>
+
+    <rect x="700" y="272" width="196" height="64" rx="10" fill="#fff" stroke="#c9bba6"/>
+    <text x="712" y="298">checkpoints/…/params</text>
+    <text x="712" y="318" fill="#5c564c">assets/norm_stats.json</text>
+
+    <rect x="470" y="360" width="426" height="48" rx="10" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="486" y="389">交给 SFT 推理文档：serve_policy.py --env COBOT</text>
+  </g>
+  <path d="M204 84 H230" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M325 116 V150" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M420 179 H470" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M670 88 H700" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M798 124 V160" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M680 246 V272" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M670 304 H700" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+</svg>
+<figcaption>图 1. SFT 训练系统。左半是 Cobot Magic 示教落盘，右半是纯数据训练。机器人在这一阶段不再出现。</figcaption>
+</figure>
+
+<h2 id="contract">2. 例子的数据契约</h2>
+<p>仓库里单臂配置写在 <code>src/openpi/training/config.py</code> 的 <code>pi05_cobot_screw_sorting_single</code>。它的 <code>repo_id</code> 目前是短名 <code>screw_sorting_single</code>。落地时改成下面这套数据集，其余字段保持不变。</p>
+
+<table>
+  <tr><th>项</th><th>本例取值</th><th>代码位置</th></tr>
+  <tr><td>LeRobot repo</td><td><code>screw_sorting_single_sft_ep280_v30_steam</code></td><td><code>TrainConfig.data.repo_id</code></td></tr>
+  <tr><td>规模</td><td>280 条成功示教，v30 = 30&nbsp;Hz 修订版</td><td>数据集 metadata <code>fps</code></td></tr>
+  <tr><td>机器人</td><td>AgileX Cobot Magic，单右臂</td><td><code>real_env.SINGLE_ARM_NAME = "right"</code></td></tr>
+  <tr><td>相机</td><td><code>cam_high</code>、<code>cam_right_wrist</code></td><td>repack 映射；左腕用黑图 + mask=False</td></tr>
+  <tr><td>状态 / 动作</td><td>7 维：腰、肩、肘、前臂滚转、腕角、腕旋、夹爪</td><td><code>CobotSingleArmInputs</code></td></tr>
+  <tr><td>delta 掩码</td><td>前 6 关节做差分，夹爪保持绝对量</td><td><code>make_bool_mask(6, -1)</code></td></tr>
+  <tr><td>语言</td><td>Please sort and return the silver screws in the grey box to their proper places</td><td><code>default_prompt</code></td></tr>
+  <tr><td>模型</td><td>π0.5：动作维 32、视野 50、token 上限 200</td><td><code>Pi0Config(pi05=True)</code></td></tr>
+  <tr><td>初始化</td><td><code>pi05_base/params</code></td><td><code>CheckpointWeightLoader</code></td></tr>
+  <tr><td>优化</td><td>30 000 step，batch 64，每 5 000 存一次</td><td>同一 <code>TrainConfig</code></td></tr>
+</table>
+
+<div class="callout note"><strong>视野和帧率。</strong> 动作 chunk 的时间戳由数据集 fps 决定：<code>t / fps</code>，\(t=0,\ldots,49\)（<code>data_loader.py</code>）。fps=30 时，50 步覆盖 \(50/30 \approx 1.67\) 秒。转换脚本默认写 <code>fps=50</code>；本例 v30 数据集必须在 LeRobot metadata 里写成 30，否则 chunk 的物理时长会错一倍。</div>
+
+<h2 id="steps">3. 可落地步骤</h2>
+<ol class="steps">
+<li>
+  <h3>确认示教已经是单右臂 7 维</h3>
+  <p>Cobot Magic 双臂原始 <code>qpos</code> 是 14 维（左 7 + 右 7）。单臂策略只吃右臂。采集侧与 <code>real_env.get_observation</code> 一致：<code>qpos[7:14]</code>，图像只留高位相机和右腕相机。</p>
+  <p>每一帧动作与下一帧关节同空间：前 6 维是弧度关节目标，第 7 维是归一化夹爪（0 关，1 开）。不要在 HDF5 里预先做 delta；delta 由训练变换统一减去当前 state。</p>
+</li>
+<li>
+  <h3>转成 LeRobot，repo 名用本例全名</h3>
+  <p>脚本是 <code>examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py</code>。它把 HDF5 写成 <code>observation.state</code>、<code>action</code>、<code>observation.images.cam_*</code>。若原始文件仍是 14 维双臂，先切出右臂 7 维再写入，键名保持 <code>cam_high</code> 与 <code>cam_right_wrist</code>。</p>
+<pre><code>export HF_LEROBOT_HOME=/workspace/huggingface/lerobot
+export HF_ENDPOINT=https://hf-mirror.com
+uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py \
+  --raw_dir /data/raw/screw_sorting_single_sft_ep280_v30_steam \
+  --repo_id screw_sorting_single_sft_ep280_v30_steam</code></pre>
+  <p>转换后抽查一条：<code>observation.state.shape == (7,)</code>，<code>action.shape == (7,)</code>，图像为 uint8 HWC，episode 数等于 280。</p>
+</li>
+<li>
+  <h3>把配置的 repo_id 指到这个数据集</h3>
+  <p>编辑 <code>pi05_cobot_screw_sorting_single</code> 里的 <code>LeRobotCobotSingleArmDataConfig</code>：</p>
+<pre><code>data=LeRobotCobotSingleArmDataConfig(
+    repo_id="screw_sorting_single_sft_ep280_v30_steam",
+    assets=AssetsConfig(
+        assets_dir="/workspace/openpi/assets/pi05_cobot_screw_sorting_single",
+        asset_id="screw_sorting_single_sft_ep280_v30_steam",
+    ),
+    default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+    repack_transforms=...  # cam_high, cam_right_wrist 两路，保持现有映射
+)</code></pre>
+  <p><code>asset_id</code> 必须和以后 <code>norm_stats.json</code> 所在子目录同名。推理加载 checkpoint 里的 assets 时用的就是这个 id。</p>
+</li>
+<li>
+  <h3>先算归一化，再开训练</h3>
+  <p><code>scripts/compute_norm_stats.py</code> 走和训练相同的 repack、delta、pad，只是还没做分位数缩放。π0.5 的 <code>use_quantile_norm</code> 为真（<code>model_type != PI0</code>），所以落盘的是 q01 / q99，不是均值方差。</p>
+<pre><code>export CUDA_VISIBLE_DEVICES=0,1,2,3
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+uv run scripts/compute_norm_stats.py --config-name pi05_cobot_screw_sorting_single
+uv run scripts/train.py pi05_cobot_screw_sorting_single \
+  --exp-name=pi05_cobot_screw_sorting_single</code></pre>
+  <p>对应 <code>finetune_screw_sorting.sh</code> 的四步开关。那个脚本默认的 <code>config_name</code> 是双臂 <code>pi05_cobot_screw_sorting</code>，单臂例子必须改成上面的名字。</p>
+</li>
+<li>
+  <h3>确认 checkpoint 能被推理读到</h3>
+  <p>目录形如 <code>checkpoints/pi05_cobot_screw_sorting_single/pi05_cobot_screw_sorting_single/&lt;step&gt;/</code>，里面有 <code>params</code> 和 <code>assets/&lt;asset_id&gt;/norm_stats.json</code>。服务端脚本 <code>run_server_screw_sorting_single.sh</code> 用的是 step 29999。EMA 默认 0.99，推理应加载 ema 参数（checkpoint 保存逻辑写入的那份）。</p>
+</li>
+</ol>
+
+<h2 id="pipeline">4. 一条样本怎么变成模型输入</h2>
+<figure class="figure">
+<svg viewBox="0 0 920 250" xmlns="http://www.w3.org/2000/svg">
+  <rect width="920" height="250" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <rect x="16" y="36" width="150" height="70" rx="10" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="28" y="64">LeRobot 键</text>
+    <text x="28" y="86" fill="#5c564c">images / state / action</text>
+    <rect x="190" y="36" width="150" height="70" rx="10" fill="#fff" stroke="#c9bba6"/>
+    <text x="202" y="64">Repack</text>
+    <text x="202" y="86" fill="#5c564c">只在训练侧</text>
+    <rect x="364" y="36" width="170" height="70" rx="10" fill="#fff" stroke="#c9bba6"/>
+    <text x="376" y="64">CobotSingleArmInputs</text>
+    <text x="376" y="86" fill="#5c564c">三槽图像 + mask</text>
+    <rect x="558" y="36" width="150" height="70" rx="10" fill="#e6f3f1" stroke="#c5e4e0"/>
+    <text x="570" y="64">DeltaActions</text>
+    <text x="570" y="86" fill="#5c564c">关节 − state</text>
+    <rect x="732" y="36" width="172" height="70" rx="10" fill="#243044"/>
+    <text x="744" y="64" fill="#fff">Normalize + Token</text>
+    <text x="744" y="86" fill="#d7efe9">pad 到 32 维</text>
+
+    <rect x="16" y="140" width="888" height="86" rx="10" fill="#fff" stroke="#e4d9c8"/>
+    <text x="32" y="168">图像槽：base_0_rgb ← cam_high（mask 真）；right_wrist_0_rgb ← cam_right_wrist（mask 真）；left_wrist_0_rgb ← 全黑（mask 假）</text>
+    <text x="32" y="192">动作：a′[:, 0:6] = a[:, 0:6] − s[0:6]，a′[:, 6] = a[:, 6]，然后右侧补零到 32</text>
+    <text x="32" y="212" fill="#5c564c">π0.5 把归一化后的 state 离散成 256 档，拼进语言：Task: …, State: …; Action:</text>
+  </g>
+  <path d="M166 71 H190 M340 71 H364 M534 71 H558 M708 71 H732" stroke="#243044" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+</svg>
+<figcaption>图 2. 训练变换顺序。Repack 只作用于数据集；推理时客户端已经用同样的键，所以不再 repack。Delta、归一化、分词、pad 训练和推理共用。</figcaption>
+</figure>
+
+<p>关节差分写在 <code>DeltaActions</code>：</p>
+<div class="formula">$$
+a'_{t,i} =
+\begin{cases}
+a_{t,i} - s_i & i \le 5 \\
+a_{t,i} & i = 6
+\end{cases}
+$$</div>
+<p>π0.5 分位数归一化（<code>Normalize._normalize_quantile</code>）把每个维度映到大约 \([-1,1]\)：</p>
+<div class="formula">$$
+\hat x = \frac{x - q_{01}}{q_{99}-q_{01}+10^{-6}}\cdot 2 - 1
+$$</div>
+<p>离散状态（<code>PaligemmaTokenizer.tokenize</code>）在归一化之后做：</p>
+<div class="formula">$$
+b_i = \mathrm{digitize}(\hat s_i;\; \mathrm{linspace}(-1,1,257)[:-1]) - 1 \in \{0,\ldots,255\}
+$$</div>
+<p>于是本体感觉不再作为连续 token 进入动作专家。这是 π0.5 相对 π0 的结构差别：π0 用 <code>state_proj</code> 把 state 投成 suffix 里的一个连续 token；π0.5 把 state 写进文本，时间步则用 adaRMS 注入动作专家。</p>
+
+<h2 id="model">5. 模型前向与流匹配损失</h2>
+<figure class="figure">
+<svg viewBox="0 0 920 280" xmlns="http://www.w3.org/2000/svg">
+  <rect width="920" height="280" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13">
+    <rect x="24" y="28" width="250" height="220" rx="12" fill="#e6f3f1" stroke="#c5e4e0"/>
+    <text x="40" y="54" font-weight="700" fill="#0e6b66">Prefix · 双向注意力</text>
+    <text x="40" y="82" fill="#1c1915">cam_high → SigLIP tokens</text>
+    <text x="40" y="104" fill="#1c1915">右腕 → SigLIP tokens</text>
+    <text x="40" y="126" fill="#5c564c">左腕黑图，mask 关掉</text>
+    <text x="40" y="156" fill="#1c1915">语言：Task + 离散 State</text>
+    <text x="40" y="186" fill="#5c564c">Gemma 2B（PaliGemma）</text>
+    <text x="40" y="216" fill="#5c564c">prefix 不看动作 token</text>
+
+    <rect x="310" y="28" width="280" height="220" rx="12" fill="#243044"/>
+    <text x="326" y="54" font-weight="700" fill="#fff">联合注意力</text>
+    <text x="326" y="86" fill="#d7efe9">ar_mask：图像/文本 = False</text>
+    <text x="326" y="110" fill="#d7efe9">动作第 1 个 token = True</text>
+    <text x="326" y="134" fill="#d7efe9">其后动作 token 互相可见</text>
+    <text x="326" y="170" fill="#fff">make_attn_mask(input, ar)</text>
+    <text x="326" y="198" fill="#d7efe9">位置 = cumsum(mask) − 1</text>
+    <text x="326" y="226" fill="#d7efe9">一次前向：prefix ∥ suffix</text>
+
+    <rect x="626" y="28" width="270" height="220" rx="12" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="642" y="54" font-weight="700" fill="#9a4e1c">Suffix · 动作专家</text>
+    <text x="642" y="86" fill="#1c1915">x_t ∈ ℝ^{50×32}</text>
+    <text x="642" y="110" fill="#1c1915">action_in_proj</text>
+    <text x="642" y="140" fill="#1c1915">t → sincos → time MLP</text>
+    <text x="642" y="164" fill="#5c564c">adaRMS 条件，无 state token</text>
+    <text x="642" y="196" fill="#1c1915">action_out_proj → v_t</text>
+    <text x="642" y="220" fill="#5c564c">Gemma 300M</text>
+  </g>
+</svg>
+<figcaption>图 3. π0.5 的双专家。Prefix 编码场景和任务，suffix 只携带带噪动作和时间。因果边界让图像语言看不到未来动作，动作 token 能回看全部 prefix。</figcaption>
+</figure>
+
+<p><code>Pi0.compute_loss</code> 里的插值与目标速度是：</p>
+<div class="formula">$$
+t \sim 0.999\cdot \mathrm{Beta}(1.5, 1) + 0.001
+$$</div>
+<div class="formula">$$
+x_t = t\,\varepsilon + (1-t)\,a, \qquad u_t = \varepsilon - a, \qquad \varepsilon \sim \mathcal N(0,I)
+$$</div>
+<div class="formula">$$
+\mathcal L = \frac{1}{D}\sum_{d=1}^{D}\big(v_\theta(x_t, o, t)_d - u_{t,d}\big)^2
+$$</div>
+<p>对 batch 再取均值。\(t=0\) 时 \(x_t=a\)（数据），\(t=1\) 时 \(x_t=\varepsilon\)（噪声）。\(u_t\) 是这条直线从数据指向噪声的速度。推理从 \(t=1\) 积到 \(t=0\)，用的是同一支速度场，时间方向相反。图像增强发生在 <code>preprocess_observation(..., train=True)</code>，推理时关闭。</p>
+
+<h2 id="run">6. 训练步、学习率与检查点</h2>
+<p><code>scripts/train.py</code> 的一步：合并参数 → <code>compute_loss</code> → 只对 <code>trainable_filter</code> 求梯度 → AdamW → 可选 EMA。默认日程在 <code>optimizer.py</code>：</p>
+<div class="formula">$$
+\eta_0 = \frac{2.5\times 10^{-5}}{1001},\quad
+\eta_{\text{peak}} = 2.5\times 10^{-5},\quad
+\eta_{\text{end}} = 2.5\times 10^{-6}
+$$</div>
+<p>warmup 1 000，cosine 衰减 30 000 步，与 <code>num_train_steps</code> 对齐。AdamW 的 \(\beta_1=0.9,\ \beta_2=0.95\)，权重衰减 \(10^{-10}\)，全局梯度裁剪到 1。EMA：</p>
+<div class="formula">$$
+\bar\theta \leftarrow 0.99\,\bar\theta + 0.01\,\theta
+$$</div>
+<p>日志每 100 步写 <code>loss</code>、<code>grad_norm</code>、<code>param_norm</code>。本配置 <code>save_interval=5000</code>、<code>keep_period=5000</code>，四卡时 batch 64 必须能被设备数整除。</p>
+<p>权重加载是部分覆盖：<code>CheckpointWeightLoader</code> 只填 <code>pi05_base</code> 里形状对得上的叶子，动作头若与基座一致则一并带上，然后在螺丝数据上全参数微调（本配置 <code>freeze_filter</code> 为空）。</p>
+
+<div class="callout warn"><strong>和推理对齐的三件事。</strong> ① 训练用的 <code>norm_stats</code> 必须跟 checkpoint 的 assets 一起走，服务端从 checkpoint 读，不从训练机的 assets 目录重算。② <code>adapt_to_pi=False</code>，不要套 Aloha 夹爪角-线变换。③ 夹爪是绝对量，关节是相对当前 state 的 delta；推理输出侧用 <code>AbsoluteActions</code> 加回 state。</div>
+
+<h2 id="analysis">7. 逐张量核对</h2>
+<p>下面用一条右臂样本把形状走完。普通 SFT 配置 <code>pi05_cobot_screw_sorting_single</code> 不改 <code>Pi0Config</code> 的默认值，所以 \(H=50\)、\(D=32\)、<code>rtc_max_delay=0</code>。仓库里另有 <code>pi05_cobot_screw_sorting_single_rtc</code>，数据集名是 <code>screw_sorting_single_sft_ep279_annotated</code>，\(H=32\)、<code>rtc_max_delay=10</code>。那是另一条损失，放在 RTC 文档第 7 节。本页的数字全部按 \(H=50\) 的普通 SFT。</p>
+
+<h3>7.1 从 7 维关节到 32 维噪声</h3>
+<p>设当前右臂观测（弧度，夹爪已归一化）</p>
+<div class="formula">$$
+s = (0.00,\ 0.40,\ 0.80,\ 0.10,\ -0.20,\ 0.05,\ 0.90)
+$$</div>
+<p>示教在 30&nbsp;Hz 下第 \(k\) 拍的绝对目标 \(q_k\)。delta 掩码是 6 个真、1 个假，所以</p>
+<div class="formula">$$
+\delta_k[0\!:\!6] = q_k[0\!:\!6] - s[0\!:\!6],\qquad \delta_k[6] = q_k[6].
+$$</div>
+<p>若 0.2 秒后肩关节多转了 0.05&nbsp;rad、夹爪仍张开，则 \(k=6\)（因为 \(6/30=0.2\)）那一行是 \((*, 0.05, *, *, *, *, 0.90)\)。chunk 共 50 行，时间覆盖 \(49/30\approx 1.63\) 秒。随后右侧补 25 个 0，得到 <code>(50, 32)</code>。补出来的维在分位数统计里没有 q01/q99，反归一化时原样返回，机器人永远只读前 7 维。</p>
+<p>分位数作用在补零之后的每一维上。主体被映到大约 \([-1,1]\)。离散 state 再用 257 个切点里的前 256 个：</p>
+<div class="formula">$$
+\text{bins} = \mathrm{linspace}(-1,1,257)[:-1],\quad
+b_i = \mathrm{digitize}(\hat s_i,\ \text{bins}) - 1.
+$$</div>
+<p>步长是 \(2/256=1/128\approx 0.0078\)。一个归一化关节差 0.01，档位可能差 1。这个整数串进句子 <code>Task: …, State: …;\nAction: </code>，最大长度 200。图像 token 不占这 200，它们走 SigLIP。</p>
+
+<h3>7.2 注意力块，而不是逐拍因果</h3>
+<p><code>make_attn_mask</code> 用 <code>mask_ar</code> 的累积和分块。图像和语言的 <code>ar_mask</code> 全是 False，累积和停在 0，三路相机和文本彼此全可见。左腕是黑图且 <code>image_mask=False</code>，对应 token 在 <code>input_mask</code> 里为假，既不能被看见也不能看见别人。</p>
+<p>动作段的 <code>ar_mask</code> 是 <code>[True] + [False]×49</code>。第一个 True 让累积和从 0 跳到 1，后面 49 个 False 不再增加。于是 50 个动作 token 落在同一块里：它们互相可见，也看得见全部 prefix；prefix 的累积和是 0，看不见任何动作。这不是「第 \(k\) 拍只能看 \(0..k\)」。整段动作是一次并行回归。损失</p>
+<div class="formula">$$
+\ell_{b,k} = \frac{1}{32}\sum_{d=0}^{31}(v_\theta - u_t)_{b,k,d}^2
+$$</div>
+<p>再对 batch 和 50 个时间步取均值。pad 维上的速度误差同样进平均。若网络把 pad 预测成非零，损失会惩罚它，所以 pad 会被学成接近 0 速度，而不是被忽略。</p>
+
+<h3>7.3 一个流匹配步的数字</h3>
+<p>取 \(t=0.4\)，某一维上数据 \(a=0.2\)、噪声 \(\varepsilon=1.0\)。代码的插值是</p>
+<div class="formula">$$
+x_t = 0.4\times 1.0 + 0.6\times 0.2 = 0.52,\qquad u_t = 1.0 - 0.2 = 0.8.
+$$</div>
+<p>网络要在这一维输出 0.8。推理从 \(t=1\) 往 \(t=0\) 走，\(\Delta t=-0.1\)（10 步）。若这一步 \(v=0.8\) 且 \(x=0.52\)，更新</p>
+<div class="formula">$$
+x \leftarrow 0.52 + (-0.1)\times 0.8 = 0.44
+$$</div>
+<p>方向是离开噪声、靠近 \(a=0.2\)。把训练改成 \(x_t=(1-t)\varepsilon + t a\) 而不改这个负步长，积分会朝噪声走。β(1.5, 1) 的密度正比于 \(t^{0.5}\)，大 \(t\) 抽得更多：网络更多练习「从接近噪声的位置报出指向数据的速度」。</p>
+
+<h3>7.4 学习率和 EMA 在 3 万步上的位置</h3>
+<p>默认 cosine：第 0 步学习率 \(2.5\times 10^{-5}/1001\approx 2.5\times 10^{-8}\)，第 1000 步到峰值 \(2.5\times 10^{-5}\)，第 30000 步到 \(2.5\times 10^{-6}\)。本配置 <code>num_train_steps</code> 正好等于 <code>decay_steps</code>。梯度先被全局范数裁到 1，再进 AdamW。EMA 每步</p>
+<div class="formula">$$
+\bar\theta \leftarrow 0.99\bar\theta + 0.01\theta.
+$$</div>
+<p>0.99 的半衰期大约是 \(\ln 2 / 0.01 \approx 69\) 步，所以推理用的 EMA 几乎是最近一两百步的平均，不是全程平均。存盘间隔 5000 步，中间的 EMA 状态不会单独留档。</p>
+
+<div class="callout warn"><strong>和 RTC-SFT 不要混用同一句「流匹配损失」。</strong> <code>rtc_max_delay=0</code> 时，50 个时间步共享一个 \(t\)，损失盖住整段。RTC 配置把每个样本的前 \(d\) 步钉在干净示教上，损失只平均后半段，并且 \(H\) 是 32 不是 50。把普通 SFT 的 checkpoint 拿去按前缀采样，或把 RTC checkpoint 拿去整段从噪声积分，条件分布都对不上。细节在 RTC 文档。</div>
+
+<section class="appendix" id="appendix">
+<h2>附录 · 工程里的数学</h2>
+
+<h3>A. 为什么用条件流匹配而不是扩散噪声预测</h3>
+<p>记数据分布的样本为动作块 \(a\in\mathbb R^{H\times D}\)，\(H=50\)，\(D=32\)（真实关节只有前 7 维，其余是 pad）。在 \(t\in(0,1)\) 上定义概率路径的条件期望直线</p>
+<div class="formula">$$
+x_t = (1-t)\,a + t\,\varepsilon .
+$$</div>
+<p>对 \(t\) 求导得到常数速度 \(u_t = \mathrm dx_t/\mathrm dt = \varepsilon - a\)。条件流匹配的回归目标就是这个速度。网络 \(v_\theta(x_t, o, t)\) 在边缘化 \((a,\varepsilon,t)\) 之后，其最小二乘解逼近边缘速度场。沿该场从噪声积回数据，得到动作分布的样本。相对 DDPM 的噪声预测，这里每步是常微分方程的显式欧拉步，步数可以压到 10（推理默认 <code>num_steps=10</code>）。</p>
+<p>代码里 Beta(1.5, 1) 把质量偏向较大的 \(t\)（更接近噪声）。端点被夹到 \([0.001,1)\)，避免 \(t=0\) 时速度目标与数值条件同时退化。</p>
+
+<h3>B. 欧拉积分与训练约定相反的时间</h3>
+<p>推理 <code>sample_actions</code> 明确使用扩散文献约定：\(t=1\) 是噪声，\(t=0\) 是数据，并注释这与论文示意图相反。离散化为</p>
+<div class="formula">$$
+\Delta t = -1/N,\qquad x \leftarrow x + \Delta t\, v_\theta(x, o, t),\qquad t \leftarrow t+\Delta t
+$$</div>
+<p>从 \(t=1\) 出发。因为训练时 \(v_\theta\) 拟合的是「从数据指向噪声」的 \(u_t\)，乘上负的 \(\Delta t\) 就是沿速度场走回数据。若有人把训练插值改成 \(x_t=(1-t)\varepsilon+t a\) 而不改推理循环，采样会朝噪声走。</p>
+
+<h3>C. 注意力掩码在表达什么</h3>
+<p><code>embed_prefix</code> 把图像和语言的 <code>ar_mask</code> 都设成 False，表示这些 token 互相全可见。<code>embed_suffix</code> 的动作段是 <code>[True] + [False]*(H-1)</code>：第一个 True 在累积异或掩码里关上「prefix 看 suffix」的门，后面的 False 让动作 token 彼此可见，并且都能回看 prefix。这就是「观察条件生成整段动作」而不是自回归逐 token 生成。损失对 50 个时间步、32 个动作维同时回归。</p>
+
+<h3>D. Delta 动作是把绝对轨迹变成局部增量</h3>
+<p>示教存的是绝对关节目标 \(q_{t+k}\)。若直接回归绝对角，策略必须记住整条轨迹的偏置，换一个起始姿态就偏。减去当前观测 \(s_t\) 之后，网络学习</p>
+<div class="formula">$$
+\delta_{t+k} = q_{t+k} - s_t \quad (k=0,\ldots,H-1)
+$$</div>
+<p>注意减的是 chunk 起点的 state，不是相邻帧差分。推理时 <code>AbsoluteActions</code> 用<strong>当时</strong>的机器人 state 加回去：\(\hat q = \hat\delta + s_{\text{now}}\)。夹爪不参与这条式子，因为开合是有物理端点的绝对量，减当前开度会把「保持张开」变成 0，语义反了。</p>
+
+<h3>E. 分位数归一化相对 z-score</h3>
+<p>关节和夹爪的示教分布厚尾、不对称。z-score 被少数快速挥臂拉大标准差，主体动作被压进很小区间。π0.5 用经验 1% 与 99% 分位把主体映到 \([-1,1]\)，超出部分允许略微出界。反归一化是仿射逆变换，pad 维（7 之后）没有统计量，反归一化时保持原值。因此 pad 必须在归一化之前补上，并且训练、统计、推理三处 pad 宽度同为 32。</p>
+
+<h3>F. adaRMS 如何注入时间</h3>
+<p>π0.5 不把时间拼进动作 token。正弦位置编码</p>
+<div class="formula">$$
+\big[\sin(t\cdot\omega_k), \cos(t\cdot\omega_k)\big],\quad \omega_k \in [4\cdot 10^{-3},\, 4]
+$$</div>
+<p>经过两层 SiLU MLP，得到与动作专家宽度相同的向量，作为 adaRMS 的条件。这样每个 Transformer block 的归一化缩放随 \(t\) 变化，速度场对噪声水平的依赖不必挤进 token 通道。π0 则是把时间向量和动作向量拼接后再过 MLP，没有 adaRMS。</p>
+
+<h3>G. 这条 SFT 目标在整个工程里的位置</h3>
+<p>SFT 估计的是示教条件分布 \(\pi_{\text{SFT}}(a\mid o)\) 的一个流匹配采样器。它不优化回报。RTC 在采样 ODE 上加前缀约束，让相邻 chunk 在已经下发的前缀上连续。RLT 先把同一条 prefix 表征压成 \(z_{\text{rl}}\)，再用在线 actor-critic 在 \(z_{\text{rl}}\) 上做局部修正。三份文档因此共享同一份螺丝分拣数据和同一台 Cobot Magic，但优化对象不同：SFT 拟合示教速度场，RTC 改采样，RLT 在冻结或联合的 VLA 之上学习紧凑表征和在线策略。</p>
+</section>
+
+<footer class="colophon">
+  对照代码：<code>src/openpi/training/config.py</code> · <code>src/openpi/models/pi0.py</code> · <code>src/openpi/policies/cobot_single_arm_policy.py</code> · <code>src/openpi/transforms.py</code> · <code>scripts/train.py</code> · <code>finetune_screw_sorting.sh</code>
+</footer>
+</article>
+</main>
+</body>
+</html>

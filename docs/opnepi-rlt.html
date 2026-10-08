@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RLT 开发文档 · 表征 token 与在线强化学习</title>
+<link rel="stylesheet" href="devdoc.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,460;7..72,680&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false});"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="sft_training.html">OpenPI · AgileX Cobot Magic</a>
+  <nav class="nav">
+    <a href="sft_training.html">SFT 训练</a>
+    <a href="sft_inference.html">SFT 推理</a>
+    <a href="rtc.html">RTC</a>
+    <a href="rlt.html">RLT</a>
+  </nav>
+</header>
+
+<main class="wrap">
+<article>
+<header class="hero">
+  <p class="kicker">Representation Learning Token · Online RL</p>
+  <h1>RLT 开发文档</h1>
+  <p class="lede">在螺丝分拣 SFT 之上加两层。第一层用同一份数据 <code>screw_sorting_single_sft_ep280_v30_steam</code> 把 π0.5 的图像 prefix 压成 2048 维 token \(z_{\text{rl}}\)。第二层在 AgileX Cobot Magic 上在线微调一个小 actor：它看着 \(z_{\text{rl}}\)、本体和 VLA 参考块，只修正关键相位的 10 步动作。</p>
+  <div class="meta">
+    <span class="chip">两阶段 α=0 或联合 α=1</span>
+    <span class="chip">z 维 2048 · chunk 10</span>
+    <span class="chip alt">Machine A 冻结 VLA</span>
+    <span class="chip alt">Machine B actor / critic</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#system">系统总图</a></li>
+    <li><a href="#offline">离线：训 RL token</a></li>
+    <li><a href="#serve">服务：同时给出动作和 z</a></li>
+    <li><a href="#online">在线：Cobot Magic 闭环</a></li>
+    <li><a href="#loss">Actor 与 Critic</a></li>
+    <li><a href="#steps">可落地步骤</a></li>
+    <li><a href="#analysis">数量级核对</a></li>
+    <li><a href="#appendix">附录 · 推导</a></li>
+  </ol>
+</nav>
+
+<h2 id="system">1. 系统总图</h2>
+<figure class="figure">
+<svg viewBox="0 0 920 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="RLT 系统图">
+  <defs>
+    <marker id="arr4" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#243044"/>
+    </marker>
+  </defs>
+  <rect width="920" height="480" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <rect x="20" y="20" width="880" height="120" rx="12" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="36" y="46" font-weight="700" fill="#9a4e1c">阶段 0 · 已完成的 SFT</text>
+    <text x="36" y="72">数据 screw_sorting_single_sft_ep280_v30_steam → 配置 pi05_cobot_screw_sorting_single</text>
+    <text x="36" y="94">产物：π0.5 权重。两阶段 RLT 从 step 20000 的 params 接着训；联合训练从 pi05_base 起。</text>
+    <text x="36" y="116" fill="#5c564c">本阶段不连机器人。损失是流匹配，与 SFT 文档相同。</text>
+
+    <rect x="20" y="156" width="430" height="150" rx="12" fill="#e6f3f1" stroke="#c5e4e0"/>
+    <text x="36" y="182" font-weight="700" fill="#0e6b66">阶段 1 · scripts/train_rlt.py</text>
+    <text x="36" y="208">VLA prefix（仅图像 token）→ stop-gradient</text>
+    <text x="36" y="230">交叉注意力编码器 → 1 个 RL token</text>
+    <text x="36" y="252">解码器重建 prefix，损失是掩码 MSE</text>
+    <text x="36" y="274" fill="#5c564c">α=0 只训 rlt_module；α=1 再加 VLA 流匹配</text>
+
+    <rect x="470" y="156" width="430" height="150" rx="12" fill="#243044"/>
+    <text x="486" y="182" font-weight="700" fill="#fff">阶段 2 · 真机在线</text>
+    <text x="486" y="208" fill="#d7efe9">Machine A：冻结 VLA + RLT，出 z_rl 与 ref_chunk</text>
+    <text x="486" y="230" fill="#d7efe9">Machine B：actor、twin critic、replay</text>
+    <text x="486" y="252" fill="#d7efe9">Cobot Magic 右臂执行 10 步或 50 步</text>
+    <text x="486" y="274" fill="#f4efe6">配置 configs/tasks/screw_sorting/online_rl.yaml</text>
+
+    <rect x="20" y="324" width="880" height="132" rx="12" fill="#fff" stroke="#c9bba6"/>
+    <text x="36" y="352" font-weight="700">一拍数据</text>
+    <text x="36" y="378">观测 o → z_rl ∈ ℝ^{2048}，proprio ∈ ℝ^{7}，ref_chunk ∈ ℝ^{10×7}（VLA 参考，可被 RTC 接上）</text>
+    <text x="36" y="402">actor μ(z, proprio, ref) → 执行块。回合结束把窗口写成 RLTTransition，learner 抽样更新。</text>
+    <text x="36" y="426" fill="#5c564c">warmup 只执行 VLA；在线关键相位才让 actor 接管。切换发生在回合之间。</text>
+  </g>
+</svg>
+<figcaption>图 1. RLT 分两段。离线段把 SFT 的视觉语言表征压紧；在线段不改这块大模型的优化器状态，只在 Cobot Magic 上训小网络。</figcaption>
+</figure>
+
+<h2 id="offline">2. 离线 RL token</h2>
+<p>结构在 <code>src/openpi/models/rl_token.py</code>。螺丝单臂的两份配置：</p>
+<table>
+  <tr><th></th><th>两阶段 <code>…_two_staged_rlt</code></th><th>联合 <code>…_joint_vla_rlt</code></th></tr>
+  <tr><td>初始化</td><td>SFT checkpoint step 20000</td><td><code>pi05_base</code></td></tr>
+  <tr><td><code>rlt_alpha</code></td><td>0，冻结 VLA</td><td>1，VLA 损失加入总损失</td></tr>
+  <tr><td>token 数 / 层数</td><td>1 / 2</td><td>1 / 2</td></tr>
+  <tr><td>内部维 / 输入维</td><td>2048 / 2048</td><td>2048 / 2048</td></tr>
+  <tr><td>步数</td><td>10 000</td><td>30 000</td></tr>
+  <tr><td>EMA</td><td>强制关掉，避免冻结权重被 EMA 漂走</td><td>保持默认 0.99，且只 EMA 可训练叶子</td></tr>
+  <tr><td>数据</td><td colspan="2"><code>screw_sorting_single_sft_ep280_v30_steam</code>，与 SFT 相同的单臂变换</td></tr>
+</table>
+<p>编码器用可学习查询 \(q\in\mathbb R^{1\times 2048}\) 对 prefix 做两层交叉注意力，解码器用长度为序列的查询去读这个 token，重建被 stop-gradient 的 prefix。训练步在 <code>scripts/train_rlt.py</code> 的 <code>RLTTrainModel.compute_rlt_loss</code>：</p>
+<div class="formula">$$
+\mathcal L_{\text{ro}} = \mathrm{MSE}\big(\mathrm{Dec}(\mathrm{Enc}(\mathrm{sg}(h))),\, \mathrm{sg}(h)\big)
+$$</div>
+<div class="formula">$$
+\mathcal L = \mathcal L_{\text{ro}} + \alpha\, \mathcal L_{\text{flow}}
+$$</div>
+<p>\(h\) 只取图像 token（<code>image_only=True</code>），语言 token 不进重建。padding 和缺相机（左腕）由 <code>prefix_mask</code> 从 MSE 里去掉。\(\alpha=0\) 时 VLA 只做一次前向抽 embedding，优化器过滤 <code>.*rlt_module.*</code>。\(\alpha&gt;0\) 时同一次 <code>compute_loss_with_prefix</code> 同时给出流匹配损失和 embedding，避免两次 backbone。</p>
+
+<figure class="figure">
+<svg viewBox="0 0 920 200" xmlns="http://www.w3.org/2000/svg">
+  <rect width="920" height="200" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <rect x="20" y="60" width="160" height="70" rx="10" fill="#e6f3f1" stroke="#c5e4e0"/>
+    <text x="34" y="90">图像 token h</text>
+    <text x="34" y="110" fill="#5c564c">3×256，左腕 mask</text>
+    <rect x="220" y="60" width="150" height="70" rx="10" fill="#fff" stroke="#c9bba6"/>
+    <text x="234" y="90">stop-gradient</text>
+    <text x="234" y="110" fill="#5c564c">L_ro 不改 VLA</text>
+    <rect x="410" y="40" width="160" height="110" rx="10" fill="#243044"/>
+    <text x="424" y="78" fill="#fff">Encoder</text>
+    <text x="424" y="100" fill="#d7efe9">query × h</text>
+    <text x="424" y="122" fill="#d7efe9">→ z_rl</text>
+    <rect x="610" y="40" width="140" height="110" rx="10" fill="#243044"/>
+    <text x="624" y="78" fill="#fff">Decoder</text>
+    <text x="624" y="100" fill="#d7efe9">queries × z</text>
+    <text x="624" y="122" fill="#d7efe9">→ ĥ</text>
+    <rect x="780" y="60" width="120" height="70" rx="10" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="794" y="90">‖ĥ − h‖²</text>
+    <text x="794" y="110" fill="#5c564c">按 mask</text>
+  </g>
+  <path d="M180 95 H220 M370 95 H410 M570 95 H610 M750 95 H780" stroke="#243044" stroke-width="1.5" fill="none" marker-end="url(#arr4)"/>
+</svg>
+<figcaption>图 2. RL token 是 prefix 的有损压缩。梯度停在 VLA 表征上，所以 α=0 时螺丝 SFT 的动作头一个数都不会变。</figcaption>
+</figure>
+
+<div class="callout note"><strong>输入维 2048。</strong> <code>RLTokenConfig.input_dim</code> 注释写的是 Gemma 2B 的 prefix 宽。本配置把 <code>embed_dim</code> 也设成 2048，于是没有额外的 input/output 投影，token 和 VLA 隐层同宽。在线 yaml 的 <code>z_dim: 2048</code> 必须和这里一致。</div>
+
+<h2 id="serve">3. Machine A 怎么同时吐动作和 token</h2>
+<p><code>scripts/server_rlt_policy.py</code> 加载 VLA 与 <code>rlt_module</code>，对一张观测返回参考动作块和 \(z_{\text{rl}}\)。在线 rollout 把它当作 Machine A。螺丝脚本是 <code>examples/mobile_aloha_AgileX/run_server_screw_sorting_single_rlt.sh</code>，指向两阶段 checkpoint 的 step 9999，配置名却传了 <code>pi05_cobot_screw_sorting_single_joint_vla_rlt</code>。落地时配置名必须和 checkpoint 的 <code>rlt_alpha</code>、权重布局一致，不要混用两阶段目录和联合配置。</p>
+<p>推理侧编码同样 <code>image_only</code>。\(z_{\text{rl}}\) 在一个 chunk 的执行期间保持不变，直到下一次观测。这就是 actor 能做成小 MLP 的原因：视觉已经在 2048 维里。</p>
+
+<h2 id="online">4. 在线环：谁在什么时候动右臂</h2>
+<figure class="figure">
+<svg viewBox="0 0 920 300" xmlns="http://www.w3.org/2000/svg">
+  <rect width="920" height="300" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <rect x="24" y="36" width="200" height="88" rx="10" fill="#f8eee6" stroke="#e4d9c8"/>
+    <text x="36" y="66" font-weight="700">Cobot Magic</text>
+    <text x="36" y="88">30 Hz 右臂</text>
+    <text x="36" y="108" fill="#5c564c">ROS 观测</text>
+
+    <rect x="260" y="24" width="200" height="110" rx="10" fill="#e6f3f1" stroke="#c5e4e0"/>
+    <text x="272" y="52" font-weight="700">Machine A :8000</text>
+    <text x="272" y="74">z_rl</text>
+    <text x="272" y="94">ref_chunk</text>
+    <text x="272" y="114" fill="#5c564c">RTC s=20, d=7</text>
+
+    <rect x="500" y="24" width="180" height="110" rx="10" fill="#243044"/>
+    <text x="512" y="52" fill="#fff" font-weight="700">Actor :9101</text>
+    <text x="512" y="74" fill="#d7efe9">μ(z, p, ref)</text>
+    <text x="512" y="94" fill="#d7efe9">固定 σ=0.05</text>
+    <text x="512" y="114" fill="#d7efe9">10 步 × 7 维</text>
+
+    <rect x="710" y="24" width="186" height="110" rx="10" fill="#fff" stroke="#c9bba6"/>
+    <text x="722" y="52" font-weight="700">Learner</text>
+    <text x="722" y="74">batch 256</text>
+    <text x="722" y="94">每周期 5 次更新</text>
+    <text x="722" y="114" fill="#5c564c">快照 → actor</text>
+
+    <rect x="24" y="168" width="872" height="108" rx="10" fill="#fff" stroke="#e4d9c8"/>
+    <text x="40" y="196">warmup：执行 ref_chunk，actor 不许控制。replay ≥ 1200 后先做 50 000 次更新，再允许在线。</text>
+    <text x="40" y="220">full_task：非关键段仍走 VLA（执行视野 50），关键相位切到 actor（RTC 视野 10）。</text>
+    <text x="40" y="244" fill="#5c564c">freeze_after_warmup: true 时，warmup 之后的 BC/Q 权重仍按 online_* 读，但阶段切换只在回合边界。</text>
+  </g>
+  <path d="M224 80 H260 M460 80 H500 M680 80 H710" stroke="#243044" stroke-width="1.5" fill="none" marker-end="url(#arr4)"/>
+</svg>
+<figcaption>图 3. 在线三进程。机器人只和 Machine A、actor 说话；learner 不在控制频率上。数字来自 screw_sorting 的 online_rl.yaml。</figcaption>
+</figure>
+
+<p>动作在进 actor 之前变成 delta chunk，再用与 SFT 相同的分位数映到 \([-1,1]\)。统计文件是 <code>configs/tasks/screw_sorting/stats/norm_stats_delta.json</code>。前 6 维相对 proprio 做差，夹爪保持绝对，然后</p>
+<div class="formula">$$
+\tilde a = 2\cdot\frac{a-q_{01}}{q_{99}-q_{01}+\epsilon}-1 .
+$$</div>
+<p>网络内部的动作因此和 π0.5 的归一化空间同尺度。算加速度惩罚时再反归一化回绝对关节，\(dt=1/30\)。</p>
+
+<h2 id="loss">5. 在线目标</h2>
+<p>Critic 是 twin Q。目标用 TD3 式的确定性下一步动作，自举按真实步数而不是固定 chunk 长（<code>build_td_target</code>）：</p>
+<div class="formula">$$
+y = R_{\gamma} + (1-d)\,\gamma^{n}\, \min(Q_{\bar 1}, Q_{\bar 2})(z', p', \mu_{\theta}(z',p',\mathrm{ref}'))
+$$</div>
+<div class="formula">$$
+\mathcal L_Q = \|Q_1-y\|^2 + \|Q_2-y\|^2
+$$</div>
+<p>\(n=\) <code>actual_steps</code>，\(R_\gamma\) 是 chunk 内奖励的折扣和。<code>target_q_clip=100</code>，<code>gamma=0.99</code>，目标网络 \(\tau=0.005\)。L2C2 项默认权重 0。</p>
+<p>Actor 损失在 <code>trainer.update_actor</code>，螺丝配置的系数为 <code>bc_weight=3</code>（warmup 与 online 相同）、<code>q_weight=1</code>、<code>delta_weight=0</code>、<code>delta_acc_weight=delta_jerk_weight=500</code>：</p>
+<div class="formula">$$
+\mathcal L_{\pi}
+= 3\,\mathbb E\big[\textstyle\sum_{c,a}(\mu-a^{\text{bc}})^2\big]
+- \mathbb E\big[\min_i Q_i(z,p,\mu)\big]
++ 500\,\mathbb E\|D_2 q\|^2
++ 500\,\mathbb E\|D_3 q\|^2
+$$</div>
+<p>\(D_2=[1,-2,1]\)、\(D_3=[1,-3,3,-1]\) 作用在反归一化后的前 6 个关节上，夹爪不进这两项。<code>compute_abs_chunk_acc_jerk_penalty</code> 先除以 \(dt^2\)、\(dt^3\) 得到物理加速度，再乘回 \(dt^4\)、\(dt^6\)，和 <code>acc_weight</code> 相乘后正好剩下「权重 × 差分平方」。所以 yaml 里的 500 就是加在索引差分上的系数，\(dt=1/30\) 已经约掉。<code>delta_weight=0</code> 时，和参考增量对齐的那一项不进损失。</p>
+<p><code>bc_reduction: sum</code> 表示先对 \(10\times 7\) 维求和再对 batch 取均值，所以 BC 的数值大约是「均值误差 × 70」。参考块以概率 0.5 被整段置零（<code>reference_dropout_prob</code>），迫使 actor 在没有 VLA 提示时仍能靠 \(z\) 和本体出动作。<code>bc_imitate_human: false</code> 时，BC 目标始终是 VLA 的 <code>ref_chunk</code>，即使某步来自人工。打开该开关后，人工步的目标改成实际执行的 <code>action_chunk</code>。</p>
+<p>高斯策略的标准差是常数 0.05，不学习。训练时可以从噪声采样探索；yaml 里 <code>actor_deterministic: true</code>，部署用均值。Actor 每 2 次 critic 更新才更新一次。</p>
+
+<h2 id="steps">6. 可落地步骤</h2>
+<ol class="steps">
+<li>
+  <h3>先有一份螺丝 SFT</h3>
+  <p>按 SFT 训练文档，在 <code>screw_sorting_single_sft_ep280_v30_steam</code> 上跑 <code>pi05_cobot_screw_sorting_single</code>。两阶段 RLT 的权重路径指向该实验的 step 20000。没有这份权重就不要把 <code>rlt_alpha</code> 设为 0：冻结一个随机初始化的 VLA，token 学到的是噪声表征。</p>
+</li>
+<li>
+  <h3>把 RLT 配置的 repo_id 改成同一数据集</h3>
+  <p><code>pi05_cobot_screw_sorting_single_two_staged_rlt</code> 与联合配置都仍写着短名 <code>screw_sorting_single</code>。和 SFT 一样改成全名，并单独算一份 norm stats 到各自的 <code>assets_dir</code>。变换矩阵（两路相机、delta mask <code>(6,-1)</code>、同一句 prompt）不要改。</p>
+<pre><code>uv run scripts/compute_norm_stats.py --config-name pi05_cobot_screw_sorting_single_two_staged_rlt
+uv run scripts/train_rlt.py pi05_cobot_screw_sorting_single_two_staged_rlt \
+  --exp-name=pi05_cobot_screw_sorting_single_two_staged_rlt</code></pre>
+  <p>日志里应看到 <code>rlt_loss</code> 下降，且 <code>vla_loss</code> 不出现（α=0）。若出现 vla_loss，说明 α 没读到 0。</p>
+</li>
+<li>
+  <h3>用 RLT 服务替换普通 serve_policy</h3>
+<pre><code>uv run scripts/server_rlt_policy.py \
+  --port 8000 \
+  --shared_prefix_inference \
+  --default_prompt 'Please sort and return the silver screws in the grey box to their proper places.' \
+  --checkpoint_dir &lt;两阶段实验&gt;/9999 \
+  --config pi05_cobot_screw_sorting_single_two_staged_rlt \
+  --rtc-warmup-s 25 10 \
+  --rtc-warmup-d 6 7</code></pre>
+  <p>仓库里的 <code>run_server_screw_sorting_single_rlt.sh</code> 把两阶段目录配上了联合配置名 <code>pi05_cobot_screw_sorting_single_joint_vla_rlt</code>。服务前改成和 checkpoint 同名的配置，避免 token 宽度和 α 的元数据对不上。</p>
+  <p>客户端或 rollout 发来与 SFT 推理相同的右臂观测。返回里除了动作还有 <code>z_rl</code>。用一条静止观测打两次，\(z_{\text{rl}}\) 应相同；挡住高位相机，\(z_{\text{rl}}\) 应明显变化。这是 token 是否看图的最低检查。</p>
+</li>
+<li>
+  <h3>用示教先灌满 replay，再让 learner 预热</h3>
+  <p><code>rlt_online_rl/run_build_warmup_journal.sh</code> 能从 LeRobot 示教造 warmup journal。把 <code>DATASET_ROOT</code> 指到 <code>screw_sorting_single_sft_ep280_v30_steam</code>。在线 yaml 要求 <code>warmup_min_size: 1200</code>，然后 <code>warmup_post_collect_updates: 50000</code>。在这 5 万次更新完成、<code>ready_for_online</code> 为真之前，右臂只执行 VLA 参考块。</p>
+</li>
+<li>
+  <h3>按 yaml 起 Machine B 和真机 rollout</h3>
+  <p>入口在 <code>rlt_online_rl/run_start_machineB.sh</code>、<code>run_start_rollout.sh</code>。关键开关已经在螺丝配置里：</p>
+<pre><code>action_dim: 7
+chunk_len: 10
+control_frequency_hz: 30
+vla_chunk_exec_horizon: 50
+rtc_execution_horizon_vla: 20
+rtc_execution_horizon_rl: 10
+rtc_inference_delay: 7
+use_rtc: true
+task_mode: full_task</code></pre>
+  <p>复位姿态用的是 <code>real_env</code> 里右臂那组 <code>_reset_position_right0</code>（7 个数，末位夹爪 0.09）。人只在回合之间切换阶段。关键相位的人工信号未开时（<code>enable_human_override: false</code>），不要指望中途接管会写进 BC 目标。</p>
+</li>
+<li>
+  <h3>看四条数再决定要不要放开 Q</h3>
+  <p>Learner 日志有 <code>critic_loss</code>、<code>actor_loss</code>、<code>bc_penalty</code>、<code>actor_q</code>。warmup 阶段 BC 应先降。Q 的绝对值被 clip 到 100。若 <code>actor_q</code> 顶满而真机成功率下降，是 Q 过估计把动作推出了 VLA 流形；保持 <code>bc_weight=3</code>，不要先把 <code>q_weight</code> 加大。加速度项已经是 500，关节若发黏，先降 <code>delta_acc_weight</code>，它直接加在绝对关节的二阶差分上。</p>
+</li>
+</ol>
+
+<h2 id="analysis">7. 数量级核对</h2>
+<p>上一节的公式如果只看符号，BC、Q 和加速度谁在主导并不清楚。下面用螺丝 yaml 的系数和张量形状算一次。</p>
+
+<h3>7.1 \(z_{\mathrm{rl}}\) 压掉了多少 token</h3>
+<p>三路相机槽各 256 个 SigLIP patch，共 768 个图像 token，宽 2048。<code>RLTTrainModel</code> 的 <code>prefix_seq_len</code> 默认也是 768，和「只重建图像、不重建语言」一致。左腕 mask 为假的那 256 个不进 MSE 分母。有效 token 约 512。一个查询把它压成 \(1\times 2048\)。压缩比按元素个数是 \(512\times 2048 / 2048 = 512\) 倍。重建损失只要求这一个向量能通过两层交叉注意力还原被 stop-gradient 的 \(h\)，不要求它线性可逆。任务句子不在 \(h\) 里。螺丝分拣只有一句固定 prompt，换场景不换句子时，\(z\) 的变化全部来自图像。挡住高位相机而 \(z\) 几乎不动，说明编码器在用腕部或者在用位置编码的常数项，token 没有接上视觉。</p>
+
+<h3>7.2 α=0 时 VLA 的哪些数允许变</h3>
+<p>可训练过滤是路径匹配 <code>.*rlt_module.*</code> 的 <code>nnx.Param</code>。动作专家、SigLIP、时间 MLP 都不在优化器里。EMA 被设成 <code>None</code>，checkpoint 里的 VLA 叶子应与 step 20000 的 SFT 逐元素相同。若服务端动作块和当时的 SFT 推理差一个明显偏置，先对这两份 params 做叶子级对比，而不是先怀疑在线 actor。联合配置 \(\alpha=1\) 则相反：流匹配梯度进 VLA，重建梯度仍被 <code>stop_gradient</code> 挡住。同一份螺丝数据上，两阶段保住参考块，联合训练会把参考块一起挪走，warmup journal 必须重做。</p>
+
+<h3>7.3 BC 和 Q 谁更大</h3>
+<p><code>bc_reduction=sum</code>，\(C=10\)，\(A=7\)。设每一维误差是 0.1（归一化动作，大约是 \([-1,1]\) 区间的 5%），</p>
+<div class="formula">$$
+\|\mu-a^{\mathrm{bc}}\|^2_{\mathrm{sum}} = 70 \times 0.01 = 0.7,\qquad 3\times 0.7 = 2.1.
+$$</div>
+<p>Q 被裁到 \([-100,100]\)，\(q\_weight=1\) 时 \(-Q\) 的一项最大能到 100，比 2.1 大一个数量级。所以一旦 critic 饱和在裁剪边界，BC 拉不回来。warmup 的 5 万次更新若把 <code>target_q_mean</code> 推到几十，在线阶段右臂会离开 VLA 参考，即使 <code>bc_weight</code> 仍是 3。</p>
+<p>参考 dropout 只作用在 actor 的输入上。<code>update_actor</code> 把置零后的 ref 送进 <code>actor_mean</code>，BC 目标在 <code>bc_imitate_human=false</code> 时仍是原始的 <code>batch["ref_chunk"]</code>，不是置零后的那份。概率 0.5 的那些样本要在「看不见参考块」的条件下，把输出做回 VLA 的参考。它不是在学输出 0。若把目标也一起置零，策略会被拖向分位数中点 \((q_{01}+q_{99})/2\)，那是另一套损失，当前代码没有这么写。</p>
+
+<h3>7.4 自举步数差一拍，折扣差多少</h3>
+<p>\(\gamma=0.99\)。chunk 名义长度 10，RTC 若提前截断到实际执行 \(n=4\)，</p>
+<div class="formula">$$
+\gamma^{10}\approx 0.904,\qquad \gamma^{4}\approx 0.961.
+$$</div>
+<p>用错成 \(\gamma^{10}\) 时，同样的下一步 Q 被少乘了大约 0.06。若 \(Q\approx 20\)，目标低了约 1.2，每步都有。代码用 <code>actual_steps</code> 做指数，就是为了避免把未执行的 6 拍也折扣掉。<code>step_trace_stride: 2</code> 还会让转移窗口不是严格的 chunk 边界，\(n\) 必须来自窗口里真实写入的拍数，不能写死 10。</p>
+
+<h3>7.5 加速度权重 500 在损失里剩多少</h3>
+<p><code>compute_abs_chunk_acc_jerk_penalty</code> 先算物理量 \(a=D_2q/dt^2\)，再乘 \(dt^4\)。\(dt=1/30\) 时 \(dt^4 = 1/30^4 \approx 1.23\times 10^{-6}\)，乘 500 约 \(6.2\times 10^{-4}\)。它乘的是 \(\mathbb E[a^2]\)。换一种写法，\(dt^4\) 与 \(1/dt^4\) 相消，损失里就是 \(500\cdot\mathbb E[(D_2 q)^2]\)，\(D_2 q\) 的单位是弧度每拍，不是 rad/s²。相邻三拍若差出 0.01&nbsp;rad 的二阶差分，这一项约 \(500\times 10^{-4}=0.05\)，比第 7.3 节里 2.1 的 BC 小。差分到 0.05&nbsp;rad 时，\(500\times 0.0025=1.25\)，和 BC 同阶。所以 500 并不会把 0.01&nbsp;rad 的弯抹平，它开始起作用的尺度是几百分之一个弧度的每拍二阶差。SFT 输出链的 QP 用的是另一套权重（\(w_a=100\) 且在绝对关节的后处理里），两边不会自动配平。</p>
+
+<h3>7.6 在线 actor 看见的 VLA 是哪一种 RTC</h3>
+<p>yaml 打开了 <code>use_rtc: true</code>，VLA 的执行视野 20、延迟 7，RL 块视野 10。Machine A 若仍走 <code>guided_inference</code>，参考块是测试期引导采样，不是第 RTC 文档 7.1 节那种钉死前缀的采样。actor 的 BC 目标跟着这个参考走。把 Machine A 换成 <code>pi05_cobot_screw_sorting_single_rtc</code> 的 checkpoint 而不改采样函数，BC 会去模仿一个训练分布之外的样本。在线环和离线 token 训练可以分开换，但参考块的生成方式要和那个 checkpoint 的 <code>rtc_max_delay</code> 一致。</p>
+
+<section class="appendix" id="appendix">
+<h2>附录 · 算法推导</h2>
+
+<h3>A. 为什么要压缩 prefix</h3>
+<p>π0.5 的图像 token 序列长度是相机数乘以 SigLIP patch 数，两路有效相机大约数百 token，宽 2048。在线 critic 若直接吃这条序列，每步控制都要回传大 Transformer，30&nbsp;Hz 上不现实。RL token 用一个查询向量做交叉注意力池化：</p>
+<div class="formula">$$
+z = \mathrm{Attn}(q,\, hW_K,\, hW_V) \in \mathbb R^{1\times 2048}
+$$</div>
+<p>两层交叉注意力加 MLP（<code>mlp_ratio=4</code>，8 头）给出足够的非线性，但参数量相对 Gemma 2B 可以忽略。重建损失强迫 \(z\) 保留能还原 \(h\) 的信息。因为目标是 \(\mathrm{sg}(h)\)，编码器不会通过改 VLA 来降低 MSE。信息瓶颈因此只在 token 侧。</p>
+<p>重建不是动作损失。一个能完美重建图像 token 的 \(z\) 仍可能对「螺丝相对夹爪的相位」不敏感，如果这些信息主要在被丢掉的语言 token 里。本实现 <code>image_only=True</code>，任务句子不进 \(z\)。螺丝分拣只有一句固定 prompt，这个省略可接受；换任务而不换图时，\(z\) 不会变，区分任务的责任留在 VLA 参考块里。</p>
+
+<h3>B. α 的两种训练动力学</h3>
+<p>\(\alpha=0\)：参数分割是硬的。优化器状态只为 <code>rlt_module</code> 创建，VLA 叶子不在 <code>apply_updates</code> 里。EMA 被关掉，是因为 checkpoint 推理读的是 <code>ema_params</code>；若对冻结权重仍做 \(0.99\bar\theta+0.01\theta\)，而 \(\theta\) 在数值上又被别的路径碰过，服务端会看到一份漂过的 VLA。代码注释把这件事写死了。</p>
+<p>\(\alpha=1\)：总损失 \(\mathcal L_{\text{ro}}+\mathcal L_{\text{flow}}\)。流匹配梯度进 VLA，重建梯度不进 VLA（stop-gradient 仍在）。于是 VLA 按示教更新，token 追踪移动中的 prefix。这比两阶段更可能让 \(z\) 和动作头一起漂移，在线阶段必须重新收集 warmup。两阶段的好处是 Machine A 的参考块与已经验证过的 SFT 相同。</p>
+
+<h3>C. 在线 MDP 为什么按 chunk 而不是按拍</h3>
+<p>策略输出的是长度 \(C=10\) 的动作块，执行 \(n\le C\) 拍后才有下一次决策（RTC 可能提前截断）。把这 \(n\) 拍收成一个转移 \((z,p,a,r_{1:n},z',p')\)，贝尔曼方程用 \(n\) 步回报：</p>
+<div class="formula">$$
+Q(z,p,a) = \mathbb E\Big[\sum_{k=0}^{n-1}\gamma^k r_{k+1} + \gamma^n \min_i Q_i(z',p',\mu(z',p',\mathrm{ref}'))\Big]
+$$</div>
+<p>若误用 \(\gamma^C\) 而实际只执行了 \(n&lt;C\) 步，自举会把未来折扣打得过重，Q 偏小。所以 <code>actual_steps</code> 进了目标。Twin-min 与缓慢跟踪的目标网络是 TD3 的过估计控制；这里没有目标策略平滑噪声，下一步动作就是 actor 均值再 clip 到 \([-1,1]\)。</p>
+
+<h3>D. BC 项是在流形上的锚</h3>
+<p>纯最大化 \(Q\) 的 actor 可以走出 VLA 从未演示过的关节速度，Q 在那里是外推。对参考块的平方惩罚把 \(\mu\) 拉回 \(\pi_{\text{SFT}}\) 的输出附近。系数 3 相对于 Q 的量级：BC 是 70 维求和，每维误差 0.1 时惩罚约 \(3\times 0.7=2.1\)；Q 被 clip 在 100 以内，\(q\_weight=1\) 时 Q 项可以更大。因此后期若 Q 可信，策略会离开参考；若 Q 不可信，大的 BC 仍占优。参考 dropout 0.5 只把输入里的 ref 整段置零，BC 目标仍是原来的 VLA 块。一半样本必须在没有参考输入时仍输出那条参考，这样 actor 不能退化成「把输入原样抄出来」，VLA 抖动时它仍有一条由 \(z\) 和本体决定的输出。</p>
+
+<h3>E. 加速度与加加速度</h3>
+<p>反归一化并加回 proprio 的前 6 维后，二阶、三阶差分与 SFT 输出链的 QP 模板相同。物理量 \(a=D_2q/dt^2\)、\(j=D_3q/dt^3\) 只用于日志。进损失的是</p>
+<div class="formula">$$
+500\cdot\mathbb E[(D_2 q)^2] + 500\cdot\mathbb E[(D_3 q)^2]
+= 500\,dt^{4}\,\mathbb E[a^2] + 500\,dt^{6}\,\mathbb E[j^2]
+$$</div>
+<p>两边相等，因为 \(dt^4\) 与 \(1/dt^4\) 相消。这是可微惩罚，直接进 actor 梯度。SFT 推理末尾的 QP 是另一回事，它不产生梯度。两者叠在真机上时，在线策略已经变圆，Machine A 路径上的 QP 会再圆一次，末端更黏。螺丝 yaml 的 <code>delta_weight=0</code>，相邻增量相对参考增量的均方误差不进损失，平滑只来自 acc/jerk。</p>
+
+<h3>F. 干预数据怎么进缓冲区</h3>
+<p>README 与 <code>trainer.py</code> 的分工是：人工介入的步，在<strong>写入 replay 之前</strong>可以把 <code>ref_chunk</code> 对应行换成实际执行；训练时若 <code>bc_imitate_human</code> 为真，则按 <code>source_chunk</code> 的 HUMAN/MIXED 掩码选择 BC 目标。当前螺丝配置两个开关都偏保守：<code>enable_human_override: false</code>，<code>bc_imitate_human: false</code>。因此默认在线目标是「像 VLA，同时 Q 更高，同时更平滑」，不是「模仿操作员的纠正」。要做干预学习，两处都要打开，并且只在回合边界改变控制源，否则 chunk 窗口会被标成 MIXED，BC 目标在窗内按步切换。</p>
+
+<h3>G. 四篇文档合成的一条原理</h3>
+<p>示教分布 \(p_{\text{demo}}(a\mid o)\) 由 SFT 的流匹配速度场表示，数据是 280 条 30&nbsp;Hz 的右臂螺丝轨迹。推理把速度场积成绝对关节，并用 QP 限制单块光滑。RTC 在积分漂移里加入对已承诺前缀的加权拉力，处理 Cobot Magic 上不可避免的推理延迟。RLT 把同一速度场的视觉条件 \(h(o)\) 压成 \(z\)，再在 \(z\) 上做带 BC 锚的 twin-Q 策略改进。在线策略不替换 VLA 的采样器，它输出的是一条短块，经 RTC 接在 VLA 长块的时间轴上。所以改坏 \(z\) 的重建、或让 actor 的 BC 权重变成 0，都会让右臂离开 <code>screw_sorting_single_sft_ep280_v30_steam</code> 所支撑的那片关节流形。</p>
+</section>
+
+<footer class="colophon">
+  对照代码：<code>src/openpi/models/rl_token.py</code> · <code>scripts/train_rlt.py</code> · <code>scripts/server_rlt_policy.py</code> · <code>src/openpi/training/config.py</code>（两份 RLT TrainConfig）· <code>rlt_online_rl/src/rlt_online_rl/trainer.py</code> · <code>critic_loss.py</code> · <code>networks.py</code> · <code>configs/tasks/screw_sorting/online_rl.yaml</code>
+</footer>
+</article>
+</main>
+</body>
+</html>

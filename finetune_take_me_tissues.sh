@@ -18,15 +18,15 @@ export NCCL_NVLS_ENABLE=0 # very important!
 
 export TORCH_NCCL_ENABLE_MONITORING=0  # disable watchdog
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
 # 设置 Hugging Face 镜像端点
 export HF_ENDPOINT=https://hf-mirror.com
 
-export repo_id=screw_sorting_single_sft_ep279_annotated
-export config_name=pi05_cobot_screw_sorting_single
+export repo_id=take_me_tissues
+export config_name=pi05_take_me_tissues
 export HF_LEROBOT_HOME=/workspace/huggingface/lerobot
 export HF_HOME=/workspace/huggingface
 
