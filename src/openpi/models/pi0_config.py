@@ -32,6 +32,11 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # RTC-SFT (arXiv 2512.05964). 0 keeps vanilla flow matching (whole chunk from noise).
+    # When >0, each example draws d ~ Unif{0..rtc_max_delay}; the first d action steps stay
+    # clean (t=0) and the FM loss is applied only to the postfix.
+    rtc_max_delay: int = 0
+    
     def __post_init__(self):
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)

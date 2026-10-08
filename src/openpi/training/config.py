@@ -1044,6 +1044,81 @@ _CONFIGS = [
     ),
     
     TrainConfig(
+        name="pi05_cobot_screw_sorting_single_rtc",
+        model=pi0_config.Pi0Config(pi05=True, rtc_max_delay=10, action_horizon=32),
+        data=LeRobotCobotSingleArmDataConfig(
+            repo_id="screw_sorting_single_sft_ep279_annotated",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_cobot_screw_sorting_single",
+                asset_id="screw_sorting_single",
+            ),
+            default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
+        batch_size=64,
+        num_workers=8,
+        num_train_steps=30_000,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        wandb_enabled=True,
+    ),
+
+    TrainConfig(
+        name="pi05_cobot_fold_clothes_rtc",
+        model=pi0_config.Pi0Config(pi05=True, rtc_max_delay=10, action_horizon=32),
+        data=LeRobotCobotDataConfig(
+            repo_id="fold_clothes",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_cobot_fold_clothes_rtc",
+                asset_id="fold_clothes",
+            ),
+            default_prompt="Please fold the clothes on the desktop carefully.",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
+        batch_size=64,
+        num_workers=8,
+        num_train_steps=30_000,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        wandb_enabled=True,
+    ),
+
+    TrainConfig(
         name="pi05_cobot_pour_water",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotDataConfig(
@@ -1642,7 +1717,7 @@ _CONFIGS = [
     # Here, we illustrate how to use the RLTTrainer by training a pi05 model with RLT on the screw sorting dataset. You can modify the model and data configs to train on other datasets as well. For more details on RLT and how to use it, see the documentation and the tutorial notebook in examples/rlt.
    TrainConfig(
         name="pi05_cobot_screw_sorting_single_two_staged_rlt",
-        model=pi0_config.Pi0Config(pi05=True),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
         data=LeRobotCobotSingleArmDataConfig(
             repo_id="screw_sorting_single",
             assets=AssetsConfig(

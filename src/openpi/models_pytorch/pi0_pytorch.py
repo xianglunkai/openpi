@@ -29,12 +29,15 @@ def get_safe_dtype(target_dtype, device_type):
 def create_sinusoidal_pos_embedding(
     time: torch.tensor, dimension: int, min_period: float, max_period: float, device="cpu"
 ) -> Tensor:
-    """Computes sine-cosine positional embedding vectors for scalar positions."""
+    """Computes sine-cosine positional embedding vectors for scalar positions.
+
+    `time` is (B,) for vanilla FM or (B, H) for RTC per-token time.
+    """
     if dimension % 2 != 0:
         raise ValueError(f"dimension ({dimension}) must be divisible by 2")
 
-    if time.ndim != 1:
-        raise ValueError("The time tensor is expected to be of shape `(batch_size, )`.")
+    if time.ndim not in (1, 2):
+        raise ValueError("The time tensor is expected to be of shape `(batch_size, )` or `(batch_size, horizon)`.")
 
     dtype = get_safe_dtype(torch.float64, device.type)
     fraction = torch.linspace(0.0, 1.0, dimension // 2, dtype=dtype, device=device)
@@ -42,8 +45,11 @@ def create_sinusoidal_pos_embedding(
 
     # Compute the outer product
     scaling_factor = 1.0 / period * 2 * math.pi
-    sin_input = scaling_factor[None, :] * time[:, None]
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    if time.ndim == 1:
+        sin_input = scaling_factor[None, :] * time[:, None]
+        return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1)
+    sin_input = scaling_factor[None, None, :] * time[:, :, None]
+    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=-1)
 
 
 def sample_beta(alpha, beta, bsize, device):
@@ -305,7 +311,8 @@ class PI0Pytorch(nn.Module):
         action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
 
         if not self.pi05:
-            time_emb = time_emb[:, None, :].expand_as(action_emb)
+            if time_emb.ndim == 2:
+                time_emb = time_emb[:, None, :].expand_as(action_emb)
             action_time_emb = torch.cat([action_emb, time_emb], dim=2)
 
             # Apply MLP layers
@@ -355,7 +362,19 @@ class PI0Pytorch(nn.Module):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
-        time_expanded = time[:, None, None]
+        rtc_max_delay = int(getattr(self.config, "rtc_max_delay", 0))
+        postfix_mask = None
+        if rtc_max_delay > 0:
+            batch_size, horizon, _ = actions.shape
+            delays = torch.randint(0, rtc_max_delay + 1, (batch_size,), device=actions.device)
+            postfix_mask = (torch.arange(horizon, device=actions.device)[None, :] >= delays[:, None]).to(
+                dtype=time.dtype
+            )
+            time = time[:, None] * postfix_mask
+            time_expanded = time.unsqueeze(-1)
+        else:
+            time_expanded = time[:, None, None]
+
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
@@ -402,7 +421,12 @@ class PI0Pytorch(nn.Module):
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        loss = F.mse_loss(u_t, v_t, reduction="none")
+        if postfix_mask is not None:
+            horizon = postfix_mask.shape[-1]
+            n_post = postfix_mask.sum(dim=-1, keepdim=True).clamp(min=1)
+            loss = loss * (postfix_mask * (horizon / n_post)).unsqueeze(-1)
+        return loss
 
     @torch.no_grad()
     def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
@@ -493,7 +517,38 @@ class PI0Pytorch(nn.Module):
         return self.action_out_proj(suffix_out)
 
     @torch.no_grad()
-    def guided_inference(self, device, observation, noise=None, num_steps=10, prev_action=None, s=25, d=10, beta=10.0) -> Tensor: # # for 50hz d = 14
+    def guided_inference(
+        self,
+        device,
+        observation,
+        noise=None,
+        num_steps=10,
+        prev_action=None,
+        s=25,
+        d=10,
+        beta=10.0,
+        training_rtc: bool = False,
+    ) -> Tensor:  # for 50hz d = 14
+        # training_rtc pins the first d steps of prev_action at flow time 0, matching
+        # RTC-SFT training. Default False keeps the original guidance RTC.
+        # d is fixed: a shorter leftover must not compile a different prefix length.
+        if training_rtc and prev_action is not None:
+            delay = int(d)
+            prev_len = int(prev_action.shape[1])
+            if delay > 0 and prev_len < delay:
+                raise ValueError(
+                    f"training_rtc requires prev_action length >= d, got {prev_len} < {delay}. "
+                    "Hold-pad the leftover to the execution horizon before inference."
+                )
+            if delay > 0:
+                return self.sample_actions_with_action_prefix(
+                    device,
+                    observation,
+                    prev_action[:, :delay],
+                    noise=noise,
+                    num_steps=num_steps,
+                )
+
         bsize = observation.state.shape[0]
 
         if noise is None:
@@ -562,3 +617,56 @@ class PI0Pytorch(nn.Module):
             time += dt
         return x_t
     
+
+    @torch.no_grad()
+    def sample_actions_with_action_prefix(
+        self, device, observation, action_prefix, noise=None, num_steps=10
+    ) -> Tensor:
+        """Euler sample with `action_prefix` (B, d, ad) pinned at flow time 0."""
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        delay = action_prefix.shape[1]
+        if delay > 0:
+            noise = torch.cat([action_prefix, noise[:, delay:]], dim=1)
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+        _, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_2d_masks_4d,
+            position_ids=prefix_position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+
+        dt = torch.tensor(-1.0 / num_steps, dtype=torch.float32, device=device)
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        horizon_idx = torch.arange(self.config.action_horizon, device=device)
+        while time >= -dt / 2:
+            if delay > 0:
+                x_t = torch.cat([action_prefix, x_t[:, delay:]], dim=1)
+            time_per_pos = torch.where(horizon_idx < delay, torch.zeros((), device=device), time)
+            time_per_pos = time_per_pos.unsqueeze(0).expand(bsize, -1)
+            v_t = self.denoise_step(
+                state,
+                prefix_pad_masks,
+                past_key_values,
+                x_t,
+                time_per_pos,
+            )
+            x_t = x_t + dt * v_t
+            if delay > 0:
+                x_t = torch.cat([action_prefix, x_t[:, delay:]], dim=1)
+            time = time + dt
+        return x_t
