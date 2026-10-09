@@ -11,7 +11,7 @@ experiment:
     action_norm_stats_path: configs/tasks/screw_sorting/stats/norm_stats_delta.json
 
     gamma: 0.99
-    fixed_std: 0.025
+    fixed_std: 0.002
     reference_dropout_prob: 0.5
     bc_reduction: sum
     target_q_clip: 100.0
@@ -33,7 +33,7 @@ experiment:
     # Phased ablations. Enable one extra stage at a time; restart the learner.
     # Stage 1 (this run): HUMAN/MIXED steps BC to executed action. Actor still sees VLA ref.
     #   Set false to restore the previous "BC always to VLA" run.
-    bc_imitate_human: true
+    bc_imitate_human: false
 
     actor_hidden_dim: 256
     actor_num_layers: 2
@@ -106,7 +106,7 @@ runtime:
     - -0.00476837158203125
     - -0.00209808349609375
     - 0.09
-    actor_deterministic: false
+    actor_deterministic: true
     # Paper screw vla_horizon=50; RL chunk_length=10 (Evo ac_paper_screw.yaml).
     vla_chunk_exec_horizon: 50
     rl_chunk_exec_horizon: null
@@ -125,7 +125,7 @@ runtime:
     safe_fallback_to_ref: true
     # Policy action LPF (deploy + offline smoothness sim). Same flag gates both.
     # false → deploy off, smooth skips LPF sim; true → both on (cutoff below).
-    use_actions_filter: true
+    use_actions_filter: false
     action_lpf_cutoff_freq: 5.0
     action_lpf_dt: null
     machine_a_connect_timeout_sec: 10.0

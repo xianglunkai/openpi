@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>screw_sorting RLT 训练与推理审计</title>
+<style>
+  :root {
+    --bg: #f6f4ef;
+    --paper: #fffdf8;
+    --ink: #1c1915;
+    --muted: #5c564c;
+    --line: #e4ddd0;
+    --p0: #8f2d2d;
+    --p0bg: #f8e8e4;
+    --p1: #8a5a12;
+    --p1bg: #f8f0dc;
+    --p2: #2f4c6e;
+    --p2bg: #e7eef6;
+    --ok: #1f5c45;
+    --okbg: #e5f2eb;
+    --code: #f3efe6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", "Noto Serif SC", serif;
+  }
+  main {
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 48px 28px 80px;
+  }
+  h1 {
+    font-size: 32px;
+    line-height: 1.25;
+    font-weight: 650;
+    margin: 0 0 8px;
+  }
+  h2 {
+    font-size: 22px;
+    margin: 42px 0 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--line);
+  }
+  h3 { font-size: 18px; margin: 28px 0 8px; }
+  p { margin: 0 0 12px; }
+  .meta { color: var(--muted); font-size: 14px; margin-bottom: 28px; }
+  .lead {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--p0);
+    padding: 16px 18px;
+    margin: 0 0 22px;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--paper);
+    font-size: 14.5px;
+    margin: 12px 0 18px;
+  }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  th { font-weight: 650; background: #f3efe6; }
+  code, pre {
+    font-family: "IBM Plex Mono", "Source Code Pro", ui-monospace, monospace;
+    font-size: 13px;
+  }
+  code { background: var(--code); padding: 1px 4px; }
+  pre {
+    background: #241f1a;
+    color: #f4efe6;
+    padding: 14px 16px;
+    overflow-x: auto;
+    line-height: 1.5;
+  }
+  .tag {
+    display: inline-block;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    vertical-align: 1px;
+  }
+  .p0 { color: var(--p0); background: var(--p0bg); }
+  .p1 { color: var(--p1); background: var(--p1bg); }
+  .p2 { color: var(--p2); background: var(--p2bg); }
+  .ok { color: var(--ok); background: var(--okbg); }
+  .card {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    padding: 14px 16px 6px;
+    margin: 12px 0 16px;
+  }
+  ol.fixes { padding-left: 1.2em; }
+  ol.fixes li { margin: 0 0 10px; }
+  .formula {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    padding: 10px 14px;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 13.5px;
+    overflow-x: auto;
+  }
+  a { color: #6d3b16; }
+</style>
+</head>
+<body>
+<main>
+  <h1>screw_sorting RLT：成功率上不去的原因</h1>
+  <p class="meta">对照配置 <code>rlt_online_rl/configs/tasks/screw_sorting/online_rl.yaml</code>，核对 learner、replay、actor 部署与 RTC。日期 2026-10-09。</p>
+
+  <div class="lead">
+    <p>当前配置下，在线阶段几乎不可能把成功率拉到 VLA 之上。Actor 被行为克隆死死钉在 VLA 参考动作上，Q 的梯度在 30&nbsp;Hz 稀疏奖励下传不到前面的动作；同时 RL 阶段每次只往队列里放 10 步，而推理延迟和补队列阈值都大于这个长度，控制循环会反复被推理堵住。这两件事叠加，机器人执行的不是训练时假设的那条轨迹。</p>
+    <p>下面按“会直接压住成功率”和“实现与论文/测试不一致”分开写。标注 <span class="tag p0">P0</span> 的项不改，继续训练也不会涨成功率。</p>
+  </div>
+
+  <h2>1. 这条配置实际在优化什么</h2>
+  <p>Machine A 冻结，输出 <code>z_rl</code> 和绝对关节参考块 <code>ref_chunk</code>。Machine B 的 chunk actor 在归一化后的 <code>delta_chunk</code> 空间里输出 10×7 的动作均值。Critic 是 twin Q，TD 目标用 <code>min(Q1, Q2)</code>。Actor 损失是：</p>
+  <div class="formula">L = 2.0 · BC(μ, ref) − 1.0 · Q(s, μ) + acc/jerk(μ)</div>
+  <p><code>delta_weight = 0</code>，<code>l2c2_* = 0</code>，<code>bc_imitate_human = false</code>。因此 BC 目标始终是 VLA 参考，不是人执行的动作，也不是机器人真正发出去的动作。Warmup 和 online 的 BC/Q 权重相同，都是 2 和 1。部署端 <code>actor_deterministic: true</code>，<code>fixed_std: 0.002</code>，在线采集没有探索噪声。</p>
+  <p>奖励是默认的人工成功信号：整段控制里只有成功那一步是 <code>+1</code>，失败全程是 0。非 critical 前缀被 <code>drop_transition</code> 丢掉，不进 replay。Replay 采样策略是 <code>uniform</code>；yaml 里分层采样整段被注释掉。</p>
+
+  <h2>2. 结论表</h2>
+  <table>
+    <thead>
+      <tr><th>级别</th><th>问题</th><th>结果</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="tag p0">P0</span></td>
+        <td>BC 用 sum、权重 2，Q 权重 1</td>
+        <td>平衡点上 actor 相对 VLA 只偏 0.01–0.04 rad，改不了抓取和插入</td>
+      </tr>
+      <tr>
+        <td><span class="tag p0">P0</span></td>
+        <td><code>gamma = 0.99</code> 按 30&nbsp;Hz 控制步折扣</td>
+        <td>有效视野约 3.3 秒。更早的 critical 动作目标 Q 接近 0</td>
+      </tr>
+      <tr>
+        <td><span class="tag p0">P0</span></td>
+        <td>RL 块长 10，固定延迟 7，补队列阈值 25</td>
+        <td>新块几乎被 delay 吃光，队列经常空，控制线程同步等待推理</td>
+      </tr>
+      <tr>
+        <td><span class="tag p0">P0</span></td>
+        <td>无探索 + 均匀采样 + BC 不模仿人</td>
+        <td>在线数据仍是 VLA 轨迹，Q 学到的更好动作 actor 不会去执行</td>
+      </tr>
+      <tr>
+        <td><span class="tag p1">P1</span></td>
+        <td>TD 目标用当前 actor，target actor 从未被读取</td>
+        <td>与代码注释里的 TD3 不一致，bootstrap 跟着在线策略抖</td>
+      </tr>
+      <tr>
+        <td><span class="tag p1">P1</span></td>
+        <td>干预步没有把 ref 换成执行动作</td>
+        <td><code>test_replay_replaces_intervened_ref_steps_with_executed_action</code> 失败</td>
+      </tr>
+      <tr>
+        <td><span class="tag p1">P1</span></td>
+        <td><code>step_trace_stride: 2</code> 回填特征时不开 RTC</td>
+        <td>训练看到的 ref 不是部署时 actor 条件于的那条 ref</td>
+      </tr>
+      <tr>
+        <td><span class="tag p1">P1</span></td>
+        <td>推理把动作 clip 到 [-1, 1]，actor loss 不 clip</td>
+        <td>Q 可以奖励一个部署时根本发不出去的动作</td>
+      </tr>
+      <tr>
+        <td><span class="tag p1">P1</span></td>
+        <td>5&nbsp;Hz 低通在 actor 之后，replay 存的是滤波后的指令</td>
+        <td>Critic 的动作和 actor 正在最大化的动作不是同一个</td>
+      </tr>
+      <tr>
+        <td><span class="tag p2">P2</span></td>
+        <td><code>delta_acc/jerk_weight = 300</code>（OpenPI 默认 100 的 3 倍）</td>
+        <td>进一步惩罚偏离 VLA 的拐弯</td>
+      </tr>
+      <tr>
+        <td><span class="tag p2">P2</span></td>
+        <td>异步 RTC 用触发瞬间的观测，不在推理开始时重采</td>
+        <td>VLA 阶段图像偏旧；RL 阶段因为队列常空，反而经常走同步路径</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>3. P0：Actor 被 BC 钉死在 VLA 上</h2>
+  <p><code>bc_reduction: sum</code>，chunk 10、动作维 7，BC 先对 70 维平方误差求和再对 batch 取均值。权重 2 时，对单个归一化分量的梯度是 <code>4 · (μ − ref)</code>。Q 项权重是 1，而且 Q 是一个标量。</p>
+  <p>两边梯度抵消时，归一化空间里的偏差大约是</p>
+  <div class="formula">e ≈ (1/4) · ∂Q/∂μ</div>
+  <p>即便 critic 对某一维的灵敏度达到 0.1（对一个 0/1 奖励来说已经不小），<code>e ≈ 0.025</code>。用 <code>norm_stats_delta.json</code> 的 q01/q99 换回关节角：</p>
+  <table>
+    <thead><tr><th>维</th><th>(q99−q01)/2</th><th>e=0.025 对应的物理偏差</th></tr></thead>
+    <tbody>
+      <tr><td>joint 0</td><td>0.43 rad</td><td>约 0.011 rad</td></tr>
+      <tr><td>joint 1</td><td>1.57 rad</td><td>约 0.039 rad</td></tr>
+      <tr><td>joint 3</td><td>0.16 rad</td><td>约 0.004 rad</td></tr>
+      <tr><td>gripper</td><td>0.015 m</td><td>约 0.4 mm</td></tr>
+    </tbody>
+  </table>
+  <p>螺丝分拣需要的修正通常大于这个量级。更糟的是，大部分样本的目标 Q 本身接近 0（下一节），<code>∂Q/∂μ</code> 比 0.1 还小，actor 输出就等于 VLA。</p>
+  <p>Warmup 与 online 权重没有拉开：<code>warmup_bc_weight = online_bc_weight = 2</code>，<code>warmup_q_weight = online_q_weight = 1</code>。进入在线之后，损失形式和 warmup 克隆 VLA 时完全一样。<code>warmup_post_collect_updates: 30000</code> 会先在这份 VLA 数据上把 actor 训成参考策略的复制品，然后再用同一组权重继续训。</p>
+  <p><code>bc_imitate_human: false</code> 是显式关掉的。人接管的步不会成为 BC 目标。Replay 里分层采样（近期 online / warmup / human）也被注释掉，采样保持 uniform。30000 步 warmup 之后，buffer 里绝大多数仍是 VLA 轨迹，人的成功修正即使进了 buffer，被抽到的比例也极低。</p>
+  <p>部署还关掉了探索：<code>actor_deterministic: true</code>，训练目标用的也是均值，<code>fixed_std = 0.002</code> 不进入损失。在线 rollout 采回来的动作分布和 VLA 几乎重合，off-policy 改进没有新动作可学。</p>
+
+  <h2>4. P0：奖励在 30 Hz 上折扣，信用传不回去</h2>
+  <p>默认奖励只在人工标记成功的那个控制步写 <code>+1</code>，见 <code>pika_sync_ros1_agilex_single_arm.py</code> 的 <code>_default_reward_fn</code>。失败没有负奖励。TD 目标在 <code>networks.py</code> 的 <code>build_td_target</code>：</p>
+  <div class="formula">y = Σ_t γ^t r_t + (1 − done) · γ^{actual_steps} · min(Q1', Q2')
+γ = 0.99 ，actual_steps = 10（stride=2 的窗口都是满块）</div>
+  <p>γ 乘在每一个 30&nbsp;Hz 控制步上，不是乘在 chunk 上。时间常数 <code>1/(1−0.99) = 100</code> 步，约 3.3 秒。15 秒的 critical 段开头，折扣是 <code>0.99^450 ≈ 0.011</code>。那些步的目标值在数值上就是 0，actor 的 Q 项推不动它们。</p>
+  <p>非 critical 的 full_task 前缀整段 <code>drop_transition</code>。能进 learner 的只有 critical 段。如果失败发生在接近、对准这些前几秒，而成功标记在结束时才给，critic 分不出“即将失败”和“还没成功”。成功率低时，batch 里 <code>target_q</code> 几乎全是 0，actor loss 退化成纯 BC。</p>
+  <p><code>target_q_clip: 100</code> 对 0/1 奖励没有作用，Q 到不了这个幅度。</p>
+
+  <h2>5. P0：RL 阶段的 RTC 队列比推理还短</h2>
+  <p>配置同时写了：</p>
+  <table>
+    <thead><tr><th>项</th><th>值</th><th>含义</th></tr></thead>
+    <tbody>
+      <tr><td><code>vla_chunk_exec_horizon</code></td><td>50</td><td>VLA 阶段一次入队 50 步，30&nbsp;Hz 下约 1.7 秒</td></tr>
+      <tr><td><code>rtc_execution_horizon_vla</code></td><td>20</td><td>VLA 引导前缀 s = 20</td></tr>
+      <tr><td><code>chunk_len</code> / RL horizon</td><td>10</td><td>RL 阶段 actor 只产出并入队 10 步，约 0.33 秒</td></tr>
+      <tr><td><code>rtc_execution_horizon_rl</code></td><td>10</td><td>RL 阶段引导前缀 s = 10</td></tr>
+      <tr><td><code>rtc_inference_delay</code></td><td>7</td><td>发给 Machine A 的 d 固定为 7，不看实测延迟</td></tr>
+      <tr><td><code>action_queue_size_to_get_new_actions</code></td><td>25</td><td>队列 ≤ 25 就再推理。RL 队列最多 10，所以每次 pop 之后都会再请求</td></tr>
+      <tr><td><code>control_frequency_hz</code></td><td>30</td><td></td></tr>
+    </tbody>
+  </table>
+  <p><code>ActionQueue._replace_actions_queue</code> 会丢掉新块的前 <code>real_delay</code> 步。RL 块只有 10 步。推理耗时 0.25 秒时，<code>real_delay ≈ 8</code>，新块只剩 2 步；耗时 ≥ 0.34 秒时，10 步全部被丢掉，队列变空。下一次控制循环在 <code>RtcActionRuntime.ensure_action</code> 里同步等待下一次 VLA + actor 推理。30&nbsp;Hz 的节拍被打断，接触段会顿、会抖。</p>
+  <p>VLA 阶段一次有 50 步，阈值 25 还能留出约 0.8 秒的余量，所以“纯 VLA 还能动、一进 RL 就差”是这个配置的预期现象，不是偶发网络错误。</p>
+  <p>另外，RL 阶段本应关掉 leftover 引导。代码里正确条件被注释掉了，实际始终打开：</p>
+  <pre>use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance),
+# use_vla_guidance=bool(...rtc_vla_guidance) and not uses_rl,</pre>
+  <p>于是 RL 阶段把 s=10、d=7 送给 Machine A。10 步参考里前 7 步被前缀锁住，actor 看到的 ref 几乎是上一个块的尾巴，而不是当前观测上的开放环 VLA。训练时回填特征却不带这段前缀（第 7 节），条件分布对不上。</p>
+  <p>库里的告警只在“阈值 &lt; s + delay”时响。这里阈值 25 大于 10+7，所以不会告警，但 RL 队列仍然会空。告警方向和 RL 阶段的真实故障相反。</p>
+
+  <h2>6. P1：TD 目标没有用 target actor</h2>
+  <p><code>RLTTrainState.target_actor_params</code> 会做 soft update，也会进 checkpoint，但 <code>update_critic</code> 传给 <code>build_td_target</code> 的是 <code>state.actor_params</code>。全库只有写入，没有把 target actor 用于下一动作。注释写的是 TD3，TD3 的下一动作来自 target policy。现在每两次 critic 更新 actor 就动一次，bootstrap 目标跟着动。<code>target_tau: 0.005</code> 对 actor 目标网络没有作用。</p>
+  <p>这会让 Q 更噪，但在第 3、4 节的尺度下，它不是成功率平的主因。修的时候应让 <code>build_td_target</code> 使用 <code>target_actor_params</code>。</p>
+
+  <h2>7. P1：训练时的 ref 不是部署时的 ref</h2>
+  <h3>7.1 干预没有改写参考动作</h3>
+  <p>README 和 <code>test_inference.py</code> 要求：HUMAN / intervention 的那些行，replay 里的 <code>ref_chunk</code> 应换成实际执行动作。这样即使 BC 目标是 ref，也会模仿人。</p>
+  <p><code>EnvDriver._build_transition_from_window</code> 直接使用特征缓存里的 VLA <code>ref_chunk</code>，没有按 <code>source_chunk</code> 覆盖。该测试现在失败：</p>
+  <pre>FAILED test_replay_replaces_intervened_ref_steps_with_executed_action
+assert np.allclose(transition.ref_chunk[0], 7.0)</pre>
+  <p>再叠加 <code>bc_imitate_human: false</code>，人的动作只出现在 critic 的 <code>action_chunk</code> 里。Critic 可以给人的动作高分，actor 的 BC 却仍把 μ 拉向 VLA，而 actor 又从不输出那个高分动作。人的纠正进不了策略。</p>
+
+  <h3>7.2 stride=2 的特征回填是开环 VLA</h3>
+  <p><code>step_trace_stride: 2</code> 走 dense 窗口。窗口起点若不是当次 plan 的 anchor，<code>_feature_payload_for_observation</code> 和 <code>get_features_batch</code> 调用的是不带 <code>prev_actions</code>、<code>use_rtc</code>、<code>inference_delay</code> 的 <code>get_features</code>。部署时 actor 的条件是 RTC 引导后的前 10 步。多数训练样本的 <code>(z, proprio, ref)</code> 因此是另一次开环推理的结果。</p>
+  <p>同时，<code>action_chunk</code> 是连续 10 个已执行指令。RTC 下这 10 步往往来自多次 merge 之后的尾巴，不是同一次 actor 前向的输出。Learner 却把它们当成“一次 π(z, proprio, ref) 应该输出的块”。这个监督和部署时的一次前向不一致。</p>
+
+  <h3>7.3 推理 clip，训练不 clip</h3>
+  <p><code>ActorService.infer</code> 在反归一化之前把网络输出夹到 <code>[-1, 1]</code>。Actor loss 里的 <code>actor_mean</code> 是最后一层线性输出，没有 tanh，也没有 clip，Q 直接打在这个值上。网络可以靠跑到 [-1, 1] 外面抬高训练时的 Q，部署时这些分量会被夹回去，物理动作不是被优化的那个。</p>
+  <p>Gripper 的统计范围很窄：q01 ≈ 0，q99 ≈ 0.028&nbsp;m。重置位姿第七维是 0.09。0.09 做分位数归一化大约是 5，远在 clip 之外。若 critical 段里 VLA 的夹爪指令也超出 q99，BC 会把网络往 5 推，部署却最多还原到 0.028&nbsp;m。需要用一段真实 ref 的 gripper 直方图确认；重置位姿本身不经过 actor。</p>
+
+  <h3>7.4 低通滤波写进了 replay，但没有写进 actor</h3>
+  <p><code>use_actions_filter: true</code>，截止 5&nbsp;Hz，<code>action_lpf_dt</code> 为空则用 1/30&nbsp;s。一阶滤波系数大约 0.5，指令被明显抹平。<code>send_action</code> 返回的是滤波后的 7 维，replay 的 <code>action_chunk</code> 是这个值。Critic 学的是 Q(s, a_filtered)。Actor loss 最大化的是 Q(s, μ_raw)。部署时滤波又加在 μ 之后。三处动作不是同一个量。接触任务上，这个偏差会把 Q 的改进方向指偏。</p>
+
+  <h2>8. 实现里没有错的部分</h2>
+  <div class="card">
+    <p><span class="tag ok">一致</span> <code>delta_chunk</code> 的定义在训练和 <code>ActorService</code> 之间是对齐的：绝对关节目标减去当前 proprio 的前 6 维，夹爪保持绝对量，再用同一份 q01/q99 归一化；部署时先归一化 ref，再把网络输出反归一化加回 proprio。</p>
+    <p><span class="tag ok">一致</span> Twin critic 的 TD 用 <code>min(Q1, Q2)</code>，target critic 有 soft update。窗口内奖励折扣和 <code>γ^{actual_steps}</code> 的 bootstrap 在公式上自洽。</p>
+    <p><span class="tag ok">一致</span> full_task 在 critical 开始前丢弃 transition，和“只在关键段做 RL”的设定一致。默认奖励函数返回的是长度等于执行步数的数组，成功的 +1 只写在最后一步，没有被广播成整块都是 1。</p>
+    <p><span class="tag ok">一致</span> 参考 dropout 只在训练时把整条 ref 置零，推理不 dropout。这不是 bug；在当前 BC 权重下，它的作用是强迫网络在看不见 ref 时也重建 VLA，进一步减弱“利用 ref 做小修正”的能力。</p>
+  </div>
+
+  <h2>9. 按这个顺序改</h2>
+  <p>先让执行和信用分配成立，再谈损失权重。否则调 BC/Q 只是在一条执行不出来的策略上移动数字。</p>
+  <ol class="fixes">
+    <li><strong>把 RL 阶段的队列长度做到大于推理延迟。</strong>在 30&nbsp;Hz 下，若一次 VLA+actor 需要 T 秒，入队长度应大于 <code>ceil(30T) + 余量</code>，补队列阈值应小于入队长度、并大于 <code>s + d</code>。以 T≈0.4&nbsp;s 估算，RL 入队至少 20–30 步，阈值大约 15，而不是入队 10、阈值 25。或者 RL 阶段关闭 RTC 引导（恢复被注释的 <code>and not uses_rl</code>），并且不要在队列短于推理时间时异步重规划。改完后日志里 RL 阶段不应再出现同步 refill 把控制循环堵住。</li>
+    <li><strong>把折扣从“每个 30&nbsp;Hz 步 γ=0.99”改成能覆盖 critical 段的尺度。</strong>可选：控制步 γ 提到 0.999（时间常数约 33 秒），或只在 chunk 边界折扣一次，或在 critical 段加进度型稠密奖励。现在这种只在人工成功时给 +1 的设定，只能塑造最后约 3 秒。</li>
+    <li><strong>把 online 的 BC 降到不再淹没 Q。</strong>Warmup 可以继续用 sum 和权重 2 去贴 VLA。Online 把 <code>online_bc_weight</code> 降到 0.05–0.2，或把 reduction 改成 mean，并打开 <code>bc_imitate_human</code>。打开 yaml 里已经写好的 stratified 采样（近期 online、human 的比例），否则 1200 条以上的 warmup 会把在线样本冲掉。训练 rollout 在一段时间内用小的固定标准差采样，评估仍用确定性均值。</li>
+    <li><strong>让 replay 的 ref 等于当时 actor 真正看见的 ref。</strong>Anchor 上已经缓存了当次 plan 的 <code>start_features</code>，dense 窗口不要再无 RTC 地重问 Machine A；做不到就暂时把 <code>step_trace_stride</code> 设为 0，只用 chunk 边界。补上干预行替换执行动作，让失败的测试通过。BC 目标与部署条件必须是同一次推理的 ref。</li>
+    <li><strong>把 target actor 用进 TD 目标，并让 actor loss 与部署使用同一个动作。</strong><code>build_td_target</code> 改为 <code>target_actor_params</code>。Actor loss 里对 μ 做与 <code>ActorService</code> 相同的 [-1, 1] clip 再送进 Q。低通要么关到成功率稳定之后，要么在算 Q(s, μ) 时用同一套滤波，使 replay、损失和 <code>send_action</code> 三者一致。</li>
+    <li><strong>acc/jerk 先降回 OpenPI 的 100，或在 online 阶段设为 0。</strong>权重 300 作用在绝对关节角的二阶、三阶差分上，专门惩罚 actor 相对 VLA 的拐弯。在 Q 还没有足够大的修正之前，这项只会帮着 BC 把策略按回参考轨迹。</li>
+  </ol>
+
+  <h2>10. 改完后看什么，才算这条分析被验证</h2>
+  <table>
+    <thead><tr><th>信号</th><th>现在的预期</th><th>改对之后</th></tr></thead>
+    <tbody>
+      <tr><td><code>bc_penalty</code> 相对 <code>weighted_q</code></td><td>BC 主导，actor 与 ref 的归一化误差接近 0</td><td>online 阶段允许稳定的非零偏差，且偏差落在 q01–q99 内</td></tr>
+      <tr><td>按 step_id 分桶的 <code>target_q_mean</code></td><td>只有最后几秒非零</td><td>critical 段前半也有随成功/失败分开的值</td></tr>
+      <tr><td>RL 阶段 RTC 日志的 <code>real_delay</code> 与入队长度</td><td>delay ≥ 10 时 end queue_size 经常为 0</td><td>队列在控制周期内不空，无同步堵转</td></tr>
+      <tr><td><code>sample_human_intervention_ratio</code> / <code>sample_recent_online_ratio</code></td><td>uniform 下接近 buffer 里的自然比例，warmup 占多数</td><td>分层采样后近期与人工样本占到设定比例</td></tr>
+      <tr><td>干预测试</td><td>失败</td><td><code>ref_chunk</code> 的干预行等于执行动作</td></tr>
+    </tbody>
+  </table>
+  <p>在第 9 节的前三项落地之前，继续加 <code>grad_updates_per_cycle</code> 或加长 warmup，只会把当前这个 VLA 克隆训得更稳，不会提高螺丝分拣的成功率。</p>
+</main>
+</body>
+</html>

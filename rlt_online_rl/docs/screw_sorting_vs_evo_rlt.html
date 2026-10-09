@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>screw_sorting 与 Evo-RLT 逐项对照</title>
+<style>
+  :root {
+    --bg: #f6f4ef; --paper: #fffdf8; --ink: #1c1915; --muted: #5c564c; --line: #e4ddd0;
+    --yes: #1f5c45; --yesbg: #e5f2eb; --no: #8f2d2d; --nobg: #f8e8e4;
+    --same: #8a5a12; --samebg: #f8f0dc; --part: #2f4c6e; --partbg: #e7eef6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.65 "Iowan Old Style", Palatino, "Songti SC", "Noto Serif SC", serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 48px 28px 80px; }
+  h1 { font-size: 30px; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 22px; margin: 40px 0 12px; border-top: 1px solid var(--line); padding-top: 16px; }
+  h3 { font-size: 18px; margin: 26px 0 8px; }
+  p { margin: 0 0 12px; }
+  .meta { color: var(--muted); font-size: 14px; margin-bottom: 22px; }
+  .lead { background: var(--paper); border: 1px solid var(--line); border-left: 4px solid var(--yes);
+    padding: 16px 18px; margin: 0 0 20px; }
+  table { width: 100%; border-collapse: collapse; background: var(--paper); font-size: 14.5px; margin: 12px 0 18px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { background: #f3efe6; }
+  code, pre { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; }
+  code { background: #f3efe6; padding: 1px 4px; }
+  pre { background: #241f1a; color: #f4efe6; padding: 12px 14px; overflow-x: auto; }
+  .tag { display: inline-block; font-family: ui-monospace, monospace; font-size: 11px;
+    letter-spacing: 0.03em; padding: 1px 6px; border-radius: 3px; }
+  .yes { color: var(--yes); background: var(--yesbg); }
+  .no { color: var(--no); background: var(--nobg); }
+  .same { color: var(--same); background: var(--samebg); }
+  .part { color: var(--part); background: var(--partbg); }
+  .card { background: var(--paper); border: 1px solid var(--line); padding: 12px 16px; margin: 10px 0 16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Evo-RLT 解决了这些问题吗</h1>
+  <p class="meta">对照仓库 <code>/home/xlk/work/Evo-RLT</code>（不是 <code>/home/xlk/EVO-RLT</code>）。螺丝任务配置是 <code>src/evo_rlt/core/configs/ac_paper_screw.yaml</code>，损失在 <code>src/evo_rlt/core/losses.py</code>，部署在 <code>adapters/lerobot/policies/modeling_rlt_ac.py</code>。</p>
+
+  <div class="lead">
+    <p>Evo-RLT 能把成功率拉上去，不是因为上次列出的实现问题它都修过了。折扣、target actor、动作 clip、RL 阶段 10 步队列、RTC 用旧观测，两边是同一套。它涨成功率，是因为 BC 模仿的是人成功的动作块，而且训练按桶混合抽样。当前 openpi 配置的 BC 模仿的是 VLA，人的动作进不了这个目标。</p>
+  </div>
+
+  <h2>总表</h2>
+  <table>
+    <thead>
+      <tr><th>上次的问题</th><th>Evo-RLT</th><th>对成功率的含义</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>BC 权重把 actor 钉在 VLA 上</td>
+        <td><span class="tag part">目标不同</span></td>
+        <td>公式一样，甚至 paper/best 的 β 不比 openpi 小。人的块会先把 ref 换成执行动作，BC 才变成模仿人</td>
+      </tr>
+      <tr>
+        <td>γ=0.99 按控制步折扣，信用只有约 3 秒</td>
+        <td><span class="tag same">没解决</span></td>
+        <td>同一公式。Evo 靠 BC 模仿人，不靠长视野 Q</td>
+      </tr>
+      <tr>
+        <td>RL 入队 10 步，延迟和阈值让队列变空</td>
+        <td><span class="tag same">没解决</span></td>
+        <td>RL 同样只入队 <code>chunk_length=10</code>。collect 默认阈值 30，比 10 更大，一样会立刻重推理</td>
+      </tr>
+      <tr>
+        <td>不探索、均匀采样、不模仿人</td>
+        <td><span class="tag part">采样和模仿解决了</span></td>
+        <td>部署仍是确定性均值。探索不是它涨点的原因。分桶采样和 ref 替换才是</td>
+      </tr>
+      <tr>
+        <td>TD 用在线 actor，target actor 空转</td>
+        <td><span class="tag same">没解决</span></td>
+        <td><code>critic_loss</code> 里下一动作来自当前 <code>actor.forward</code>，没有 target actor</td>
+      </tr>
+      <tr>
+        <td>干预步不改 ref</td>
+        <td><span class="tag yes">离线路径解决了</span></td>
+        <td>整块替换，不是逐行。在线 collector 本身不替换</td>
+      </tr>
+      <tr>
+        <td>stride=2 回填的 ref 不是 RTC 当时的 ref</td>
+        <td><span class="tag same">没解决</span></td>
+        <td>离线 <code>frame_stride</code> 默认也是 2，<code>encode_observation</code> 不带 RTC leftover</td>
+      </tr>
+      <tr>
+        <td>推理 clip，actor loss 不 clip</td>
+        <td><span class="tag same">没解决</span></td>
+        <td>部署 <code>clamp(-1, 1)</code>，actor loss 的 μ 不夹。差别是两边都在同一套分位数空间里</td>
+      </tr>
+      <tr>
+        <td>低通写进 replay，Q 打在滤波前</td>
+        <td><span class="tag yes">没有这个问题</span></td>
+        <td>Evo 的学习动作就是预处理后的执行动作，没有第二套 5 Hz 低通</td>
+      </tr>
+      <tr>
+        <td>acc/jerk 权重 300</td>
+        <td><span class="tag yes">没有这项</span></td>
+        <td>actor loss 只有 <code>-Q + β·BC</code></td>
+      </tr>
+      <tr>
+        <td>异步 RTC 用触发时的观测</td>
+        <td><span class="tag same">没解决</span></td>
+        <td><code>_prepare_rtc_request</code> 同样把当时的 batch 克隆给 worker</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>1. BC 钉死 VLA：Evo 没把权重降下来，它换了目标</h2>
+  <p>Evo 的 actor 损失和 openpi 是同一类：</p>
+  <pre>bc_reg = ((mu - ref) ** 2).sum(dim=-1).mean()
+return -q.mean() + beta * bc_reg</pre>
+  <p>螺丝 yaml 里 <code>training.beta: 1.0</code>。<code>ac_best_v3.yaml</code> 的 β 是 5.0。策略类默认值是 0.3。openpi 是 <code>2·BC − 1·Q</code>，相对 Q 的 BC 系数是 2。所以“Evo 能涨是因为 BC 更弱”不成立：成功配置的 β 可以比 openpi 更大。</p>
+  <p>差别在 ref 是什么。离线建桶时：</p>
+  <pre># human_expert: 整块 ref_chunk = exec_chunk
+# rl_rollout: 这一块里人的帧占优，才整块替换
+t.ref_chunk = t.exec_chunk.clone()
+t.next_ref_chunk 在下一块也被替换时跟着改</pre>
+  <p>替换之后，很大的 BC 项把 actor 拉向人成功执行的块，而不是 VLA。openpi 的 <code>bc_imitate_human: false</code>，并且 <code>_build_transition_from_window</code> 不改 ref，测试 <code>test_replay_replaces_intervened_ref_steps_with_executed_action</code> 失败。同样大的 BC，在 openpi 里是在复制 VLA。</p>
+  <p>粒度也不一样。Evo 是整块投票后整块替换。openpi 的测试要求按步替换。人只接管了 10 步里的少数几步时，Evo 的 <code>_dominant_is_human</code> 不会替换，BC 仍对 VLA。</p>
+  <p>在线采集路径 <code>RLTOnlineCollector</code> 不替换。它把 <code>encode_replay_observation</code> 得到的 VLA ref 原样存进去，只打 intervention 标记。若只靠在线 buffer、不走 <code>build_bucket_cache</code>，Evo 也会出现“BC 仍对 VLA”。它能涨，走的是离线三桶这条路径。</p>
+
+  <h2>2. 折扣：没解决，而且公式相同</h2>
+  <p><code>rewards.py</code> 的 <code>build_reward_seq</code> 同样只在成功 episode 的最后有效步写 1，其余为 0。<code>critic_loss</code> 用 <code>γ^t</code> 折 chunk 内奖励，再用 <code>γ^{actual_steps}</code> bootstrap，<code>gamma: 0.99</code>。30 Hz 下有效视野仍约 3.3 秒。</p>
+  <p>因此 Evo 的成功率上升不能当成“0.99 的逐步折扣够用”的证据。Q 只塑造靠近结束的那几秒；更前面的改进来自对人的块的 BC。</p>
+
+  <h2>3. RL 的 10 步队列：没解决</h2>
+  <p><code>ac_paper_screw.yaml</code> 是 <code>vla_horizon: 50</code>、<code>chunk_length: 10</code>。RL 阶段 <code>RLTActionModifier.compute_chunk</code> 只返回并入队前 10 步。VLA 阶段入队 <code>chunk_exec_steps</code>，配置默认 25。collect 命令默认 <code>--vla-rtc-execution-horizon=25</code>，<code>--rtc-action-queue-size-to-get-new-actions=30</code>，RL 的 execution horizon 默认 10。</p>
+  <p>阈值 30 大于 RL 队列长度 10，所以 RL 阶段每次 pop 之后都会再起一次推理，和 openpi 阈值 25 的行为相同。<code>ActionQueue</code> 同样丢掉新块的前 <code>real_delay</code> 步。推理一旦超过约 0.33 秒，10 步会被吃光。</p>
+  <p>两处和 openpi 不同，但都不是“把队列加长到能盖住延迟”：</p>
+  <div class="card">
+    <p>Evo 的引导延迟 <code>d</code> 来自延迟追踪器的最大值，<code>ceil(max_latency / (1/fps))</code>，不是写死的 7。openpi 的 <code>rtc_inference_delay: 7</code> 会在真实延迟更小时仍把前缀锁 7 步。</p>
+    <p>openpi 把 VLA 放在独立 websocket 进程里，RL 阶段还要再打一次 actor HTTP。Evo 在同一个 policy 里跑 pi0.5 和 actor。同样的 10 步预算，openpi 更容易把队列打空。这能解释“同一套 RTC 设计，Evo 上还能动、openpi 上 RL 段发顿”，但不能说 Evo 修掉了这个结构问题。</p>
+  </div>
+  <p>openpi 里被注释掉的 <code>and not uses_rl</code> 想在 RL 阶段关掉 VLA 引导。Evo 没有这条：RL 阶段仍把 leftover 和 <code>d</code> 送进 pi0.5（<code>_rtc_config_for_phase</code> 只是换一份 horizon=10 的 RTCConfig）。当前 openpi 的 <code>rtc_vla_guidance: true</code> 和 Evo 一致。</p>
+
+  <h2>4. 探索和采样</h2>
+  <p>部署两边都是确定性均值。Evo <code>deterministic: true</code>，<code>compute_chunk</code> 用 <code>training=False</code> 的均值再 clamp。<code>fixed_std</code> 是 0.05，openpi 是 0.002，但损失和部署都不用这个噪声。探索不是 Evo 涨点的原因。</p>
+  <p>采样不同。Evo 有 <code>WeightedMixReplayBuffer</code>，按桶的固定比例抽 warmup VLA、human expert、RL rollout。openpi 的 stratified 比例在 yaml 里被注释掉，实际是 uniform，warmup 的 VLA 轨迹会占满 batch。</p>
+
+  <h2>5. target actor：没解决</h2>
+  <p>Evo 的 <code>critic_loss</code> 在 <code>torch.no_grad()</code> 里调用当前 actor 得到 <code>mu_next</code>，再送进 <code>target_critic</code>。代码里没有 target actor。soft update 只作用于 critic。和 openpi 把 <code>state.actor_params</code> 传进 <code>build_td_target</code>、同时维护一份从不读取的 <code>target_actor_params</code> 是同一类偏差。这不是两边成功率差异的来源。</p>
+
+  <h2>6. stride=2 的 ref 与 RTC 不一致：没解决</h2>
+  <p><code>OfflineRLConfig.frame_stride</code> 默认 2，和 openpi 的 <code>step_trace_stride: 2</code> 一样会做重叠窗口。每个 anchor 上 <code>policy.encode_observation</code> 是一次不带 <code>prev_chunk_left_over</code> 的 VLA 前向。在线回放的 <code>encode_replay_observation</code> 同样不传 RTC 参数，而且只在 chunk 起点编码，整个块的动作都相对这个锚点状态做预处理。</p>
+  <p>Evo 没有把“训练 ref = 部署当时那条 RTC ref”做对。它减少伤害的办法是：人的块随后用执行动作覆盖 ref，BC 不再依赖那条开环 VLA。</p>
+
+  <h2>7. clip、低通、acc/jerk、动作空间</h2>
+  <p>Actor loss 不夹 μ，部署夹到 [-1, 1]，TD 目标里的下一动作会夹。这三点 Evo 和 openpi 相同。</p>
+  <p>空间不同，所以同样的 clip 在 Evo 里伤害小。Evo 的 actor 直接活在 pi0.5 的分位数归一化动作里，和 VLA 输出、机器人预处理是同一套 <code>STATE/ACTION = QUANTILES</code>。clip 到 [-1, 1] 就是 VLA 自己的范围。openpi 在绝对关节之外又做了一次 <code>delta_chunk</code>，用另一份 <code>norm_stats_delta.json</code>。夹爪 q99 只有约 0.028 m，重置位姿第七维是 0.09。超出 q99 的指令归一化后远大于 1，部署 clip 会把它压回 q99，BC 却在归一化空间里追那个很大的目标。这是 openpi 多出来的一层，Evo 没有。</p>
+  <p>Evo 没有 5 Hz 低通，也没有 acc/jerk 项。openpi 的 <code>use_actions_filter: true</code> 和 <code>delta_acc_weight/delta_jerk_weight: 300</code> 都会把 actor 往平滑的 VLA 轨迹上按。这两项 Evo 确实没有，等于已经避开。</p>
+
+  <h2>8. 异步 RTC 的旧观测：没解决</h2>
+  <p>Evo 的 worker 用的是 <code>_prepare_rtc_request</code> 在触发时克隆的 batch，不是推理开始时新拍的图像。和 openpi 不传 <code>observation_fn</code> 相同。</p>
+
+  <h2>9. 要对齐 Evo 的成功机制，改什么</h2>
+  <p>不要先去抄 Evo 也没修的部分（γ、target actor、10 步队列、旧观测）。先让 BC 的目标和 Evo 的离线桶一致：</p>
+  <div class="card">
+    <p>人接管占优的块，把 <code>ref_chunk</code> 整块换成 <code>action_chunk</code>，并改写指向下一块的 <code>next_ref_chunk</code>。对应 Evo 的 <code>build_bucket_cache.py</code>。openpi 现在既没有这段替换，<code>bc_imitate_human</code> 又是 false。</p>
+    <p>按桶采样，而不是 uniform。Evo 的 <code>WeightedMixReplayBuffer</code> 固定 warmup / human / rollout 的比例。openpi yaml 里那组 <code>sample_strategy: stratified</code> 就是这件事，目前被注释掉了。</p>
+    <p>不要在 online 阶段再加 acc/jerk 300 和 5 Hz 低通，除非部署、replay、Q 三者用同一个滤波后的动作。Evo 的损失里没有这些项。</p>
+    <p>动作保持在和 VLA 相同的分位数空间里。若继续用 <code>delta_chunk</code>，先核对夹爪和各关节的 q01/q99 是否盖住真实指令；盖不住时，clip 和 BC 会互相打架。Evo 没有第二套统计量。</p>
+    <p>RL 队列长度仍然应该大于实测推理延迟。Evo 没修这个，只是它的 VLA 和 actor 在同一进程里，延迟更可能落在 10 步以内。openpi 的 websocket 往返更大，固定 <code>d=7</code> 会让同样的 10 步更不够用。把 <code>d</code> 改成实测延迟，并把 RL 入队加长，是 openpi 相对于 Evo 必须多做的一步。</p>
+  </div>
+</main>
+</body>
+</html>

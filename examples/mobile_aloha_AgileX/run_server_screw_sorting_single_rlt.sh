@@ -8,15 +8,7 @@ uv run scripts/server_rlt_policy.py \
     --default_prompt 'Please sort and return the silver screws in the grey box to their proper places.' \
     --checkpoint_dir '/home/xlk/work/openpi/checkpoints/pi05_cobot/pi05_cobot_screw_sorting_single_two_staged_rlt/pi05_cobot_screw_sorting_single_two_staged_rlt/9999' \
     --config pi05_cobot_screw_sorting_single_two_staged_rlt \
-    --rtc-warmup-s 25 10 \
-    --rtc-warmup-d 6 7 8
+    --rtc-warmup-s 20 10 \
+    --rtc-warmup-d 7 8 9
 
 
-# uv run scripts/server_rlt_policy.py \
-#     --port 8000 \
-#     --shared_prefix_inference \
-#     --default_prompt 'Please sort and return the silver screws in the grey box to their proper places.' \
-#     --checkpoint_dir '/home/xlk/work/openpi/checkpoints/pi05_cobot_screw_sorting_single_two_staged_rlt/pi05_cobot_screw_sorting_single_two_staged_rlt/9999' \
-#     --config pi05_cobot_screw_sorting_single_two_staged_rlt \
-#     --rtc-warmup-s 25 10 \
-#     --rtc-warmup-d 6 7 8

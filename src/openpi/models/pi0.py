@@ -459,11 +459,11 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         prev_action: _model.Actions = None,  # shape (b, ah, ad)
-        s: int = 25,
-        d: int = 6,  # for 50hz d = 12
+        s: int = 20,
+        d: int = 7,  # for 50hz d = 12
         beta: float = 10.0,
         sigma: float = 0.2,
-        training_rtc: bool = True,  # pyright: ignore[reportUndefinedVariable]
+        training_rtc: bool = False,  # pyright: ignore[reportUndefinedVariable]
     ) -> _model.Actions:
         # training_rtc pins the first d steps of prev_action at flow time 0, matching
         # RTC-SFT training. Default False keeps the original guidance RTC.
