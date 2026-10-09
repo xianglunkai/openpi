@@ -9,6 +9,7 @@ from rlt_online_rl.networks import PyTree
 from rlt_online_rl.networks import TwinCritic
 from rlt_online_rl.networks import build_td_target
 from rlt_online_rl.networks import l2c2_mix_alpha
+from rlt_online_rl.networks import resolve_credit_gamma
 from rlt_online_rl.networks import mean_squared_l2
 from rlt_online_rl.networks import mix_between
 
@@ -45,7 +46,11 @@ def compute_critic_loss(
         rewards,
         done,
         actual_steps,
-        gamma=rl_config.gamma,
+        gamma=resolve_credit_gamma(
+            gamma=rl_config.gamma,
+            control_frequency_hz=rl_config.control_frequency_hz,
+            credit_horizon_sec=rl_config.credit_horizon_sec,
+        ),
         action_clip_min=rl_config.action_clip_min,
         action_clip_max=rl_config.action_clip_max,
         target_q_clip=rl_config.target_q_clip,

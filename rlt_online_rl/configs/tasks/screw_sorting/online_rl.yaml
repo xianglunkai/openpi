@@ -11,6 +11,8 @@ experiment:
     action_norm_stats_path: configs/tasks/screw_sorting/stats/norm_stats_delta.json
 
     gamma: 0.99
+    # Overrides gamma: 1/(1-γ) = 30 Hz * 5 s = 150 control steps.
+    credit_horizon_sec: 3.0
     fixed_std: 0.002
     reference_dropout_prob: 0.5
     bc_reduction: sum
@@ -30,10 +32,9 @@ experiment:
     warmup_q_weight: 1.0
     online_bc_weight: 2.0
     online_q_weight: 1.0
-    # Phased ablations. Enable one extra stage at a time; restart the learner.
-    # Stage 1 (this run): HUMAN/MIXED steps BC to executed action. Actor still sees VLA ref.
-    #   Set false to restore the previous "BC always to VLA" run.
-    bc_imitate_human: false
+    # HUMAN/MIXED steps BC to the executed action. Replay also overwrites those
+    # ref rows with the executed action, so the actor input matches the target.
+    bc_imitate_human: true
 
     actor_hidden_dim: 256
     actor_num_layers: 2
@@ -47,7 +48,7 @@ experiment:
 
     warmup_min_size: 1200
     warmup_post_collect_updates: 30000
-    freeze_after_warmup: false
+    freeze_after_warmup: true
     grad_updates_per_cycle: 5
 
 runtime:
@@ -77,7 +78,7 @@ runtime:
     bind_host: 127.0.0.1
     port: 9102
     seed: 0
-    # Stage 2 (after Stage 1): stratified mix so warmup does not dominate the batch.
+    # Fixed mix so warmup VLA rows do not dominate the batch.
     # sample_strategy: stratified
     # recent_episode_window: 30
     # recent_online_ratio: 0.4
@@ -108,16 +109,16 @@ runtime:
     - 0.09
     actor_deterministic: true
     # Paper screw vla_horizon=50; RL chunk_length=10 (Evo ac_paper_screw.yaml).
-    vla_chunk_exec_horizon: 50
+    vla_chunk_exec_horizon: 32
     rl_chunk_exec_horizon: null
     # RTC defaults match Evo-RLT ``record collect`` CLI.
     use_rtc: true
     rtc_vla_guidance: true
-    rtc_execution_horizon_vla: 20
+    rtc_execution_horizon_vla: 10
     rtc_execution_horizon_rl: 10
     # null → latency tracker (skips first samples / JIT); set int for a fixed JIT ``d``.
-    rtc_inference_delay: 7
-    action_queue_size_to_get_new_actions: 25
+    rtc_inference_delay: 9
+    action_queue_size_to_get_new_actions: 22
     control_frequency_hz: 30.0
     step_trace_stride: 2
     replay_feature_batch_size: 16

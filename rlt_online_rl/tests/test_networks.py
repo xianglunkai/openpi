@@ -17,6 +17,7 @@ from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import TwinCritic
 from rlt_online_rl.networks import apply_reference_dropout
 from rlt_online_rl.networks import compute_actor_loss
+from rlt_online_rl.networks import resolve_credit_gamma
 from rlt_online_rl.critic_loss import compute_critic_loss
 
 
@@ -54,6 +55,12 @@ def test_twin_critic_output_shape() -> None:
     q1, q2 = critic.q_values(params, z, proprio, action)
     assert q1.shape == (6,)
     assert q2.shape == (6,)
+
+
+def test_credit_horizon_sets_five_second_discount_at_30hz() -> None:
+    gamma = resolve_credit_gamma(gamma=0.99, control_frequency_hz=30.0, credit_horizon_sec=5.0)
+    assert abs(gamma - (1.0 - 1.0 / 150.0)) < 1e-12
+    assert resolve_credit_gamma(gamma=0.99, control_frequency_hz=30.0, credit_horizon_sec=None) == 0.99
 
 
 def test_reference_dropout_zeroes_entire_chunk() -> None:

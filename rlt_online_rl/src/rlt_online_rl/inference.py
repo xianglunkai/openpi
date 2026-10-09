@@ -1491,11 +1491,15 @@ class EnvDriver:
         source_chunk = np.asarray([int(step.source) for step in window_steps], dtype=np.uint8)
         source, intervention = self._resolve_window_source(window_steps)
         actual_steps = len(window_steps)
+        ref_chunk = self._replace_intervened_ref_rows(
+            np.asarray(current_payload["ref_chunk"], dtype=np.float32),
+            window_steps,
+        )
 
         return RLTTransition(
             z_rl=np.asarray(current_payload["z_rl"], dtype=np.float32),
             proprio=np.asarray(current_payload["proprio"], dtype=np.float32),
-            ref_chunk=np.asarray(current_payload["ref_chunk"], dtype=np.float32),
+            ref_chunk=ref_chunk,
             action_chunk=action_chunk,
             rewards=rewards,
             done=bool(any(step.done for step in window_steps) or last_step.done),
@@ -1511,6 +1515,22 @@ class EnvDriver:
             step_id=int(first_step.step_id),
             actual_steps=actual_steps,
         )
+
+    @staticmethod
+    def _replace_intervened_ref_rows(ref_chunk: np.ndarray, window_steps: list[RawEpisodeStep]) -> np.ndarray:
+        """Overwrite VLA reference rows with the executed action on human steps.
+
+        Matches the paper / Evo replay rule and
+        ``test_replay_replaces_intervened_ref_steps_with_executed_action``:
+        only intervened rows change. ``next_ref_chunk`` stays the VLA reference
+        at the bootstrap state.
+        """
+        replaced = np.array(ref_chunk, dtype=np.float32, copy=True)
+        for index, step in enumerate(window_steps[: replaced.shape[0]]):
+            if int(step.source) == int(TransitionSource.HUMAN) or bool(step.intervention_flag):
+                action = np.asarray(step.action, dtype=np.float32).reshape(-1)
+                replaced[index] = action[: replaced.shape[-1]]
+        return replaced
 
     @staticmethod
     def _resolve_window_source(window_steps: list[RawEpisodeStep]) -> tuple[int, bool]:

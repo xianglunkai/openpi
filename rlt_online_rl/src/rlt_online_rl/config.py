@@ -24,6 +24,9 @@ class RLTOnlineRLConfig:
     action_norm_stats_path: str | None = None
 
     gamma: float = 0.99
+    # If set, overrides ``gamma`` so the TD time constant 1/(1-γ) equals
+    # ``control_frequency_hz * credit_horizon_sec`` control steps.
+    credit_horizon_sec: float | None = None
     fixed_std: float = 0.05
     reference_dropout_prob: float = 0.5
     # BC penalty reduction: "sum" matches Evo-RLT / paper beta scaling over chunk dims.

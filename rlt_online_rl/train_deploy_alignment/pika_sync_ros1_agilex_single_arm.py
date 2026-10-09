@@ -1019,15 +1019,16 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
             else:
                 step_observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
 
+            # VLA keeps RTC. RL executes the actor chunk open-loop: a 10-step
+            # queue is shorter than one inference, and guided leftovers pin the
+            # reference the learner did not train on.
+            # if policy_enabled and policy_planner is not None and self._rtc is not None and not uses_rl:
             if policy_enabled and policy_planner is not None and self._rtc is not None:
-                # RL: async ActionQueue only — skip leftover-guided VLA (short C thrash / clamp d).
                 rtc_result = self._rtc.ensure_action(
                     observation=step_observation,
                     local_step=local_step,
                     planner=policy_planner,
-                    # use vla guidance if enabled and not using rl
                     use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance),
-                    # use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance) and not uses_rl,
                     execution_horizon=resolve_rtc_execution_horizon(
                         self._system.env_driver,
                         self._system.rl,

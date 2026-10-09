@@ -57,6 +57,8 @@ from rlt_online_rl.config import relativize_rl_config_paths
 from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import PyTree
 from rlt_online_rl.networks import TwinCritic
+from rlt_online_rl.networks import clamp_action_chunk
+from rlt_online_rl.networks import clip_actor_output_straight_through
 from rlt_online_rl.networks import compute_abs_chunk_acc_jerk_penalty
 from rlt_online_rl.networks import compute_delta_ref_match_penalty
 from rlt_online_rl.networks import l2c2_mix_alpha
@@ -534,6 +536,8 @@ def _custom_actor_loss(
     action_representation: str,
     bc_reduction: str,
     bc_imitate_human: bool,
+    action_clip_min: float,
+    action_clip_max: float,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Actor loss: L = w_bc*BC - w_q*Q + w_delta*||Δμ-Δref||² + acc/jerk + w_l2c2*L2C2.
 
@@ -562,8 +566,13 @@ def _custom_actor_loss(
     # Optional ablation: feed zeros so actor cannot rely on VLA ref at all.
     model_ref_input = jnp.zeros_like(dropped_ref) if disable_ref_input else dropped_ref  # (B, C, A)
 
-    # π_θ(z, proprio, ref) → action mean; Q_φ twin-min of that action.
-    action_chunk = actor.actor_mean(actor_params, z_rl, proprio, model_ref_input)  # (B, C, A)
+    # Same clip as ActorService: Q sees the deployed action; BC straight-through
+    # so a saturated mean can still move toward the target.
+    raw_action = actor.actor_mean(actor_params, z_rl, proprio, model_ref_input)  # (B, C, A)
+    action_chunk = clamp_action_chunk(raw_action, action_min=action_clip_min, action_max=action_clip_max)
+    bc_action = clip_actor_output_straight_through(
+        raw_action, action_min=action_clip_min, action_max=action_clip_max
+    )
     q = critic.min_q(critic_params, z_rl, proprio, action_chunk)  # (B,) or (B, 1)
 
     # --- 2) Per-step human vs policy mask for BC target selection ---
@@ -589,7 +598,7 @@ def _custom_actor_loss(
         bc_target = jnp.where(human_mask[..., None], behavior_chunk, ref_chunk)
     else:
         bc_target = ref_chunk
-    bc_error = jnp.square(action_chunk - bc_target)  # (B, C, A)
+    bc_error = jnp.square(bc_action - bc_target)  # (B, C, A)
     per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))  # (B,)
     if bc_reduction == "sum":
         bc_penalty = jnp.mean(per_sample_bc)  # ()  E[||μ - a_bc||_F^2]
@@ -601,8 +610,8 @@ def _custom_actor_loss(
 
     # --- 4) Split BC metrics (logging only; do not affect gradients via this path) ---
     # Compare μ to pure ref / pure behavior, then average over policy-only or human-only samples.
-    ref_error_squared = jnp.square(action_chunk - ref_chunk)  # (B, C, A)
-    human_error_squared = jnp.square(action_chunk - behavior_chunk)  # (B, C, A)
+    ref_error_squared = jnp.square(bc_action - ref_chunk)  # (B, C, A)
+    human_error_squared = jnp.square(bc_action - behavior_chunk)  # (B, C, A)
     per_sample_ref = jnp.sum(ref_error_squared, axis=(-2, -1))  # (B,)
     per_sample_human = jnp.sum(human_error_squared, axis=(-2, -1))  # (B,)
     if bc_reduction == "mean":
@@ -658,7 +667,11 @@ def _custom_actor_loss(
         mix_proprio = mix_between(proprio, next_proprio, alpha)
         mix_next_ref = jnp.zeros_like(next_ref_chunk) if disable_ref_input else next_ref_chunk
         mix_ref = mix_between(model_ref_input, mix_next_ref, alpha)
-        mix_action = actor.actor_mean(actor_params, mix_z, mix_proprio, mix_ref)
+        mix_action = clamp_action_chunk(
+            actor.actor_mean(actor_params, mix_z, mix_proprio, mix_ref),
+            action_min=action_clip_min,
+            action_max=action_clip_max,
+        )
         l2c2_penalty = mean_squared_l2(action_chunk, mix_action)
     actor_q = jnp.mean(q)  # ()
     weighted_bc = jnp.asarray(bc_weight, dtype=jnp.float32) * bc_penalty
@@ -704,7 +717,7 @@ def _update_critic(
             critic,
             critic_params,
             actor,
-            state.actor_params,
+            state.target_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],
@@ -816,6 +829,8 @@ def _make_train_step(
                     action_representation=rl_config.action_representation,
                     bc_reduction=rl_config.bc_reduction,
                     bc_imitate_human=rl_config.bc_imitate_human,
+                    action_clip_min=rl_config.action_clip_min,
+                    action_clip_max=rl_config.action_clip_max,
                 )
 
             (actor_loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(train_state.actor_params)

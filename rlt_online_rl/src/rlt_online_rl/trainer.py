@@ -24,6 +24,8 @@ from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import PyTree
 from rlt_online_rl.networks import TwinCritic
 from rlt_online_rl.networks import apply_reference_dropout
+from rlt_online_rl.networks import clamp_action_chunk
+from rlt_online_rl.networks import clip_actor_output_straight_through
 from rlt_online_rl.networks import compute_abs_chunk_acc_jerk_penalty
 from rlt_online_rl.networks import compute_delta_ref_match_penalty
 from rlt_online_rl.networks import l2c2_mix_alpha
@@ -155,7 +157,7 @@ def update_critic(
             critic,
             critic_params,
             actor,
-            state.actor_params,
+            state.target_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],
@@ -216,12 +218,24 @@ def update_actor(
             batch["ref_chunk"],
             rl_config.reference_dropout_prob,
         )
-        # π_θ(z, proprio, ref) → action mean; Q_φ twin-min of that action.
-        action_chunk = actor.actor_mean(
+        # π_θ(z, proprio, ref) → action mean. Q is scored on the same clip
+        # ActorService applies before denormalizing. BC uses a straight-through
+        # clip so the target is that deployed value while a saturated mean can move.
+        raw_action = actor.actor_mean(
             actor_params,
             batch["z_rl"],
             batch["proprio"],
             dropped_ref,
+        )
+        action_chunk = clamp_action_chunk(
+            raw_action,
+            action_min=rl_config.action_clip_min,
+            action_max=rl_config.action_clip_max,
+        )
+        bc_action = clip_actor_output_straight_through(
+            raw_action,
+            action_min=rl_config.action_clip_min,
+            action_max=rl_config.action_clip_max,
         )
         # Evo / TD3: maximize conservative twin-Q (min of Q1, Q2), not Q1 alone.
         q = critic.min_q(
@@ -258,7 +272,7 @@ def update_actor(
         # Squared error then sum over (C, A) → per-sample scalar, then mean over B.
         # bc_error: (B, C, A); per_sample_bc: (B,)
         # Example C=10,A=7: sum over 70 dims; "sum" reduction keeps that scale (Evo-RLT/paper β).
-        bc_error = jnp.square(action_chunk - bc_target)
+        bc_error = jnp.square(bc_action - bc_target)
         per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))
         if rl_config.bc_reduction == "sum":
             bc_penalty = jnp.mean(per_sample_bc)
@@ -269,8 +283,8 @@ def update_actor(
 
         # Compute BC metrics (logging only; do not affect gradients via this path)
         # Compare μ to pure ref / pure behavior, then average over policy-only or human-only samples.
-        ref_error_squared = jnp.square(action_chunk - batch["ref_chunk"])
-        human_error_squared = jnp.square(action_chunk - batch["action_chunk"])
+        ref_error_squared = jnp.square(bc_action - batch["ref_chunk"])
+        human_error_squared = jnp.square(bc_action - batch["action_chunk"])
         per_sample_ref = jnp.sum(ref_error_squared, axis=(-2, -1))
         per_sample_human = jnp.sum(human_error_squared, axis=(-2, -1))
         if rl_config.bc_reduction == "mean":
@@ -317,7 +331,11 @@ def update_actor(
             mix_z = mix_between(batch["z_rl"], batch["next_z_rl"], alpha)
             mix_proprio = mix_between(batch["proprio"], batch["next_proprio"], alpha)
             mix_ref = mix_between(dropped_ref, batch["next_ref_chunk"], alpha)
-            mix_action = actor.actor_mean(actor_params, mix_z, mix_proprio, mix_ref)
+            mix_action = clamp_action_chunk(
+                actor.actor_mean(actor_params, mix_z, mix_proprio, mix_ref),
+                action_min=rl_config.action_clip_min,
+                action_max=rl_config.action_clip_max,
+            )
             l2c2_penalty = mean_squared_l2(action_chunk, mix_action)
         actor_q = jnp.mean(q)
         # compute the weighted behavior cloning penalty，the penalty is the weight for the behavior cloning penalty

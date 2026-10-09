@@ -37,6 +37,14 @@ class EnvMode(enum.Enum):
     COBOT = "cobot"
     COBOT_REALTIME = "cobot_realtime"
     
+def _model_uses_training_rtc(model: Any) -> bool:
+    """True when this checkpoint was trained with RTC-SFT prefix pinning."""
+    if getattr(model, "rtc_max_delay", None) is not None:
+        return int(model.rtc_max_delay) > 0
+    config = getattr(model, "config", None)
+    return int(getattr(config, "rtc_max_delay", 0) or 0) > 0
+
+
 class Policy(BasePolicy):
     def __init__(
         self,
@@ -77,10 +85,14 @@ class Policy(BasePolicy):
             self._sample_actions = model.sample_actions
             self._guided_inference = model.guided_inference
         else:
-            # JAX model setup
+            # JAX model setup. training_rtc is a Python branch inside guided_inference.
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
-            self._guided_inference = nnx_utils.module_jit(model.guided_inference)
+            self._guided_inference = nnx_utils.module_jit(
+                model.guided_inference,
+                static_argnames=("training_rtc",),
+            )
             self._rng = rng or jax.random.key(0)
+        self._training_rtc = _model_uses_training_rtc(self._model)
 
     @override
     def infer(
@@ -126,6 +138,7 @@ class Policy(BasePolicy):
                 else:
                     prev_action = jnp.asarray(prev_action)
         
+            sample_kwargs["training_rtc"] = self._training_rtc
             origin_actions = self._guided_inference(
                 sample_rng_or_pytorch_device,
                 prev_action = prev_action,

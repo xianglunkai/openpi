@@ -30,6 +30,7 @@ import numpy as np
 
 from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import TwinCritic
+from rlt_online_rl.networks import resolve_credit_gamma
 
 """
 Analyze critic Q trajectories for one or more replay episodes.
@@ -588,7 +589,14 @@ def _evaluate_episode(
     rl_config = actor_cfg
     adapter = ActionRepresentationAdapter.from_config(rl_config)
     actor, critic = _build_models(rl_config)
-    annotations = _annotate_episode(episode_records, rl_config.gamma)
+    annotations = _annotate_episode(
+        episode_records,
+        resolve_credit_gamma(
+            gamma=rl_config.gamma,
+            control_frequency_hz=rl_config.control_frequency_hz,
+            credit_horizon_sec=rl_config.credit_horizon_sec,
+        ),
+    )
     q_payload = _predict_q_arrays(
         actor,
         critic,

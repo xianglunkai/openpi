@@ -101,7 +101,7 @@ class RLTInferenceModel(nnx.Module):
         observation: _model.Observation,
         *,
         prev_action: jnp.ndarray | None = None,
-        s: int = 25,
+        s: int = 20,
         d: int = 7,
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """RTC path: guided VLA chunk + RL token from the same observation prefix.
@@ -126,6 +126,8 @@ class RLTInferenceModel(nnx.Module):
             prev_action=prev_action,
             s=int(s),
             d=int(d),
+            # rtc_max_delay > 0 means this VLA was trained with prefix pinning.
+            training_rtc=int(self.vla.rtc_max_delay) > 0,
         )
         return actions, rl_token
 

@@ -463,10 +463,11 @@ class Pi0(_model.BaseModel):
         d: int = 7,  # for 50hz d = 12
         beta: float = 10.0,
         sigma: float = 0.2,
-        training_rtc: bool = False,  # pyright: ignore[reportUndefinedVariable]
+        training_rtc: bool = False,
     ) -> _model.Actions:
         # training_rtc pins the first d steps of prev_action at flow time 0, matching
-        # RTC-SFT training. Default False keeps the original guidance RTC.
+        # RTC-SFT training. Callers set this from Pi0Config.rtc_max_delay > 0.
+        # Default False keeps the original guidance RTC.
         # d is fixed: a shorter leftover must not compile a different prefix length.
         if training_rtc and prev_action is not None:
             delay = int(d)

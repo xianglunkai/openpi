@@ -145,7 +145,11 @@ def test_screw_sorting_yaml_enables_stage1_human_bc() -> None:
     path = ROOT / "configs" / "tasks" / "screw_sorting" / "online_rl.yaml"
     restored = load_system_config_yaml(str(path))
     assert restored.rl.bc_imitate_human is True
-    assert restored.replay.sample_strategy == "uniform"
+    assert restored.rl.credit_horizon_sec == 5.0
+    assert restored.replay.sample_strategy == "stratified"
+    assert restored.replay.recent_online_ratio == 0.4
+    assert restored.replay.warmup_demo_ratio == 0.3
+    assert restored.replay.human_intervention_ratio == 0.3
 
 
 def test_resolved_config_is_saved_next_to_checkpoints(tmp_path) -> None:

@@ -243,6 +243,46 @@ def clamp_action_chunk(
     return jnp.clip(action_chunk, action_min, action_max)
 
 
+def resolve_credit_gamma(
+    *,
+    gamma: float,
+    control_frequency_hz: float,
+    credit_horizon_sec: float | None,
+) -> float:
+    """Discount whose time constant matches ``credit_horizon_sec`` at the control rate.
+
+    ``1 / (1 - γ) = control_frequency_hz * credit_horizon_sec``. When
+    ``credit_horizon_sec`` is unset, ``gamma`` is returned unchanged.
+    """
+    if credit_horizon_sec is None:
+        return float(gamma)
+    horizon_sec = float(credit_horizon_sec)
+    hz = float(control_frequency_hz)
+    if horizon_sec <= 0.0 or hz <= 0.0:
+        raise ValueError(
+            f"credit_horizon_sec and control_frequency_hz must be positive, got {horizon_sec}, {hz}"
+        )
+    steps = hz * horizon_sec
+    if steps <= 1.0:
+        raise ValueError(f"credit horizon must cover more than one control step, got {steps} steps")
+    return 1.0 - 1.0 / steps
+
+
+def clip_actor_output_straight_through(
+    action_chunk: jax.Array,
+    *,
+    action_min: float,
+    action_max: float,
+) -> jax.Array:
+    """Forward value is the deployed clip; gradient treats the clip as identity.
+
+    ActorService clips before denormalizing. BC uses this so the regression
+    target is that deployed value, while a saturated mean can still move.
+    """
+    clipped = clamp_action_chunk(action_chunk, action_min=action_min, action_max=action_max)
+    return action_chunk + jax.lax.stop_gradient(clipped - action_chunk)
+
+
 def l2c2_mix_alpha(rng: jax.Array, done: jax.Array) -> jax.Array:
     """Sample α ∈ [-1, 1] for L2C2 state mixing; zero when the transition is terminal."""
     done_f = jnp.asarray(done, dtype=jnp.float32).reshape(-1)
