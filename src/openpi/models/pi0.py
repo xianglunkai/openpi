@@ -464,6 +464,7 @@ class Pi0(_model.BaseModel):
         beta: float = 10.0,
         sigma: float = 0.2,
         training_rtc: bool = False,
+        prefix_cache: PrefixInferenceCache | None = None,
     ) -> _model.Actions:
         # training_rtc pins the first d steps of prev_action at flow time 0, matching
         # RTC-SFT training. Callers set this from Pi0Config.rtc_max_delay > 0.
@@ -483,21 +484,28 @@ class Pi0(_model.BaseModel):
                     observation,
                     action_prefix=prev_action[:, :delay],
                     num_steps=num_steps,
+                    prefix_cache=prefix_cache,
                 )
 
-        observation = _model.preprocess_observation(None, observation, train=False)
-        
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
+        if prefix_cache is not None:
+            observation = prefix_cache.observation
+            prefix_mask = prefix_cache.prefix_mask
+            kv_cache = prefix_cache.kv_cache
+        else:
+            observation = _model.preprocess_observation(None, observation, train=False)
+            prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            positions = jnp.cumsum(prefix_mask, axis=1) - 1
+            _, kv_cache = self.PaliGemma.llm(
+                [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
+            )
+
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
         noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
-        
-        # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        prefix_len = prefix_mask.shape[1]
 
 
        # Extract RTC parameters from kwargs
@@ -540,8 +548,8 @@ class Pi0(_model.BaseModel):
         diag_W = make_W(inference_delay, execution_horizon, action_horizon)
 
         # Debug toggle (Python const → resolved at trace time):
-        #   False → identity Jacobian approx (current deploy default)
-        #   True  → true VJP through a1 = x - t*v  (LeRobot / PI Kinetix)
+        #   False → identity Jacobian approx 
+        #   True  → true VJP through a1 = x - t*v 
         use_rtc_vjp = False
 
         def denoise_step(x_t, time):
@@ -560,7 +568,7 @@ class Pi0(_model.BaseModel):
             assert full_attn_mask.shape == (
                 batch_size,
                 suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
+                prefix_len + suffix_tokens.shape[1],
             )
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
@@ -701,13 +709,28 @@ class Pi0(_model.BaseModel):
         action_prefix: at.Float[at.Array, "b d ad"],
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        prefix_cache: PrefixInferenceCache | None = None,
     ) -> _model.Actions:
         """Euler sample with a clean action prefix pinned at flow time 0.
 
         `action_prefix` is (B, d, action_dim) in the same padded model space as
         `sample_actions` outputs. This does not change `sample_actions`.
+        Optional ``prefix_cache`` skips a second prefix forward when the caller
+        already ran ``prepare_prefix_for_inference``.
         """
-        observation = _model.preprocess_observation(None, observation, train=False)
+        if prefix_cache is not None:
+            observation = prefix_cache.observation
+            prefix_mask = prefix_cache.prefix_mask
+            kv_cache = prefix_cache.kv_cache
+        else:
+            observation = _model.preprocess_observation(None, observation, train=False)
+            prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            positions = jnp.cumsum(prefix_mask, axis=1) - 1
+            _, kv_cache = self.PaliGemma.llm(
+                [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
+            )
+
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
         delay = action_prefix.shape[1]
@@ -715,11 +738,6 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
         if delay > 0:
             noise = noise.at[:, :delay].set(action_prefix)
-
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
 
         horizon_idx = jnp.arange(self.action_horizon)
 

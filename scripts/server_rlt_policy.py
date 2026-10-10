@@ -109,6 +109,7 @@ class RLTInferenceModel(nnx.Module):
         ``prev_action=None`` matches openpi ``Policy``: still calls ``guided_inference``,
         which falls back to the unguided ``step_normal`` branch internally.
         """
+        prefix_cache = None
         if self.shared_prefix_inference:
             prefix_cache = self.vla.prepare_prefix_for_inference(observation)
             prefix_f32 = prefix_cache.image_prefix_out.astype(jnp.float32)
@@ -128,6 +129,7 @@ class RLTInferenceModel(nnx.Module):
             d=int(d),
             # rtc_max_delay > 0 means this VLA was trained with prefix pinning.
             training_rtc=int(self.vla.rtc_max_delay) > 0,
+            prefix_cache=prefix_cache,
         )
         return actions, rl_token
 

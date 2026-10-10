@@ -9,6 +9,6 @@ uv run scripts/server_rlt_policy.py \
     --checkpoint_dir '/home/xlk/work/openpi/checkpoints/pi05_cobot/pi05_cobot_screw_sorting_single_two_staged_rlt/pi05_cobot_screw_sorting_single_two_staged_rlt/9999' \
     --config pi05_cobot_screw_sorting_single_two_staged_rlt \
     --rtc-warmup-s 20 10 \
-    --rtc-warmup-d 7 8 9
+    --rtc-warmup-d 7
 
 

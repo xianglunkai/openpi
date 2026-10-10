@@ -886,7 +886,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                 guided_inference_delay=system.env_driver.rtc_inference_delay,
             )
             logger.info(
-                "RTC enabled fps=%.1f vla_guidance=%s guided_d=%s",
+                "RTC enabled fps=%.1f vla_guidance=%s (RL phase forces guidance off) guided_d=%s",
                 float(system.env_driver.control_frequency_hz),
                 bool(system.env_driver.rtc_vla_guidance),
                 system.env_driver.rtc_inference_delay,
@@ -1019,16 +1019,16 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
             else:
                 step_observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
 
-            # VLA keeps RTC. RL executes the actor chunk open-loop: a 10-step
-            # queue is shorter than one inference, and guided leftovers pin the
-            # reference the learner did not train on.
-            # if policy_enabled and policy_planner is not None and self._rtc is not None and not uses_rl:
+            # Keep the RTC action queue for both phases (overlap hides inference
+            # latency). Only VLA uses guided leftover / training_rtc pin; RL must
+            # not — a 10-step actor chunk is shorter than one inference, and
+            # guided leftovers pin a ref distribution the learner did not train on.
             if policy_enabled and policy_planner is not None and self._rtc is not None:
                 rtc_result = self._rtc.ensure_action(
                     observation=step_observation,
                     local_step=local_step,
                     planner=policy_planner,
-                    use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance),
+                    use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance) and not uses_rl,
                     execution_horizon=resolve_rtc_execution_horizon(
                         self._system.env_driver,
                         self._system.rl,
