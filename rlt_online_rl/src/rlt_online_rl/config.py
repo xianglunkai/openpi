@@ -135,7 +135,9 @@ class EnvDriverConfig:
     control_frequency_hz: float = 30.0
     # Client-side RTC (ActionQueue + async refill). Shared queue for VLA/RL; reset on phase switch.
     use_rtc: bool = False
-    # Pass leftover actions into Machine A guided_inference (both VLA and RL phases).
+    # Pass leftover into Machine A guided_inference for the VLA phase only.
+    # RL still uses the RTC action queue when use_rtc=True, but with use_rtc=False
+    # on the feature request (no training_rtc pin / leftover guidance).
     rtc_vla_guidance: bool = True
     # Evo ``--vla-rtc-execution-horizon`` / ``--rtc-execution-horizon`` defaults (collect).
     rtc_execution_horizon_vla: int = 25
