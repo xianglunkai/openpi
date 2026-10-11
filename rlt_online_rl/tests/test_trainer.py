@@ -132,6 +132,21 @@ def test_soft_update_changes_target_params() -> None:
     assert any(not np.allclose(np.asarray(o), np.asarray(n)) for o, n in zip(leaves_old, leaves_new, strict=True))
 
 
+def test_td_bootstrap_actor_modes_run() -> None:
+    batch_np = None
+    for mode in ("online", "target"):
+        cfg = dataclasses.replace(_config(), td_bootstrap_actor=mode)
+        state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(3))
+        if batch_np is None:
+            batch_np = _batch(cfg)
+        batch = {k: jax.numpy.asarray(v) for k, v in batch_np.items()}
+        state, metrics = train_step(state, batch, actor=actor, critic=critic, rl_config=cfg)
+        assert np.isfinite(float(metrics["critic_loss"]))
+        state, metrics = train_step(state, batch, actor=actor, critic=critic, rl_config=cfg)
+        assert int(metrics["did_actor_update"]) == 1
+        assert np.isfinite(float(metrics["actor_loss"]))
+
+
 def test_target_critic_updates_without_actor_update() -> None:
     cfg = _config()
     state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(2))

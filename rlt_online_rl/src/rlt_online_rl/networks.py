@@ -398,7 +398,11 @@ def build_td_target(
     action_clip_max: float,
     target_q_clip: float,
 ) -> jax.Array:
-    """TD3-style chunk TD target with deterministic next action and actual-step bootstrap."""
+    """Chunk TD target with deterministic next action and actual-step bootstrap.
+
+    ``actor_params`` is either the online or Polyak target actor, selected by
+    ``RLTOnlineRLConfig.td_bootstrap_actor`` (Evo-RLT uses online).
+    """
     next_action = actor.actor_mean(actor_params, next_z_rl, next_proprio, next_ref_chunk)
     next_action = clamp_action_chunk(
         next_action,

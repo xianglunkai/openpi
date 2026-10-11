@@ -30,8 +30,11 @@ experiment:
     critic_lr: 0.0003
     target_tau: 0.005
     actor_update_period: 2
+    # online=Evo-RLT current actor; target=textbook TD3 target actor
+    td_bootstrap_actor: online
 
     warmup_min_size: 1000
     warmup_post_collect_updates: null
     freeze_after_warmup: false
+    # UTD ratio (Evo utd_ratio); not actor_update_period
     grad_updates_per_cycle: 5

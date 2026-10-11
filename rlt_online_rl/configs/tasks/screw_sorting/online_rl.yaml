@@ -30,7 +30,7 @@ experiment:
     l2c2_critic_weight: 0.0
     warmup_bc_weight: 3.0
     warmup_q_weight: 1.0
-    online_bc_weight: 3.0
+    online_bc_weight: 1.5
     online_q_weight: 1.0
     # HUMAN/MIXED steps BC to the executed action. Replay also overwrites those
     # ref rows with the executed action, so the actor input matches the target.
@@ -44,11 +44,15 @@ experiment:
     actor_lr: 0.0001
     critic_lr: 0.0001
     target_tau: 0.005
+    # Delayed actor update (Evo actor_update_interval). Not UTD.
     actor_update_period: 2
+    # Critic TD next-action source: online=Evo-RLT π_θ; target=TD3 π_θ⁻.
+    td_bootstrap_actor: online
 
     warmup_min_size: 1200
     warmup_post_collect_updates: 30000
-    freeze_after_warmup: true
+    freeze_after_warmup: false
+    # UTD: gradient steps per new replay transition (Evo utd_ratio).
     grad_updates_per_cycle: 5
 
 runtime:
@@ -79,11 +83,11 @@ runtime:
     port: 9102
     seed: 0
     # Fixed mix so warmup VLA rows do not dominate the batch.
-    # sample_strategy: stratified
-    # recent_episode_window: 30
-    # recent_online_ratio: 0.4
-    # warmup_demo_ratio: 0.3
-    # human_intervention_ratio: 0.3
+    sample_strategy: stratified
+    recent_episode_window: 30
+    recent_online_ratio: 0.4
+    warmup_demo_ratio: 0.3
+    human_intervention_ratio: 0.3
 
   env_driver:
     machine_a_ws_url: ws://0.0.0.0:8000

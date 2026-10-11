@@ -53,6 +53,9 @@ class RLTOnlineRLConfig:
     action_clip_max: float = 1.0
     target_q_clip: float = 100.0
     grad_clip_norm: float = 1.0
+    # Which actor produces a' in the critic Bellman target.
+    # "online" = current π_θ (Evo-RLT); "target" = Polyak π_θ⁻ (textbook TD3).
+    td_bootstrap_actor: Literal["online", "target"] = "online"
 
     actor_hidden_dim: int = 256
     actor_num_layers: int = 3
@@ -62,12 +65,13 @@ class RLTOnlineRLConfig:
     actor_lr: float = 3e-4
     critic_lr: float = 3e-4
     target_tau: float = 5e-3
+    # Delayed policy updates: update actor every N critic steps (Evo actor_update_interval).
     actor_update_period: int = 2
 
     warmup_min_size: int = 1_000
     warmup_post_collect_updates: int | None = None
     freeze_after_warmup: bool = False
-    # The paper reports a high update-to-data ratio of 5.
+    # Update-to-data (UTD) ratio: gradient steps per new replay transition (Evo utd_ratio=5).
     grad_updates_per_cycle: int = 5
 
 

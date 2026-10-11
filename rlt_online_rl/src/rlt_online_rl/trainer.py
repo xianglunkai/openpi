@@ -143,6 +143,16 @@ def _resolve_actor_loss_weights(
     return float(rl_config.online_bc_weight), float(rl_config.online_q_weight)
 
 
+def _td_bootstrap_actor_params(state: RLTTrainState, rl_config: RLTOnlineRLConfig) -> PyTree:
+    """Actor params used for a' in the critic TD target.
+
+    Evo-RLT uses the online actor; textbook TD3 uses the Polyak target actor.
+    """
+    if rl_config.td_bootstrap_actor == "target":
+        return state.target_actor_params
+    return state.actor_params
+
+
 def update_critic(
     state: RLTTrainState,
     batch: dict[str, jax.Array],
@@ -151,13 +161,14 @@ def update_critic(
     rl_config: RLTOnlineRLConfig,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
     critic_rng, next_rng = jax.random.split(state.rng)
+    bootstrap_actor_params = _td_bootstrap_actor_params(state, rl_config)
 
     def loss_fn(critic_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
         return compute_critic_loss(
             critic,
             critic_params,
             actor,
-            state.target_actor_params,
+            bootstrap_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],
@@ -447,6 +458,8 @@ def train_step(
             action_q01=action_q01,
             action_q99=action_q99,
         )
+        # Keep a Polyak actor copy for "target" bootstrap mode / checkpoints.
+        # Evo-RLT never consumes it when td_bootstrap_actor="online".
         target_actor = soft_update_targets(
             updated_state.target_actor_params, updated_state.actor_params, rl_config.target_tau
         )
