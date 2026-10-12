@@ -31,6 +31,9 @@ experiment:
     target_tau: 0.005
     actor_update_period: 2
 
+    # Critic TD next-action source: online=Evo-RLT π_θ; target=TD3 π_θ⁻.
+    td_bootstrap_actor: online
+
     warmup_min_size: 1000
     warmup_post_collect_updates: null
     freeze_after_warmup: false

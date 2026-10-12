@@ -712,12 +712,16 @@ def _update_critic(
     next_ref_chunk = jnp.zeros_like(batch["next_ref_chunk"]) if disable_ref_input else batch["next_ref_chunk"]
     critic_rng, next_rng = jax.random.split(state.rng)
 
+    bootstrap_actor_params = (
+        state.target_actor_params if rl_config.td_bootstrap_actor == "target" else state.actor_params
+    )
+
     def loss_fn(critic_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
         return compute_critic_loss(
             critic,
             critic_params,
             actor,
-            state.target_actor_params,
+            bootstrap_actor_params,
             state.target_critic_params,
             batch["z_rl"],
             batch["proprio"],

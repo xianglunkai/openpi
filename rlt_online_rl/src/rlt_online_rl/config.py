@@ -54,6 +54,10 @@ class RLTOnlineRLConfig:
     target_q_clip: float = 100.0
     grad_clip_norm: float = 1.0
 
+
+    # "online" = current π_θ (Evo-RLT); "target" = Polyak π_θ⁻ (textbook TD3).
+    td_bootstrap_actor: Literal["online", "target"] = "online"
+
     actor_hidden_dim: int = 256
     actor_num_layers: int = 3
     critic_hidden_dim: int = 256

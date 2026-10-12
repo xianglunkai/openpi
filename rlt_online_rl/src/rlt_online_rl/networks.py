@@ -398,7 +398,7 @@ def build_td_target(
     action_clip_max: float,
     target_q_clip: float,
 ) -> jax.Array:
-    """TD3-style chunk TD target with deterministic next action and actual-step bootstrap."""
+ 
     next_action = actor.actor_mean(actor_params, next_z_rl, next_proprio, next_ref_chunk)
     next_action = clamp_action_chunk(
         next_action,
