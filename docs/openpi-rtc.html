@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RTC 技术文档 · 实时动作块</title>
+<link rel="stylesheet" href="devdoc.css" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,460;7..72,680&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+  onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false}],throwOnError:false});"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="sft_training.html">OpenPI · AgileX Cobot Magic</a>
+  <nav class="nav">
+    <a href="sft_training.html">SFT 训练</a>
+    <a href="sft_inference.html">SFT 推理</a>
+    <a class="active" href="rtc.html">RTC</a>
+    <a href="rlt.html">RLT</a>
+  </nav>
+</header>
+
+<main class="wrap">
+<article>
+<header class="hero">
+  <p class="kicker">Real-Time Chunking</p>
+  <h1>RTC 技术文档</h1>
+  <p class="lede">SFT 模型仍然是在 <code>screw_sorting_single_sft_ep280_v30_steam</code> 上训好的 π0.5。RTC 不改损失，只改 Cobot Magic 上的采样：下一块动作在推理延迟 \(d\) 之内必须接住上一块还没执行完的后缀，延迟之后的步子重新听从新图像。</p>
+  <div class="meta">
+    <span class="chip">guided_inference · H=50</span>
+    <span class="chip">execution horizon s=20 或 25</span>
+    <span class="chip alt">main_rtc.py · 30×3 Hz</span>
+    <span class="chip alt">右臂 AgileX Cobot Magic</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#system">系统总图</a></li>
+    <li><a href="#why">要解决的时间重叠</a></li>
+    <li><a href="#steps">可落地步骤</a></li>
+    <li><a href="#weight">前缀权重</a></li>
+    <li><a href="#ode">引导后的欧拉步</a></li>
+    <li><a href="#code">两套实现对照</a></li>
+    <li><a href="#analysis">两条 RTC 不要合成一条</a></li>
+    <li><a href="#appendix">附录 · 推导</a></li>
+  </ol>
+</nav>
+
+<h2 id="system">1. 系统总图</h2>
+<figure class="figure">
+<svg viewBox="0 0 920 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="RTC 系统图">
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#243044"/>
+    </marker>
+  </defs>
+  <rect width="920" height="420" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <text x="24" y="32" font-weight="700" fill="#9a4e1c">时间轴（控制拍）</text>
+    <line x1="24" y1="78" x2="890" y2="78" stroke="#c9bba6"/>
+    <text x="24" y="70" fill="#5c564c">t</text>
+    <text x="200" y="70" fill="#5c564c">推理开始</text>
+    <text x="430" y="70" fill="#5c564c">新块就绪 · 延迟 d</text>
+    <text x="700" y="70" fill="#5c564c">软衔接结束 s</text>
+
+    <rect x="80" y="100" width="520" height="36" rx="8" fill="#e6f3f1" stroke="#0e6b66"/>
+    <text x="92" y="123">上一块 A：已经在执行，尾部还剩 prev_chunk_left_over</text>
+
+    <rect x="430" y="150" width="420" height="36" rx="8" fill="#f8eee6" stroke="#9a4e1c"/>
+    <text x="442" y="173">新块 B：在 d 之后才允许偏离 A</text>
+
+    <rect x="80" y="150" width="350" height="36" rx="8" fill="#243044"/>
+    <text x="92" y="173" fill="#fff">硬锁区 i &lt; d ：权重 1，必须贴住 A</text>
+
+    <rect x="24" y="220" width="430" height="170" rx="12" fill="#fff" stroke="#e4d9c8"/>
+    <text x="40" y="248" font-weight="700">机器人客户端 RuntimeRTC</text>
+    <text x="40" y="274">队列低于阈值就异步请求新块</text>
+    <text x="40" y="298">把未执行后缀当作 prev_action</text>
+    <text x="40" y="322">main_rtc：s=20，队列阈值 30</text>
+    <text x="40" y="346" fill="#5c564c">插值 multiplier=3 → 90 Hz 跟踪</text>
+
+    <rect x="474" y="220" width="420" height="170" rx="12" fill="#243044"/>
+    <text x="490" y="248" font-weight="700" fill="#fff">π0.5 guided_inference</text>
+    <text x="490" y="274" fill="#d7efe9">同一 SFT 速度场 v_θ</text>
+    <text x="490" y="298" fill="#d7efe9">每步：预测干净动作 â₁</text>
+    <text x="490" y="322" fill="#d7efe9">误差 e = W (A − â₁)</text>
+    <text x="490" y="346" fill="#d7efe9">v ← v − λ(t) · correction</text>
+  </g>
+  <path d="M454 390 H474" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr3)"/>
+</svg>
+<figcaption>图 1. RTC 把「推理还没算完的那几拍」当成已经承诺的前缀。新观测只改写前缀之后的未来。模型权重仍是螺丝分拣 SFT。</figcaption>
+</figure>
+
+<h2 id="why">2. 延迟从哪来</h2>
+<p>Cobot Magic 以 30&nbsp;Hz 消费动作（插值打开后跟踪环是 90&nbsp;Hz，策略节拍仍按 30&nbsp;Hz 的动作索引）。一次 <code>sample_actions</code> 要跑完图像 prefix 加 10 步动作专家。这段时间里右臂不能停，只能继续播上一块。设推理跨过 \(d\) 个动作索引，则新块的下标 \(0,\ldots,d-1\) 在时间上已经和旧块重叠。</p>
+<figure class="figure">
+<svg viewBox="0 0 920 180" xmlns="http://www.w3.org/2000/svg">
+  <rect width="920" height="180" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <text x="24" y="36">动作索引</text>
+    <g>
+      <rect x="140" y="24" width="28" height="22" fill="#243044"/><text x="147" y="40" fill="#fff" font-size="11">0</text>
+      <rect x="172" y="24" width="28" height="22" fill="#243044"/><text x="179" y="40" fill="#fff" font-size="11">1</text>
+      <rect x="204" y="24" width="28" height="22" fill="#0e6b66"/><text x="211" y="40" fill="#fff" font-size="11">d</text>
+      <rect x="360" y="24" width="28" height="22" fill="#9a4e1c"/><text x="367" y="40" fill="#fff" font-size="11">s</text>
+      <rect x="620" y="24" width="36" height="22" fill="#efe7da"/><text x="628" y="40" font-size="11">H-1</text>
+    </g>
+    <text x="24" y="86">W_i</text>
+    <polyline points="140,120 204,70 360,130 400,150 656,150" fill="none" stroke="#0e6b66" stroke-width="2.4"/>
+    <text x="150" y="168" fill="#5c564c">1 硬锁</text>
+    <text x="250" y="168" fill="#5c564c">指数衰减带</text>
+    <text x="430" y="168" fill="#5c564c">0 完全听新观测</text>
+  </g>
+</svg>
+<figcaption>图 2. 前缀权重沿动作时间从 1 落到 0。d 是推理延迟，s 是还愿意和旧块保持连续的执行视野，H=50 是模型块长。</figcaption>
+</figure>
+<p>本仓库里三个数字要分开记：</p>
+<table>
+  <tr><th>符号</th><th>含义</th><th>螺丝分拣上的取值</th></tr>
+  <tr><td>\(H\)</td><td>模型动作视野</td><td>50，来自 <code>Pi0Config</code></td></tr>
+  <tr><td>\(s\)</td><td>execution horizon，软约束结束的位置</td><td>JAX <code>guided_inference</code> 默认 <code>s=25</code>；<code>main_rtc.py</code> 传 20；在线 RL yaml 里 VLA 用 20、RL chunk 用 10</td></tr>
+  <tr><td>\(d\)</td><td>inference delay，硬锁长度</td><td>JAX 默认 <code>d=6</code>（注释写 50&nbsp;Hz 时用 12）；在线 RL <code>rtc_inference_delay: 7</code></td></tr>
+</table>
+<div class="callout warn"><strong>d 必须用真实耗时标定。</strong> 若服务器 <code>infer_ms</code> 约 200，而控制索引按 30&nbsp;Hz，则 \(d \approx 0.2 / (1/30) = 6\)。d 设小了，硬锁区盖不住重叠，臂在块边界会顿。d 设大了，新图像要等更久才起作用，抓螺丝时反应变迟。</div>
+
+<h2 id="steps">3. 可落地步骤</h2>
+<ol class="steps">
+<li>
+  <h3>服务器仍用 SFT checkpoint，客户端换成 RTC 运行时</h3>
+  <p>策略侧继续 <code>run_server_screw_sorting_single.sh</code>，模型是同一份 π0.5。机器人侧改跑：</p>
+<pre><code>python -m examples.mobile_aloha_AgileX.main_rtc \
+  --host &lt;策略机 IP&gt; --port 8000 \
+  --use-rtc --execution-horizon 20 \
+  --action-queue-size-to-get-new-actions 30 \
+  --inference-fps 30 --use-action-interpolation --multiplier 3 \
+  --use-single-arm</code></pre>
+  <p>这些默认值已经写在 <code>main_rtc.py</code> 的 <code>Args</code> 里。<code>RTCConfig</code> 使用指数前缀 <code>RTCAttentionSchedule.EXP</code>。</p>
+</li>
+<li>
+  <h3>确认服务端走 guided_inference 而不是普通 sample_actions</h3>
+  <p><code>Policy.infer(..., use_rtc=True)</code> 把输入里的 <code>actions</code>（上一块剩余）当作 <code>prev_action</code>，调用 <code>model.guided_inference</code>。第一块没有剩余，走普通欧拉，不加引导。JAX 路径在 <code>policy.py</code> 里对 <code>guided_inference</code> 做了 <code>module_jit</code>。</p>
+</li>
+<li>
+  <h3>用延迟跟踪器填 d，不要写死一个和机器无关的数</h3>
+  <p>在线螺丝配置 <code>rlt_online_rl/configs/tasks/screw_sorting/online_rl.yaml</code> 把 <code>rtc_inference_delay</code> 设为 7，并注释：空值则交给 latency tracker，跳过前几次含 JIT 的样本。标定方法：稳态 <code>infer_ms</code> 的中位数除以控制周期，向上取整，再在真机上看块边界的关节速度尖峰。尖峰消失且抓取还不发黏，就停。</p>
+</li>
+<li>
+  <h3>队列阈值决定「提前多久开始算下一块」</h3>
+  <p><code>action_queue_size_to_get_new_actions=30</code> 表示本地还剩 30 拍时就请求新块。模型块长 50，所以重叠大约 30 拍，其中前 \(d\) 拍硬锁，\(d\) 到 \(s\) 软衔接。阈值必须大于 \(d\)，否则新块算完时旧块已经播完，前缀是空的，RTC 退化为普通开环。</p>
+</li>
+<li>
+  <h3>在右臂上看三条曲线</h3>
+  <p>同时录 <code>/joint_commands/raw</code>。块切换前后，腰和肩的一阶差分应当连续；夹爪允许阶跃，因为它不在关节 delta 的物理平滑语义里，但 RTC 权重目前作用在整个动作维上，夹爪也会被前缀拽住。若夹爪因此合晚了，把问题记在权重作用的维度上，而不是再加大 \(s\)。</p>
+</li>
+<li>
+  <h3>需要真梯度时打开 VJP</h3>
+  <p><code>Pi0.guided_inference</code> 里 <code>use_rtc_vjp = False</code>。默认把 \(\partial \hat a_1/\partial x\) 当成单位阵，修正量等于加权误差本身。这是部署默认，快，但前缀约束弱。与 LeRobot / PI 的实现对齐时把该开关设为 True，用 <code>jax.vjp</code> 对 \(a_1=x-t v\) 求向量积。PyTorch 侧 <code>RTCProcessor.denoise_step</code> 同样默认不做 autograd，修正量是 <code>err</code>。</p>
+</li>
+</ol>
+
+<h2 id="weight">4. 前缀权重的两种写法</h2>
+<p>JAX <code>make_W</code> 与论文及 LeRobot 的 EXP 日程一致。令 <code>start = min(d, s)</code>，下标 \(i=0,\ldots,H-1\)：</p>
+<div class="formula">$$
+c_i = \frac{s-i}{s-\mathrm{start}+1}
+$$</div>
+<div class="formula">$$
+W_i =
+\begin{cases}
+1 & i &lt; \mathrm{start} \\
+c_i \dfrac{e^{c_i}-1}{e-1} & \mathrm{start} \le i &lt; s \\
+0 & i \ge s
+\end{cases}
+$$</div>
+<p>当 \(d&gt;s\) 时 start 被夹到 \(s\)，软带消失，前 \(s\) 步全部硬锁。\(W\) 在代码里铺成对角矩阵再左乘误差。</p>
+<p>PyTorch <code>RTCProcessor.get_prefix_weights</code> 另外支持 ZEROS、ONES、LINEAR、EXP。LINEAR 用去掉端点的 <code>linspace(1,0)</code>。EXP 是把这段线性权重再乘 \(\mathrm{expm1}(w)/(e-1)\)。客户端 <code>RTCConfig</code> 默认 LINEAR，<code>main_rtc.py</code> 显式改成 EXP，与 JAX 侧一致。</p>
+
+<figure class="figure">
+<svg viewBox="0 0 920 200" xmlns="http://www.w3.org/2000/svg">
+  <rect width="920" height="200" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <text x="40" y="40">1</text>
+    <text x="40" y="150">0</text>
+    <line x1="60" y1="36" x2="60" y2="160" stroke="#c9bba6"/>
+    <line x1="60" y1="160" x2="880" y2="160" stroke="#c9bba6"/>
+    <polyline points="80,36 220,36 460,160 860,160" fill="none" stroke="#9a4e1c" stroke-width="2"/>
+    <polyline points="80,36 220,36 300,70 380,120 460,160 860,160" fill="none" stroke="#0e6b66" stroke-width="2.4"/>
+    <text x="700" y="56" fill="#9a4e1c">LINEAR</text>
+    <text x="700" y="78" fill="#0e6b66">EXP · 前段掉得更慢</text>
+    <text x="200" y="184" fill="#5c564c">d</text>
+    <text x="450" y="184" fill="#5c564c">s</text>
+  </g>
+</svg>
+<figcaption>图 3. 指数日程在软带前半保持更高权重，块边界更黏；线性日程更早把控制权交给新观测。螺丝分拣客户端用指数。</figcaption>
+</figure>
+
+<h2 id="ode">5. 引导项怎么加进欧拉步</h2>
+<p>去噪网络给出速度 \(v_t\)。在「\(t=1\) 噪声、\(t=0\) 数据」的约定下，当前潜变量对干净动作的一步估计是</p>
+<div class="formula">$$
+\hat a_1 = x_t - t\, v_t .
+$$</div>
+<p>与上一块剩余 \(A\)（不足 \(H\) 的部分右侧补零）的误差</p>
+<div class="formula">$$
+e = W\,(A - \hat a_1)
+$$</div>
+<p>单位雅可比近似下 correction \(= e\)。真 VJP 时</p>
+<div class="formula">$$
+\mathrm{correction} = \Big(\frac{\partial \hat a_1}{\partial x_t}\Big)^{\!\top} e .
+$$</div>
+<p>引导权重来自噪声日程的精度比，并被 \(\beta\) 截断。JAX 默认 \(\beta=10\)，先验方差 \(\sigma^2\) 默认 \(0.2^2\)：</p>
+<div class="formula">$$
+r^{-2}(t) = \frac{t^2 + (1-t)^2 \sigma^2}{t^2 \sigma^2},\qquad
+c(t)=\frac{t}{1-t},\qquad
+\lambda(t)=\min\big(\beta,\; c(t)\, r^{-2}(t)\big)
+$$</div>
+<div class="formula">$$
+x \leftarrow x + \Delta t \big(v_t - \lambda(t)\,\mathrm{correction}\big), \qquad \Delta t=-1/N
+$$</div>
+<p>PyTorch <code>RTCProcessor</code> 把内部时间记成 \(\tau=1-t\)（与「本实现 time 从 1 走到 0」对齐），公式里的 \((1-\tau)\) 对应 JAX 的 \(t\)。另外 <code>sigma_d</code> 默认 1，等于不缩小先验；设成小于 1 会减弱引导，来自 Soare 的平滑技巧。<code>max_guidance_weight is None</code> 时用流匹配步数本身当截断，避免再调一个超参。</p>
+
+<h2 id="code">6. 代码路径对照</h2>
+<table>
+  <tr><th>职责</th><th>位置</th></tr>
+  <tr><td>JAX 采样与 W、λ</td><td><code>src/openpi/models/pi0.py</code> · <code>guided_inference</code></td></tr>
+  <tr><td>何时把 prev_action 送进引导</td><td><code>src/openpi/policies/policy.py</code> · <code>infer(use_rtc=True)</code></td></tr>
+  <tr><td>PyTorch 包装速度</td><td><code>src/openpi/models_pytorch/rtc/rtc_processor.py</code></td></tr>
+  <tr><td>日程枚举与 σ_d</td><td><code>packages/openpi-client/src/openpi_client/rtc_config.py</code> 与 <code>src/openpi/policies/rtc_processor.py</code></td></tr>
+  <tr><td>真机客户端</td><td><code>examples/mobile_aloha_AgileX/main_rtc.py</code> · <code>RuntimeRTC</code></td></tr>
+  <tr><td>在线 RL 里的 VLA/RL 两套视野</td><td><code>configs/tasks/screw_sorting/online_rl.yaml</code> 的 <code>rtc_*</code></td></tr>
+</table>
+<p>第一块 <code>prev_action is None</code> 时 JAX 走 <code>step_normal</code>，与 SFT 推理完全相同。从第二块起才进入 <code>step_rtc</code>。调试时 <code>RTCTracker</code> 能记下每步的 \(x_t, v_t, \lambda\)，<code>debug_maxlen=100</code>。</p>
+
+<h2 id="analysis">7. 两条 RTC 不要合成一条</h2>
+<p>仓库里现在有两套互不等价的算法。上一节的 \(W\) 和 \(\lambda\) 只描述测试期引导。螺丝数据上新加的配置走的是另一套：训练时就把前缀设成干净示教。</p>
+
+<table>
+  <tr><th></th><th>测试期引导</th><th>训练期前缀流匹配</th></tr>
+  <tr><td>配置</td><td><code>pi05_cobot_screw_sorting_single</code>，<code>rtc_max_delay=0</code>，\(H=50\)</td><td><code>pi05_cobot_screw_sorting_single_rtc</code></td></tr>
+  <tr><td>数据名</td><td>配置里仍是 <code>screw_sorting_single</code></td><td><code>screw_sorting_single_sft_ep279_annotated</code></td></tr>
+  <tr><td>视野</td><td>50</td><td>代码是 <code>action_horizon=32</code>。<code>finetune_screw_sorting_rtc.sh</code> 注释写 H=30，以配置为准</td></tr>
+  <tr><td>延迟</td><td>推理时的 \(d\)，不进损失</td><td><code>rtc_max_delay=10</code>，每条样本 \(d\sim\mathrm{Unif}\{0,\ldots,10\}\)</td></tr>
+  <tr><td>前缀上的 \(x\)</td><td>仍是噪声，靠 \(\lambda W(A-\hat a_1)\) 去拉</td><td>\(t=0\)，\(x\) 等于示教动作本身</td></tr>
+  <tr><td>损失</td><td>整段 50 步</td><td>前缀位置乘 0，再把后半段放大到原来的均值尺度</td></tr>
+  <tr><td>匹配的采样器</td><td><code>guided_inference</code></td><td><code>sample_actions_with_action_prefix</code></td></tr>
+  <tr><td>服务端现状</td><td><code>Policy.infer(use_rtc=True)</code> 会走到引导</td><td>调用前缀采样器的 <code>Policy.infer</code> 整段被注释掉，默认服务不会钉前缀</td></tr>
+</table>
+
+<h3>7.1 训练时一条样本在算什么</h3>
+<p>实现在 <code>src/openpi/models/rtc.py</code>，由 <code>Pi0.compute_loss</code> 在 <code>rtc_max_delay&gt;0</code> 时调用。以 \(H=32\)、抽到 \(d=6\)、共享时间 \(t_b=0.4\) 为例。postfix 掩码前 6 个是 0，后 26 个是 1。逐位置时间是 \(t_i = 0.4 \times m_i\)，所以前缀的流时间是 0，后半段是 0.4。</p>
+<div class="formula">$$
+x_i =
+\begin{cases}
+a_i & i&lt;6 \\
+0.4\,\varepsilon_i + 0.6\,a_i & i\ge 6
+\end{cases}
+\qquad
+u_i = \varepsilon_i - a_i\ \text{（两段都算，前缀不算进损失）}
+$$</div>
+<p>π0.5 的 adaRMS 接收这个 <code>(B, H)</code> 时间。<code>posemb_sincos</code> 对二维位置做 <code>einsum("bi,j-&gt;bij")</code>，<code>RMSNorm</code> 在条件已是 <code>(B, T, D)</code> 时不再广播。前 6 个动作 token 的缩放对应 \(t=0\)，后 26 个对应 \(t=0.4\)。注意力结构不变：50 改成 32 之后，动作 token 仍在同一块里互相可见。后半段因此看得到前 6 个干净关节，这是条件信息，不是损失项。</p>
+<p>逐位置损失 \(\ell_i\) 先乘掩码，再乘 \(H / n_{\mathrm{post}}\)</p>
+<div class="formula">$$
+\tilde\ell_i = \ell_i \cdot m_i \cdot \frac{32}{26}.
+$$</div>
+<p><code>train.py</code> 对 \(\tilde\ell\) 做 <code>jnp.mean</code>。因为前缀是 0，总和等于后半段之和乘 \(32/26\)，再除以 32，剩下的就是后半段的平均。\(d=0\) 时 \(n_{\mathrm{post}}=H\)，这个因子是 1，和普通 SFT 的均值相同。若不做这个放大，\(d=10\) 的样本只有 22/32 的位置进损失，优化器会偏向「延迟短的样本」，因为它们贡献更多非零项。</p>
+<p>\(d\) 的期望是 \(10/2=5\)（0 到 10 共 11 个数，均值 5）。后半段平均长度 \(32-5=27\)，大约 84% 的时间步在回归速度。最大硬前缀 10 拍，在 30&nbsp;Hz 上是 \(10/30\approx 333\)&nbsp;ms。训练没见过 \(d&gt;10\) 的干净前缀。</p>
+
+<h3>7.2 和这条损失匹配的采样</h3>
+<p><code>sample_actions_with_action_prefix</code> 把给定前缀写进噪声的前 \(d\) 行，每步欧拉之后再写回去，并且这些位置的流时间恒为 0，其余位置从 1 积分到 0。前缀因此一直停在数据端，和训练时 \(x_i=a_i,\ t_i=0\) 相同。前缀必须已经在模型空间里：pad 到 32 维、分位数归一化之后的 delta，不是 ROS 上的绝对弧度。函数注释写明它不替换 <code>sample_actions</code>。</p>
+<p><code>src/openpi/policies/policy.py</code> 里把 <code>action_prefix</code> 送进这个函数的 <code>infer</code> 目前整段注释。默认 <code>Policy.infer</code> 在 <code>use_rtc=True</code> 时走 <code>guided_inference</code>。那条路径对整段使用同一个标量时间，前缀从噪声出发，只靠引导项靠近上一块剩余。一个按第 7.1 节训练的网络，如果部署时不把前缀钉在 \(t=0\)，看到的输入分布是「所有位置同一个 \(t\)、前缀也是噪声」，训练里没有这个条件。</p>
+
+<h3>7.3 引导路径上的一个数</h3>
+<p>仍用 \(t=0.4\)、\(\sigma=0.2\)、\(\beta=10\)。先验方差 \(\sigma^2=0.04\)。</p>
+<div class="formula">$$
+r^{-2} = \frac{0.4^2 + 0.6^2\times 0.04}{0.4^2\times 0.04}
+= \frac{0.16+0.0144}{0.0064} = 27.25
+$$</div>
+<div class="formula">$$
+c = \frac{0.4}{0.6}\approx 0.667,\qquad \lambda = \min(10,\ 0.667\times 27.25)\approx 18.2\ \text{被截成}\ 10.
+$$</div>
+<p>单位雅可比时，修正量等于 \(W(A-\hat a_1)\)，欧拉步减去 \(\Delta t\cdot 10\cdot e\)。\(\Delta t=-0.1\)，所以这一步在硬锁区（\(W=1\)）沿误差方向移动 \(1.0\times e\)。误差若是 0.3（归一化动作单位），单步就把潜变量拽动 0.3，和流匹配步 \(0.1 v\) 同阶甚至更大。这就是 \(\beta\) 截断的作用：不截断时 \(\lambda\approx 18\)，同一步会拽动 \(1.8 e\)。JAX 默认 \(\sigma=0.2\) 比 PyTorch <code>sigma_d=1</code> 更强，因为分母里的 \(\sigma^2\) 更小。</p>
+
+<h3>7.4 哪条路径在训练</h3>
+<p><code>scripts/train.py</code> 走 JAX <code>Pi0.compute_loss</code>，前缀时间不会被盖掉。PyTorch <code>pi0_pytorch.py</code> 的 <code>forward</code> 在 <code>rtc_max_delay&gt;0</code> 分支里先把 <code>time</code> 变成 <code>(B, H)</code>，紧接着又执行 <code>time_expanded = time[:, None, None]</code>。这一行会把刚算好的逐位置时间盖掉。理解 RTC-SFT 的损失时以 <code>src/openpi/models/pi0.py</code> 和 <code>rtc.py</code> 为准，不要以这段 PyTorch <code>forward</code> 为准。</p>
+
+<div class="callout note"><strong>部署时要选同一条条件。</strong> 普通 SFT checkpoint 用 <code>guided_inference</code>。RTC-SFT checkpoint 要用 <code>sample_actions_with_action_prefix</code>，并且前缀长度不要超过训练见过的 10。现在服务端默认没有把第二条接上。</div>
+
+<section class="appendix" id="appendix">
+<h2>附录 · RTC 的推导</h2>
+
+<h3>A. 把块生成看成带约束的修补</h3>
+<p>普通流匹配从 \(\varepsilon\) 积到 \(a\sim p(a\mid o_{\text{new}})\)。实时系统还观测到一个已经承诺的前缀 \(A_{0:d}\)，它来自旧条件 \(o_{\text{old}}\) 下的样本，而且机器人正在跟踪它。新的采样问题是</p>
+<div class="formula">$$
+a \sim p(a\mid o_{\text{new}})\ \text{s.t.}\ a_{0:d}\approx A_{0:d}.
+$$</div>
+<p>硬约束会让速度场离开训练流形，软约束用加权误差即可。权重在 \(d\) 之前为 1，在 \(s\) 之后为 0，中间用光滑日程，避免约束突然消失造成的三阶跳变。</p>
+
+<h3>B. 为什么修正的是 \(\hat a_1\) 而不是 \(x_t\)</h3>
+<p>\(x_t\) 在 \(t\) 靠近 1 时几乎是纯噪声，和关节空间的 \(A\) 不可比。一步估计</p>
+<div class="formula">$$
+\hat a_1 = x_t - t v_\theta(x_t)
+$$</div>
+<p>把潜变量翻译回数据端点（在本代码的时间约定里，\(t=0\) 一端是数据）。只在这个端点上比较 \(A\)，引导才有关节空间的意义。\(t\to 0\) 时 \(\hat a_1\to x\)，约束自然变成「最终样本要贴前缀」。</p>
+
+<h3>C. 引导权重的数量级</h3>
+<p>\(\lambda(t)\) 在 \(t\to 1\)（纯噪声）时 \(t/(1-t)\) 很大，但分子分母里的 \(t^2\) 也大，比值由 \(\sigma\) 控制；在 \(t\to 0\) 时 \(c(t)\to 0\)，引导熄火，最后几步交给数据拟合。截断 \(\beta\) 防止中间某个 \(t\) 的 \(\lambda\) 把欧拉步打爆。\(\beta=10\) 而 \(\Delta t=-0.1\) 时，单步修正的最大位移量级是 \(1\)，与归一化动作的尺度同阶。这就是截断存在的原因：它不是平滑强度的旋钮那么简单，它是积分稳定性条件。</p>
+
+<h3>D. 单位雅可比近似丢掉了什么</h3>
+<p>全式是对 \(\hat a_1(x)\) 的高斯-牛顿步：把 \(\|\hat a_1(x)-A\|_W^2\) 在当前 \(x\) 线性化，梯度为 \((\partial\hat a_1/\partial x)^\top W(A-\hat a_1)\) 的符号约定以代码为准（代码最小化的是往 \(A\) 拉的 correction）。令雅可比为单位阵，等于假设 \(v_\theta\) 不随 \(x\) 变化。流匹配速度场当然随 \(x\) 变化，所以近似会欠修正或过修正。真机默认关掉 VJP 是为了 JIT 时间和显存。若块边界仍有可见折角，先调 \(d\) 和 \(s\)，再打开 VJP，而不是先加输出端低通把折角滤没——低通会同时滤掉抓取需要的快合爪。</p>
+
+<h3>E. 补零后缀的含义</h3>
+<p>旧块剩余长度 \(T_{\text{prev}}&lt;H\) 时，JAX 在右侧补零再断言长度等于 \(H\)。权重在 \(i\ge s\) 已经是 0，补零区只要落在权重为 0 的尾部，就不会把新动作拉向 0。因此必须保持 \(s \le T_{\text{prev}}\)，或者像 PyTorch 那样把 execution horizon 夹到剩余长度。\(s\) 大于剩余长度时，硬锁会作用到补出来的 0 上，新块中段会被拽向原点，右臂会突然朝 0 位收。</p>
+
+<h3>F. 和 QP、低通的关系</h3>
+<p>SFT 推理输出链上的 <code>OptimizeActionsQP</code> 平滑的是<strong>单块内部</strong>。RTC 平滑的是<strong>块与块之间</strong>。两者都减小加加速度，但 QP 看不见上一块，RTC 看得见。低通滤波在 ROS 发布前，作用在已经绝对化的关节指令上，会再引入相位滞后。螺丝分拣在线配置把 LPF 截止设成 5&nbsp;Hz（<code>use_actions_filter: true</code>）。RTC 的 \(s\) 已经够黏时，再叠 5&nbsp;Hz 低通，末端会落后视觉约一两个控制拍。标定顺序应当是：先 RTC 的 \(d,s\)，再决定还要不要 LPF。</p>
+
+<h3>G. 在整条工程里的位置</h3>
+<p>训练文档给出 \(v_\theta\)。推理文档用它做开环块。本文在 ODE 漂移上加 \(\lambda W(A-\hat a_1)\)。RLT 的在线循环把同一机制用了两次：VLA 参考块用 <code>rtc_execution_horizon_vla=20</code>，actor 的 10 步块用 <code>rtc_execution_horizon_rl=10</code>。数据集仍是 <code>screw_sorting_single_sft_ep280_v30_steam</code> 训出的策略，机器人仍是 AgileX Cobot Magic 的右臂。RTC 不新增可学习参数。</p>
+</section>
+
+<footer class="colophon">
+  对照代码：<code>src/openpi/models/pi0.py</code> · <code>src/openpi/models_pytorch/rtc/rtc_processor.py</code> · <code>examples/mobile_aloha_AgileX/main_rtc.py</code> · <code>packages/openpi-client/.../runtime_rtc.py</code> · <code>rlt_online_rl/configs/tasks/screw_sorting/online_rl.yaml</code>
+</footer>
+</article>
+</main>
+</body>
+</html>

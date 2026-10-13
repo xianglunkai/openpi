@@ -1905,7 +1905,7 @@ _CONFIGS = [
         wandb_enabled = True,
     ),
 
-    TrainConfig(
+   TrainConfig(
         name="pi05_zip_tie",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotCobotDataConfig(
@@ -1958,6 +1958,159 @@ _CONFIGS = [
         wandb_enabled = True,
     ),
 
+    TrainConfig(
+        name="pi05_zip_tie_merged_20260902",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotDataConfig(
+            repo_id="zip_tie_merged_20260902",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_zip_tie_merged_20260902",
+                asset_id="zip_tie_merged_20260902",
+            ),
+            default_prompt="Put the zip tie through the lock.",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
+      
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 8,
+        # Number of train steps (batches) to run.
+        num_train_steps=40_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 100,
+        # How often (in steps) to save checkpoints.
+        save_interval= 5000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = True,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = True,
+    ),
+    
+   TrainConfig(
+        name="pi05_cobot_zip_tie_two_staged_rlt",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotCobotDataConfig(
+            repo_id="zip_tie_annotated",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_cobot_zip_tie_two_staged_rlt",
+                asset_id="zip_tie_annotated",
+            ),
+            # default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+            repack_transforms=_transforms.Group(
+                inputs=[_transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_left_wrist": "observation.images.cam_left_wrist",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        # Two-stage RLT: load the stage-1 finetuned VLA, then freeze it (rlt_alpha=0) and train RLT only.
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/workspace/openpi/checkpoints/pi05_zip_tie/pi05_zip_tie/29999/params"
+        ),
+      
+        batch_size=64,
+        
+        # Number of workers to use for the data loader. Increasing this number will speed up data loading but
+        # will increase memory and CPU usage.
+        num_workers= 8,
+        # Number of train steps (batches) to run.
+        num_train_steps=15_000,
+
+        # How often (in steps) to log training metrics.
+        log_interval= 100,
+        # How often (in steps) to save checkpoints.
+        save_interval= 5000,
+        # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
+        keep_period = 5000,
+
+        rlt_num_tokens=1,
+        rlt_num_layers=2,
+        rlt_embed_dim=2048,
+        rlt_input_dim=2048,
+        # 0 = freeze VLA and train RLT only (two-stage). >0 jointly finetunes VLA with flow-matching loss.
+        rlt_alpha=0.0,
+        ema_decay=None,
+
+        # If true, will overwrite the checkpoint directory if it already exists.
+        overwrite = False,
+        
+        # If true, will resume training from the last checkpoint.
+        resume = False,
+
+        # If true, will enable wandb logging.
+        wandb_enabled = True,
+    ),
+
+    TrainConfig(
+        name="pi05_cobot_screw_sorting_single_rtc",
+        model=pi0_config.Pi0Config(pi05=True, rtc_max_delay=10, action_horizon=32),
+        data=LeRobotCobotSingleArmDataConfig(
+            repo_id="screw_sorting_single_sft_ep279_annotated",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/assets/pi05_cobot_screw_sorting_single",
+                asset_id="screw_sorting_single_sft_ep279_annotated",
+            ),
+            default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
+        batch_size=64,
+        num_workers=8,
+        num_train_steps=30_000,
+        log_interval=100,
+        save_interval=5000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        wandb_enabled=True,
+    ),
+    
     #
     # Fine-tuning DROID configs.
     #
