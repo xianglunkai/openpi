@@ -2074,43 +2074,6 @@ _CONFIGS = [
         wandb_enabled = True,
     ),
 
-    TrainConfig(
-        name="pi05_cobot_screw_sorting_single_rtc",
-        model=pi0_config.Pi0Config(pi05=True, rtc_max_delay=10, action_horizon=32),
-        data=LeRobotCobotSingleArmDataConfig(
-            repo_id="screw_sorting_single_sft_ep279_annotated",
-            assets=AssetsConfig(
-                assets_dir="/workspace/openpi/assets/pi05_cobot_screw_sorting_single",
-                asset_id="screw_sorting_single_sft_ep279_annotated",
-            ),
-            default_prompt="Please sort and return the silver screws in the grey box to their proper places",
-            repack_transforms=_transforms.Group(
-                inputs=[
-                    _transforms.RepackTransform(
-                        {
-                            "images": {
-                                "cam_high": "observation.images.cam_high",
-                                "cam_right_wrist": "observation.images.cam_right_wrist",
-                            },
-                            "state": "observation.state",
-                            "actions": "action",
-                        }
-                    )
-                ]
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("/workspace/openpi/models/checkpoints_pi05/pi05_base/params"),
-        batch_size=64,
-        num_workers=8,
-        num_train_steps=30_000,
-        log_interval=100,
-        save_interval=5000,
-        keep_period=5000,
-        overwrite=False,
-        resume=False,
-        wandb_enabled=True,
-    ),
-    
     #
     # Fine-tuning DROID configs.
     #
