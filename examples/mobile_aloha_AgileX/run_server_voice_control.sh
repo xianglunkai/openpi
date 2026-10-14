@@ -3,4 +3,4 @@
 # # Run the robot
 # python -m examples.mobile_aloha_AgileX.main &
 
-uv run /home/xlk/work/openpi/examples/mobile_aloha_AgileX/voice_control_main.py
+uv run --no-sync /home/xlk/work/openpi/examples/mobile_aloha_AgileX/voice_control_main.py

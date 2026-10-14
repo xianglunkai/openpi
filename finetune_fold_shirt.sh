@@ -29,7 +29,7 @@ export HF_HOME=/workspace/huggingface
 # 步骤1: 将数据转换为 LeRobot 数据集
 if [ "$DO_STEP1" -eq 1 ]; then
     echo "执行步骤1: 转换数据到 LeRobot 数据集..."
-    uv run examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir "$raw_dir" --repo_id "$repo_id"
+    uv run --no-sync examples/mobile_aloha_AgileX/convert_aloha_data_to_lerobot.py --raw_dir "$raw_dir" --repo_id "$repo_id"
     echo "步骤1完成"
 else
     echo "跳过步骤1: 转换数据到 LeRobot 数据集"
@@ -50,7 +50,7 @@ fi
 # 步骤3: 计算训练数据的归一化统计量
 if [ "$DO_STEP3" -eq 1 ]; then
     echo "执行步骤3: 计算归一化统计量..."
-    uv run scripts/compute_norm_stats.py --config-name "$config_name"
+    uv run --no-sync scripts/compute_norm_stats.py --config-name "$config_name"
     echo "步骤3完成"
 else
     echo "跳过步骤3: 计算归一化统计量"
@@ -59,7 +59,7 @@ fi
 # 步骤4: 开始微调训练
 if [ "$DO_STEP4" -eq 1 ]; then
     echo "执行步骤4: 开始微调训练..."
-    uv run scripts/train.py "$config_name" \
+    uv run --no-sync scripts/train.py "$config_name" \
         --exp-name="$config_name" \
         # --resume \
         
