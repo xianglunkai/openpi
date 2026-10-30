@@ -202,6 +202,73 @@ def update_critic(
     return new_state, metrics
 
 
+def _behavior_cloning_terms(
+    bc_action: jax.Array,
+    batch: dict[str, jax.Array],
+    rl_config: RLTOnlineRLConfig,
+) -> dict[str, jax.Array]:
+    """BC penalty and the ref/human metrics. ``batch`` is the BC sample, not the Q sample."""
+    # human_mask: (B, C) True where that step came from HUMAN or MIXED teleop.
+    source_chunk = batch["source_chunk"]
+    human_mask = jnp.logical_or(
+        source_chunk == int(TransitionSource.HUMAN),
+        source_chunk == int(TransitionSource.MIXED),
+    )
+    human_mask_chunk = jnp.any(human_mask, axis=-1).astype(jnp.float32)
+    policy_mask_chunk = 1.0 - human_mask_chunk
+
+    # BC target: human/mixed steps → behavior (demo/exec); else → VLA ref.
+    # Clip to the deployed range. A label past ±1 cannot be executed, and the
+    # straight-through clip would otherwise keep pushing the raw mean outward.
+    if rl_config.bc_imitate_human:
+        bc_target = jnp.where(human_mask[..., None], batch["action_chunk"], batch["ref_chunk"])
+    else:
+        bc_target = batch["ref_chunk"]
+    bc_target = clamp_action_chunk(
+        bc_target,
+        action_min=rl_config.action_clip_min,
+        action_max=rl_config.action_clip_max,
+    )
+    ref_target = clamp_action_chunk(
+        batch["ref_chunk"],
+        action_min=rl_config.action_clip_min,
+        action_max=rl_config.action_clip_max,
+    )
+    behavior_target = clamp_action_chunk(
+        batch["action_chunk"],
+        action_min=rl_config.action_clip_min,
+        action_max=rl_config.action_clip_max,
+    )
+
+    # Squared error summed over (C, A), then averaged over the batch.
+    bc_error = jnp.square(bc_action - bc_target)
+    per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))
+    if rl_config.bc_reduction == "sum":
+        bc_penalty = jnp.mean(per_sample_bc)
+    else:
+        chunk_len = bc_error.shape[-2]
+        action_dim = bc_error.shape[-1]
+        bc_penalty = jnp.mean(per_sample_bc) / jnp.maximum(chunk_len * action_dim, 1.0)
+
+    ref_error_squared = jnp.square(bc_action - ref_target)
+    human_error_squared = jnp.square(bc_action - behavior_target)
+    per_sample_ref = jnp.sum(ref_error_squared, axis=(-2, -1))
+    per_sample_human = jnp.sum(human_error_squared, axis=(-2, -1))
+    if rl_config.bc_reduction == "mean":
+        chunk_len = bc_error.shape[-2]
+        action_dim = bc_error.shape[-1]
+        scale = jnp.maximum(chunk_len * action_dim, 1.0)
+        per_sample_ref = per_sample_ref / scale
+        per_sample_human = per_sample_human / scale
+    return {
+        "bc_penalty": bc_penalty,
+        "bc_ref_penalty": jnp.sum(per_sample_ref * policy_mask_chunk) / jnp.maximum(jnp.sum(policy_mask_chunk), 1.0),
+        "bc_human_penalty": jnp.sum(per_sample_human * human_mask_chunk) / jnp.maximum(jnp.sum(human_mask_chunk), 1.0),
+        "human_mask_ratio": jnp.mean(human_mask_chunk),
+        "policy_mask_ratio": 1.0 - jnp.mean(human_mask_chunk),
+    }
+
+
 def update_actor(
     state: RLTTrainState,
     batch: dict[str, jax.Array],
@@ -215,40 +282,47 @@ def update_actor(
     use_action_adapter: bool = False,
     action_q01: jax.Array | None = None,
     action_q99: jax.Array | None = None,
+    bc_batch: dict[str, jax.Array] | None = None,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
-    # split the random key
+    # ``batch`` is the full replay sample (Q and smoothness). ``bc_batch`` is the
+    # success-only sample used by the BC term; None means BC shares ``batch``.
     actor_rng, next_rng = jax.random.split(state.rng)
-    # define the actor loss function
+
     def loss_fn(actor_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
-        # --- 1) Reference conditioning for the actor ---
         # Binary ref dropout per batch element (same mask for all C*A of that sample).
-        # keep_mask: (B, 1, 1) broadcasts over (B, C, A).
-        # Example: B=2, p_drop=0.5 → keep_mask maybe [[1],[0]] → sample0 keeps ref, sample1 zeros ref.
-        dropout_rng, mix_rng = jax.random.split(actor_rng)
-        dropped_ref = apply_reference_dropout(
-            dropout_rng,
-            batch["ref_chunk"],
-            rl_config.reference_dropout_prob,
-        )
-        # π_θ(z, proprio, ref) → action mean. Q is scored on the same clip
-        # ActorService applies before denormalizing. BC uses a straight-through
-        # clip so the target is that deployed value while a saturated mean can move.
-        raw_action = actor.actor_mean(
-            actor_params,
-            batch["z_rl"],
-            batch["proprio"],
-            dropped_ref,
-        )
-        action_chunk = clamp_action_chunk(
-            raw_action,
-            action_min=rl_config.action_clip_min,
-            action_max=rl_config.action_clip_max,
-        )
-        bc_action = clip_actor_output_straight_through(
-            raw_action,
-            action_min=rl_config.action_clip_min,
-            action_max=rl_config.action_clip_max,
-        )
+        if bc_batch is None:
+            dropout_rng, mix_rng = jax.random.split(actor_rng)
+        else:
+            dropout_rng, bc_dropout_rng, mix_rng = jax.random.split(actor_rng, 3)
+
+        def _actions(data: dict[str, jax.Array], rng: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+            dropped_ref = apply_reference_dropout(
+                rng,
+                data["ref_chunk"],
+                rl_config.reference_dropout_prob,
+            )
+            # π_θ(z, proprio, ref) → action mean. Q is scored on the hard clip
+            # ActorService applies before denormalizing. BC uses a straight-through
+            # clip so the target is that deployed value while a saturated mean can move.
+            raw_action = actor.actor_mean(
+                actor_params,
+                data["z_rl"],
+                data["proprio"],
+                dropped_ref,
+            )
+            action_chunk = clamp_action_chunk(
+                raw_action,
+                action_min=rl_config.action_clip_min,
+                action_max=rl_config.action_clip_max,
+            )
+            bc_action = clip_actor_output_straight_through(
+                raw_action,
+                action_min=rl_config.action_clip_min,
+                action_max=rl_config.action_clip_max,
+            )
+            return dropped_ref, action_chunk, bc_action
+
+        dropped_ref, action_chunk, q_bc_action = _actions(batch, dropout_rng)
         # Evo / TD3: maximize conservative twin-Q (min of Q1, Q2), not Q1 alone.
         q = critic.min_q(
             state.critic_params,
@@ -256,60 +330,17 @@ def update_actor(
             batch["proprio"],
             action_chunk,
         )
-
-        # --- 2) Per-step human vs policy mask for BC target selection ---
-        # human_mask: (B, C) True where that step came from HUMAN or MIXED teleop.
-        # Example source_chunk[0] = [POLICY, HUMAN, POLICY, ...] → human_mask[0,1]=True.
-        source_chunk = batch["source_chunk"]
-        human_mask = jnp.logical_or(
-            source_chunk == int(TransitionSource.HUMAN),
-            source_chunk == int(TransitionSource.MIXED),
-        )
-       
-        # Chunk-level flags for metrics only: any human step → whole sample is "human".
-        # human_mask_chunk / policy_mask_chunk: (B,)
-        # Example: human_mask[i] has any True → human_mask_chunk[i]=1, policy_mask_chunk[i]=0.
-        human_mask_chunk = jnp.any(human_mask, axis=-1).astype(jnp.float32)
-        policy_mask_chunk = 1.0 - human_mask_chunk
-
-        # BC target: human/mixed steps → behavior (demo/exec); else → VLA ref.
-        # human_mask[..., None]: (B, C, 1) broadcasts over A.
-        # Example: step t human → bc_target[i,t]=behavior; else bc_target[i,t]=ref.
-        if rl_config.bc_imitate_human:
-            bc_target = jnp.where(human_mask[..., None], batch["action_chunk"], batch["ref_chunk"])
+        if bc_batch is None:
+            bc_terms = _behavior_cloning_terms(q_bc_action, batch, rl_config)
         else:
-            bc_target = batch["ref_chunk"]
+            _, _, bc_action = _actions(bc_batch, bc_dropout_rng)
+            bc_terms = _behavior_cloning_terms(bc_action, bc_batch, rl_config)
+        bc_penalty = bc_terms["bc_penalty"]
+        bc_ref_penalty = bc_terms["bc_ref_penalty"]
+        bc_human_penalty = bc_terms["bc_human_penalty"]
+        human_mask_ratio = bc_terms["human_mask_ratio"]
 
-        # --- 3) BC term that enters the loss ---
-        # Squared error then sum over (C, A) → per-sample scalar, then mean over B.
-        # bc_error: (B, C, A); per_sample_bc: (B,)
-        # Example C=10,A=7: sum over 70 dims; "sum" reduction keeps that scale (Evo-RLT/paper β).
-        bc_error = jnp.square(bc_action - bc_target)
-        per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))
-        if rl_config.bc_reduction == "sum":
-            bc_penalty = jnp.mean(per_sample_bc)
-        else:
-            chunk_len = bc_error.shape[-2]
-            action_dim = bc_error.shape[-1]
-            bc_penalty = jnp.mean(per_sample_bc) / jnp.maximum(chunk_len * action_dim, 1.0)
-
-        # Compute BC metrics (logging only; do not affect gradients via this path)
-        # Compare μ to pure ref / pure behavior, then average over policy-only or human-only samples.
-        ref_error_squared = jnp.square(bc_action - batch["ref_chunk"])
-        human_error_squared = jnp.square(bc_action - batch["action_chunk"])
-        per_sample_ref = jnp.sum(ref_error_squared, axis=(-2, -1))
-        per_sample_human = jnp.sum(human_error_squared, axis=(-2, -1))
-        if rl_config.bc_reduction == "mean":
-            chunk_len = bc_error.shape[-2]
-            action_dim = bc_error.shape[-1]
-            scale = jnp.maximum(chunk_len * action_dim, 1.0)
-            per_sample_ref = per_sample_ref / scale
-            per_sample_human = per_sample_human / scale
-        bc_ref_penalty = jnp.sum(per_sample_ref * policy_mask_chunk) / jnp.maximum(jnp.sum(policy_mask_chunk), 1.0)
-        bc_human_penalty = jnp.sum(per_sample_human * human_mask_chunk) / jnp.maximum(jnp.sum(human_mask_chunk), 1.0)
-        human_mask_ratio = jnp.mean(human_mask_chunk)
-
-        # Compute delta penalty and acc/jerk penalty
+        # Smoothness follows the deployed state distribution (full replay).
         if not use_action_adapter:
             pred_abs_chunk = action_chunk
             ref_abs_chunk = batch["ref_chunk"]
@@ -407,6 +438,7 @@ def train_step(
     actor: ChunkActor,
     critic: TwinCritic,
     rl_config: RLTOnlineRLConfig,
+    actor_batch: dict[str, jax.Array] | None = None,
     bc_weight: float = 1.0,
     q_weight: float = 1.0,
     delta_weight: float = 0.0,
@@ -414,6 +446,8 @@ def train_step(
     action_q01: jax.Array | None = None,
     action_q99: jax.Array | None = None,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
+    # Critic, actor Q, and smoothness use the full replay. ``actor_batch`` is the
+    # success-only sample and feeds only the BC term.
     # update the critic
     state, critic_metrics = update_critic(state, batch, actor, critic, rl_config)
     # keep the target critic aligned with every online critic step
@@ -458,6 +492,7 @@ def train_step(
             use_action_adapter=use_action_adapter,
             action_q01=action_q01,
             action_q99=action_q99,
+            bc_batch=actor_batch,
         )
         # Keep a Polyak actor copy for "target" bootstrap mode / checkpoints.
         target_actor = soft_update_targets(
@@ -506,6 +541,10 @@ def _ensure_actual_steps(batch_np: dict[str, np.ndarray], chunk_len: int) -> dic
     batch_np = dict(batch_np)
     batch_np["actual_steps"] = np.full(batch_np["z_rl"].shape[0], int(chunk_len), dtype=np.int32)
     return batch_np
+
+
+def _prepare_sampled_batch(batch_np: dict[str, np.ndarray], chunk_len: int) -> dict[str, np.ndarray]:
+    return _ensure_actual_steps(_ensure_source_chunk(batch_np, chunk_len), chunk_len)
 
 
 def _ensure_source_chunk(batch_np: dict[str, np.ndarray], chunk_len: int) -> dict[str, np.ndarray]:
@@ -662,13 +701,19 @@ class LearnerService:
             return None
 
         # sample a batch from the replay buffer
-        batch_np = _ensure_actual_steps(
-            _ensure_source_chunk(
-                self._replay_source.sample_batch(self._service_config.sample_batch_size),
-                self._rl_config.chunk_len,
-            ),
+        batch_np = _prepare_sampled_batch(
+            self._replay_source.sample_batch(self._service_config.sample_batch_size),
             self._rl_config.chunk_len,
         )
+        actor_batch_np = None
+        if self._rl_config.actor_success_only:
+            actor_batch_np = _prepare_sampled_batch(
+                self._replay_source.sample_batch(
+                    self._service_config.sample_batch_size,
+                    success_only=True,
+                ),
+                self._rl_config.chunk_len,
+            )
         # calculate sample metrics
         max_episode_id = int(stats.get("max_episode_id", -1))
         recent_window = int(stats.get("recent_episode_window", 20))
@@ -680,7 +725,12 @@ class LearnerService:
         # prepare training batch
         if self._action_adapter is not None:
             batch_np = self._action_adapter.prepare_training_batch(batch_np)
+            if actor_batch_np is not None:
+                actor_batch_np = self._action_adapter.prepare_training_batch(actor_batch_np)
         batch = {key: jnp.asarray(value) for key, value in batch_np.items()}
+        actor_batch = None
+        if actor_batch_np is not None:
+            actor_batch = {key: jnp.asarray(value) for key, value in actor_batch_np.items()}
         # resolve actor loss weights， bc_weight is the weight for the behavior cloning loss, q_weight is the weight for the Q-value loss
         bc_weight, q_weight = _resolve_actor_loss_weights(self._rl_config, progress)
         # train the actor
@@ -690,6 +740,7 @@ class LearnerService:
             actor=self._actor,
             critic=self._critic,
             rl_config=self._rl_config,
+            actor_batch=actor_batch,
             bc_weight=bc_weight,
             q_weight=q_weight,
             delta_weight=self._rl_config.delta_weight,

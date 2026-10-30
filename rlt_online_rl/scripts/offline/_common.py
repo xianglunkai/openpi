@@ -214,6 +214,14 @@ def predict_refined_chunk(
     ref_chunk = np.asarray(record["ref_chunk"], dtype=np.float32)
     model_ref_chunk = build_model_ref_chunk(adapter, ref_chunk, proprio, disable_ref_input=disable_ref_input)
     refined = wrapper.infer(actor_params, z_rl, proprio, model_ref_chunk, deterministic=deterministic, rng=rng)
+    # ActorService clips before denorm. Denorming the raw mean turns a saturated
+    # gripper logit (tens) into an absolute command near 1.
+    rl_config = wrapper._rl_config
+    refined = np.clip(
+        np.asarray(refined, dtype=np.float32),
+        float(rl_config.action_clip_min),
+        float(rl_config.action_clip_max),
+    )
     if adapter is not None:
         refined = adapter.denormalize_to_abs_chunk(refined, proprio)
     return np.asarray(refined, dtype=np.float32)

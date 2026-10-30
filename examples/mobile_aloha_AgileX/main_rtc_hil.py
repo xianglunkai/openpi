@@ -16,13 +16,13 @@ class Args:
     port: int = 8000
 
     # Episode parameters
-    num_episodes: int = 1
-    max_episode_time_s: int = 240
+    num_episodes: int = 20
+    max_episode_time_s: int = 30
 
     # RTC parameters
     use_rtc: bool = True
-    execution_horizon: int = 20
-    action_queue_size_to_get_new_actions: int = 30
+    execution_horizon: int = 10
+    action_queue_size_to_get_new_actions: int = 22
 
     # Action interpolation parameters
     inference_fps: int = 30

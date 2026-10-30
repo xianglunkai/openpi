@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
+
+# Bundled AgileX single-arm description (copied from lerobot hil-serl aloha_new_description).
+_DEFAULT_URDF_PATH = str(
+    Path(__file__).resolve().parent / "aloha_new_description" / "urdf" / "robot.urdf"
+)
 
 
 @dataclass
 class EefKinematicsConfig:
     """Configuration matching agilex_cobot RobotKinematics setup."""
 
-    urdf_path: str = "/home/xlk/work/lerobot/examples/hil-serl/aloha_new_description/urdf"
+    urdf_path: str = _DEFAULT_URDF_PATH
     target_frame_name: str = "gripper_frame_link"
     joint_names: List[str] = field(
         default_factory=lambda: [
@@ -22,7 +28,7 @@ class EefKinematicsConfig:
             "right_joint3",
             "right_joint4",
             "right_joint5",
-            'gripper_frame_joint'
+            "gripper_frame_joint",
         ]
     )
     use_rad: bool = True

@@ -7,6 +7,7 @@ import pickle
 import sys
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +20,9 @@ from rlt_online_rl.action_representation import jax_denormalize_to_abs_chunk
 from rlt_online_rl.config import LearnerServiceConfig
 from rlt_online_rl.config import RLTOnlineRLConfig
 from rlt_online_rl.replay import TransitionSource
+from rlt_online_rl.networks import clip_actor_output_straight_through
 from rlt_online_rl.trainer import LearnerService
+from rlt_online_rl.trainer import _behavior_cloning_terms
 from rlt_online_rl.trainer import init_train_state
 from rlt_online_rl.trainer import soft_update_targets
 from rlt_online_rl.trainer import train_step
@@ -30,7 +33,7 @@ class FakeReplay:
         self._batch = batch
         self._adds_total = batch["z_rl"].shape[0]
 
-    def sample_batch(self, _batch_size: int) -> dict[str, np.ndarray]:
+    def sample_batch(self, _batch_size: int, *, success_only: bool = False) -> dict[str, np.ndarray]:
         return self._batch
 
     def stats(self) -> dict[str, int]:
@@ -104,6 +107,28 @@ def test_train_step_bc_target_switches_to_human_actions() -> None:
     assert np.isclose(float(metrics["bc_ref_penalty"]), 0.0)
 
 
+def test_bc_stops_pushing_when_label_exceeds_clip() -> None:
+    cfg = _config()
+    label = jnp.ones((1, cfg.chunk_len, cfg.action_dim), dtype=jnp.float32) * 1.4
+    batch = {
+        "source_chunk": jnp.zeros((1, cfg.chunk_len), dtype=jnp.int32),
+        "ref_chunk": label,
+        "action_chunk": label,
+    }
+    raw = jnp.ones_like(label) * 50.0
+
+    def loss(raw_action: jax.Array) -> jax.Array:
+        bc_action = clip_actor_output_straight_through(
+            raw_action,
+            action_min=cfg.action_clip_min,
+            action_max=cfg.action_clip_max,
+        )
+        return _behavior_cloning_terms(bc_action, batch, cfg)["bc_penalty"]
+
+    assert float(loss(raw)) == 0.0
+    assert np.allclose(jax.grad(loss)(raw), 0.0)
+
+
 def test_train_step_bc_stays_on_ref_when_human_imitate_disabled() -> None:
     cfg = dataclasses.replace(_config(), bc_imitate_human=False)
     state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(0))
@@ -121,6 +146,64 @@ def test_train_step_bc_stays_on_ref_when_human_imitate_disabled() -> None:
     # Policy-only metric is undefined on an all-human batch (mask sum=0 → 0).
     # Disabled path BCs to ref (zeros), not executed (ones), so the two penalties differ.
     assert not np.isclose(float(metrics["bc_penalty"]), float(metrics["bc_human_penalty"]))
+
+
+def _params_allclose(left, right) -> bool:
+    return all(
+        np.allclose(np.asarray(old), np.asarray(new))
+        for old, new in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
+    )
+
+
+def test_success_batch_filters_bc_but_q_uses_full_replay() -> None:
+    cfg = dataclasses.replace(
+        _config(),
+        actor_update_period=1,
+        reference_dropout_prob=0.0,
+        delta_acc_weight=0.0,
+        delta_jerk_weight=0.0,
+        l2c2_policy_weight=0.0,
+    )
+    full_np = _batch(cfg)
+    success_np = _batch(cfg)
+    full_np["z_rl"] = np.ones_like(full_np["z_rl"])
+    success_np["z_rl"] = np.zeros_like(success_np["z_rl"])
+    full = {k: jax.numpy.asarray(v) for k, v in full_np.items()}
+    success = {k: jax.numpy.asarray(v) for k, v in success_np.items()}
+
+    def _step(full_batch, success_batch, *, bc_weight: float, q_weight: float):
+        state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(0))
+        return train_step(
+            state,
+            full_batch,
+            actor=actor,
+            critic=critic,
+            rl_config=cfg,
+            actor_batch=success_batch,
+            bc_weight=bc_weight,
+            q_weight=q_weight,
+        )
+
+    full_shift = dict(full)
+    full_shift["z_rl"] = jax.numpy.full_like(full["z_rl"], 0.5)
+    success_shift = dict(success)
+    success_shift["z_rl"] = jax.numpy.full_like(success["z_rl"], -0.5)
+
+    state_bc_ref, bc_base = _step(full, success, bc_weight=1.0, q_weight=0.0)
+    state_bc_full, bc_full = _step(full_shift, success, bc_weight=1.0, q_weight=0.0)
+    state_bc_success, bc_success = _step(full, success_shift, bc_weight=1.0, q_weight=0.0)
+    assert _params_allclose(state_bc_ref.actor_params, state_bc_full.actor_params)
+    assert np.isclose(float(bc_base["bc_penalty"]), float(bc_full["bc_penalty"]))
+    assert not _params_allclose(state_bc_ref.actor_params, state_bc_success.actor_params)
+    assert not np.isclose(float(bc_base["bc_penalty"]), float(bc_success["bc_penalty"]))
+
+    state_q_ref, q_base = _step(full, success, bc_weight=0.0, q_weight=1.0)
+    state_q_full, q_full = _step(full_shift, success, bc_weight=0.0, q_weight=1.0)
+    state_q_success, q_success = _step(full, success_shift, bc_weight=0.0, q_weight=1.0)
+    assert np.isclose(float(q_base["actor_q"]), float(q_success["actor_q"]))
+    assert _params_allclose(state_q_ref.actor_params, state_q_success.actor_params)
+    assert not np.isclose(float(q_base["actor_q"]), float(q_full["actor_q"]))
+    assert not _params_allclose(state_q_ref.actor_params, state_q_full.actor_params)
 
 
 def test_soft_update_changes_target_params() -> None:
@@ -334,3 +417,39 @@ def test_delta_chunk_normalization_broadcasts_batched_state0(tmp_path) -> None:
         dtype=np.float32,
     )
     assert np.allclose(restored, chunk_abs, atol=1e-5)
+
+
+def test_truncate_policy_return_stops_before_human() -> None:
+    from rlt_online_rl.inference import truncate_policy_return_at_intervention
+
+    class Step:
+        def __init__(self, source: int, reward_flag: bool = False) -> None:
+            self.source = source
+            self.intervention_flag = reward_flag
+
+    policy = Step(int(TransitionSource.RL))
+    human = Step(int(TransitionSource.HUMAN))
+    rewards = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    trimmed, truncated = truncate_policy_return_at_intervention(
+        rewards,
+        [policy, policy, human, human],
+        next_step_is_human=False,
+    )
+    assert truncated
+    assert np.allclose(trimmed, [0.0, 0.0, 0.0, 0.0])
+
+    kept, started_human = truncate_policy_return_at_intervention(
+        rewards,
+        [human, human, human, human],
+        next_step_is_human=False,
+    )
+    assert not started_human
+    assert np.allclose(kept, rewards)
+
+    _, next_human = truncate_policy_return_at_intervention(
+        np.zeros(4, dtype=np.float32),
+        [policy, policy, policy, policy],
+        next_step_is_human=True,
+    )
+    assert next_human
+

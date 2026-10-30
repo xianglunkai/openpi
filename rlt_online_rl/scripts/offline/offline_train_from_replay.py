@@ -598,6 +598,12 @@ def _custom_actor_loss(
         bc_target = jnp.where(human_mask[..., None], behavior_chunk, ref_chunk)
     else:
         bc_target = ref_chunk
+    # Clip labels to the deployed range so straight-through BC stops at ±1.
+    bc_target = clamp_action_chunk(bc_target, action_min=action_clip_min, action_max=action_clip_max)
+    ref_target = clamp_action_chunk(ref_chunk, action_min=action_clip_min, action_max=action_clip_max)
+    behavior_target = clamp_action_chunk(
+        behavior_chunk, action_min=action_clip_min, action_max=action_clip_max
+    )
     bc_error = jnp.square(bc_action - bc_target)  # (B, C, A)
     per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))  # (B,)
     if bc_reduction == "sum":
@@ -610,8 +616,8 @@ def _custom_actor_loss(
 
     # --- 4) Split BC metrics (logging only; do not affect gradients via this path) ---
     # Compare μ to pure ref / pure behavior, then average over policy-only or human-only samples.
-    ref_error_squared = jnp.square(bc_action - ref_chunk)  # (B, C, A)
-    human_error_squared = jnp.square(bc_action - behavior_chunk)  # (B, C, A)
+    ref_error_squared = jnp.square(bc_action - ref_target)  # (B, C, A)
+    human_error_squared = jnp.square(bc_action - behavior_target)  # (B, C, A)
     per_sample_ref = jnp.sum(ref_error_squared, axis=(-2, -1))  # (B,)
     per_sample_human = jnp.sum(human_error_squared, axis=(-2, -1))  # (B,)
     if bc_reduction == "mean":

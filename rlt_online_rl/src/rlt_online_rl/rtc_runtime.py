@@ -260,7 +260,8 @@ class RtcActionRuntime:
         horizon = int(execution_horizon) if execution_horizon is not None else 0
         delay_for_warn = estimated_delay if not skipped_latency_sample else self.estimated_inference_delay_steps()
         min_refill_threshold = horizon + delay_for_warn
-        if horizon > 0 and self._refill_threshold < min_refill_threshold:
+        # Threshold 0 is synchronous refill (wait until empty); it is not a short overlap.
+        if horizon > 0 and 0 < self._refill_threshold < min_refill_threshold:
             logger.warning(
                 "[RLT RTC] action_queue_size_to_get_new_actions=%d is smaller than "
                 "execution_horizon + delay (%d + %d). The queue may run dry under load.",
@@ -632,13 +633,23 @@ def resolve_rtc_execution_horizon(env_config: Any, rl_config: Any | None = None,
     return max(1, int(env_config.rtc_execution_horizon_vla))
 
 
-def resolve_rtc_refill_threshold(env_config: Any, rl_config: Any | None = None) -> int:
-    """Shared refill threshold (Evo-RLT ``action_queue_size_to_get_new_actions``).
+def resolve_rtc_refill_threshold(
+    env_config: Any,
+    rl_config: Any | None = None,
+    *,
+    uses_rl_actor: bool = False,
+) -> int:
+    """Refill threshold (Evo-RLT ``action_queue_size_to_get_new_actions``).
 
-    One value for VLA and RL. Collect default is 30; ``None`` → ``max(1, chunk_len - 1)``
-    (Evo ``configure_rtc`` when the CLI flag is omitted). Too-small vs ``s + delay``
-    is warned at merge time, not auto-raised here.
+    VLA uses the shared value (default 30; ``None`` → ``max(1, chunk_len - 1)``).
+    RL uses ``action_queue_size_to_get_new_actions_rl`` when set, including 0
+    (infer only after the queue drains). Too-small vs ``s + delay`` is warned
+    at merge time, not auto-raised here.
     """
+    if uses_rl_actor:
+        rl_threshold = getattr(env_config, "action_queue_size_to_get_new_actions_rl", None)
+        if rl_threshold is not None:
+            return max(0, int(rl_threshold))
     configured = getattr(env_config, "action_queue_size_to_get_new_actions", None)
     if configured is not None:
         return max(0, int(configured))

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run from openpi repo root. Uses openpi uv env (Python 3.11+), not conda rl-tokens.
-# uv run scripts/serve_policy.py --env ALOHA --default_prompt='Pick up the bottle on the table headup with the correct arm'
+# uv run --no-sync scripts/serve_policy.py --env ALOHA --default_prompt='Pick up the bottle on the table headup with the correct arm'
 export HF_ENDPOINT=https://hf-mirror.com
 
 python scripts/server_rlt_policy.py \

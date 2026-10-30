@@ -37,7 +37,7 @@ def _make_episode(
             EpisodeStepRecord(
                 z_rl=np.full((4,), idx, dtype=np.float32),
                 proprio=np.full((3,), idx, dtype=np.float32),
-                ref_action=action.copy() if human_controlled else np.full((2,), idx + 0.1, dtype=np.float32),
+                ref_action=np.full((2,), idx + 0.1, dtype=np.float32),
                 action=action,
                 reward=float(idx),
                 done=idx == length - 1,
@@ -69,12 +69,13 @@ def test_stride2_builds_expected_chunk_transitions() -> None:
     assert transitions[1].step_id == 2
 
 
-def test_intervention_replaces_only_intervened_reference_steps() -> None:
+def test_intervention_keeps_reference_distinct_from_executed_action() -> None:
     transitions = build_chunk_transitions_from_episode(_make_episode(intervention_at=1), chunk_len=3, stride=2)
     first = transitions[0]
     assert first.intervention_flag
     assert np.allclose(first.ref_chunk[0], np.full((2,), 0.1, dtype=np.float32))
-    assert np.allclose(first.ref_chunk[1], first.action_chunk[1])
+    assert np.allclose(first.ref_chunk[1], np.full((2,), 1.1, dtype=np.float32))
+    assert np.allclose(first.action_chunk[1], np.full((2,), 2.0, dtype=np.float32))
     assert np.allclose(first.ref_chunk[2], np.full((2,), 2.1, dtype=np.float32))
     assert first.source == int(TransitionSource.MIXED)
     assert int(first.source_chunk[1]) == int(TransitionSource.HUMAN)
@@ -157,6 +158,37 @@ def test_stratified_replay_samples_recent_warmup_and_human_pools() -> None:
     assert np.any(batch["collection_phase_id"] == COLLECTION_PHASE_WARMUP)
     assert np.any((batch["collection_phase_id"] == COLLECTION_PHASE_ONLINE) & (batch["episode_id"] >= 8))
     assert np.any(batch["source_chunk"] == int(TransitionSource.HUMAN))
+
+
+def test_success_only_includes_warmup_and_whole_successful_episodes() -> None:
+    warmup = build_chunk_transitions_from_episode(
+        _make_episode(collection_phase="warmup", episode_id=1),
+        chunk_len=3,
+        stride=3,
+    )
+    for item in warmup:
+        item.success = 0
+    success_episode = build_chunk_transitions_from_episode(
+        _make_episode(collection_phase="online", episode_id=2),
+        chunk_len=3,
+        stride=3,
+    )
+    assert sum(int(item.success) for item in success_episode) == 1
+    failed = build_chunk_transitions_from_episode(
+        _make_episode(collection_phase="online", episode_id=3),
+        chunk_len=3,
+        stride=3,
+    )
+    for item in failed:
+        item.success = 0
+
+    replay = ReplayBuffer(capacity=64, seed=0)
+    replay.extend([*warmup, *success_episode, *failed])
+    kept = set(np.unique(replay._storage["episode_id"][replay._actor_success_indices()]).tolist())
+    assert kept == {1, 2}
+
+    batch = replay.sample(32, success_only=True)
+    assert set(np.unique(batch["episode_id"]).tolist()) <= {1, 2}
 
 
 def test_replay_manager_journal_roundtrip(tmp_path) -> None:

@@ -51,6 +51,10 @@ def test_rtc_thresholds() -> None:
     env_config = EnvDriverConfig()
     rl_config = RLTOnlineRLConfig(chunk_len=10)
     assert resolve_rtc_refill_threshold(env_config, rl_config) == 30
+    assert resolve_rtc_refill_threshold(env_config, rl_config, uses_rl_actor=True) == 30
+    rl_sync = EnvDriverConfig(action_queue_size_to_get_new_actions=22, action_queue_size_to_get_new_actions_rl=0)
+    assert resolve_rtc_refill_threshold(rl_sync, rl_config, uses_rl_actor=False) == 22
+    assert resolve_rtc_refill_threshold(rl_sync, rl_config, uses_rl_actor=True) == 0
     assert resolve_rtc_execution_horizon(env_config, rl_config, uses_rl_actor=False) == 25
     assert resolve_rtc_execution_horizon(env_config, rl_config, uses_rl_actor=True) == 10
     assert env_config.rtc_inference_delay is None

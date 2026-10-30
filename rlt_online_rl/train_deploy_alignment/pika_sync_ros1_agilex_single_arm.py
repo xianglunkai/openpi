@@ -886,11 +886,23 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                 guided_inference_delay=system.env_driver.rtc_inference_delay,
             )
             logger.info(
-                "RTC enabled fps=%.1f vla_guidance=%s (RL phase forces guidance off) guided_d=%s",
+                "RTC enabled fps=%.1f vla_guidance=%s (RL phase forces guidance off) guided_d=%s rl_refill=%s",
                 float(system.env_driver.control_frequency_hz),
                 bool(system.env_driver.rtc_vla_guidance),
                 system.env_driver.rtc_inference_delay,
+                system.env_driver.action_queue_size_to_get_new_actions_rl,
             )
+
+    def _sync_rtc_refill_threshold(self, uses_rl: bool) -> None:
+        if self._rtc is None:
+            return
+        self._rtc.set_refill_threshold(
+            resolve_rtc_refill_threshold(
+                self._system.env_driver,
+                self._system.rl,
+                uses_rl_actor=uses_rl,
+            )
+        )
 
     def move_to_home_on_shutdown(self) -> None:
         """Move the robot to the configured reset pose during rollout shutdown."""
@@ -949,7 +961,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
         horizon = self.current_chunk_exec_horizon()
 
         if self._rtc is not None:
-            # Evo: one refill threshold for the whole episode; only RTC ``s`` changes per phase.
+            self._sync_rtc_refill_threshold(uses_rl)
             self._rtc.note_phase(
                 phase,
                 critical_started,
@@ -988,6 +1000,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
             self.refresh_chunk_horizon_state()
             uses_rl = bool(self.policy_uses_rl_actor())
             if self._rtc is not None:
+                self._sync_rtc_refill_threshold(uses_rl)
                 phase_changed = self._rtc.note_phase(
                     phase,
                     critical_started,
@@ -1029,6 +1042,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                     local_step=local_step,
                     planner=policy_planner,
                     use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance) and not uses_rl,
+                    # use_vla_guidance=bool(self._system.env_driver.rtc_vla_guidance),
                     execution_horizon=resolve_rtc_execution_horizon(
                         self._system.env_driver,
                         self._system.rl,

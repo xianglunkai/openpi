@@ -38,6 +38,10 @@ class RLTOnlineRLConfig:
     # If True, BC target is executed action on HUMAN/MIXED steps (VLA ref otherwise).
     # Actor still conditions on live VLA ref_chunk. Matches the trainer path README.
     bc_imitate_human: bool = False
+    # What is stored as ref_chunk on human/intervention steps.
+    # "vla": keep the live VLA chunk (same input deploy will see).
+    # "executed": overwrite those rows with the action that was run.
+    intervened_ref: Literal["vla", "executed"] = "vla"
     # Scales ||Δμ - Δref||² on absolute pose (first 6 dims); 0 disables.
     delta_weight: float = 0.0
     # OpenPI-style acc/jerk on predicted absolute pose; 0 disables each term.
@@ -56,6 +60,11 @@ class RLTOnlineRLConfig:
     # Which actor produces a' in the critic Bellman target.
     # "online" = current π_θ (Evo-RLT); "target" = Polyak π_θ⁻ (textbook TD3).
     td_bootstrap_actor: Literal["online", "target"] = "online"
+    # When true, the actor BC term samples successful episodes (any row with
+    # success=1) plus every warmup row. Q maximization and smoothness stay on
+    # the full replay, so failure states still get a policy gradient.
+    # Critic always uses the full replay.
+    actor_success_only: bool = False
 
     actor_hidden_dim: int = 256
     actor_num_layers: int = 3
@@ -151,7 +160,10 @@ class EnvDriverConfig:
     rtc_inference_delay: int | None = None
     # Evo collect ``--rtc-action-queue-size-to-get-new-actions`` default (30).
     # Explicit null in yaml → max(1, rl.chunk_len - 1) like configure_rtc when unset.
+    # VLA phase refill. RL phase uses action_queue_size_to_get_new_actions_rl when set.
     action_queue_size_to_get_new_actions: int | None = 30
+    # None → same threshold as VLA. 0 → RL infers only after the queue is empty.
+    action_queue_size_to_get_new_actions_rl: int | None = None
     step_trace_stride: int = 0
     replay_feature_batch_size: int = 16
     enable_human_override: bool = False
@@ -331,9 +343,10 @@ def _dataclass_from_mapping(cls: type[Any], data: Mapping[str, Any]) -> Any:
             incoming.pop(key, None)
     if cls is EnvDriverConfig:
         legacy_vla = incoming.pop("action_queue_size_to_get_new_actions_vla", None)
-        legacy_rl = incoming.pop("action_queue_size_to_get_new_actions_rl", None)
         if incoming.get("action_queue_size_to_get_new_actions") is None:
-            # Prefer RL (Evo's primary horizon), then VLA, when migrating old yaml.
+            # Old yaml used the RL key as the only threshold. Keep that as the shared
+            # value; the RL field still receives the same key below.
+            legacy_rl = incoming.get("action_queue_size_to_get_new_actions_rl", None)
             if legacy_rl is not None:
                 incoming["action_queue_size_to_get_new_actions"] = legacy_rl
             elif legacy_vla is not None:
