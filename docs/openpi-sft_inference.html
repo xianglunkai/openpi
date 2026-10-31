@@ -45,6 +45,7 @@
     <li><a href="#chain">服务端变换链</a></li>
     <li><a href="#loop">30 Hz 控制环</a></li>
     <li><a href="#analysis">一拍的数值账</a></li>
+    <li><a href="#cobot-roundtrip">Cobot 推理怎么走回来</a></li>
     <li><a href="#appendix">附录 · 数学推导</a></li>
   </ol>
 </nav>
@@ -291,6 +292,40 @@ $$</div>
 
 <h3>7.5 服务器不重算统计量</h3>
 <p><code>create_trained_policy</code> 从 <code>checkpoint_dir/assets/&lt;asset_id&gt;</code> 读 <code>norm_stats</code>，不读训练机上后来又跑的 <code>compute_norm_stats</code>。asset_id 在普通配置里是 <code>screw_sorting_single</code>。若落地时把 repo 改成 <code>screw_sorting_single_sft_ep280_v30_steam</code> 或代码里 RTC 配置用的 <code>screw_sorting_single_sft_ep279_annotated</code>，服务端目录名必须跟着变。统计量描述的是 delta 之后的 7 维，换数据集而不换 stats，等价于用别人的 \(q_{01},q_{99}\) 做仿射。</p>
+
+<h2 id="cobot-roundtrip">8. Cobot 推理怎么走回来</h2>
+<p>推理不把数据集的右边再映射一次。AgileX Cobot Magic 的客户端在 <code>env.get_observation</code> 里已经交出训练 Repack 的左边：</p>
+<pre><code>{
+  "state": qpos,          # 双臂 (14,)，单右臂时 real_env 切成 (7,)
+  "images": {
+    "cam_high": ...,
+    "cam_left_wrist": ...,   # 单臂配置里没有这一路
+    "cam_right_wrist": ...
+  }
+}</code></pre>
+<p>深度图在这里被丢掉。图像是 uint8、CHW、224。<code>CobotInputs</code> 或 <code>CobotSingleArmInputs</code> 再装进三个固定槽。缺的相机是黑图加 <code>image_mask=False</code>，槽名仍是 <code>base_0_rgb</code>、<code>left_wrist_0_rgb</code>、<code>right_wrist_0_rgb</code>。这和训练进模型的名字相同，所以归一化、分词、补到 32 维可以共用。</p>
+<p>网络输出仍在归一化的增量空间，形状 <code>(H, 32)</code>。回到机器人时名字几乎不动，数值按训练的逆序解开。<code>Policy.infer</code> 把<strong>已经过输入变换的</strong> <code>state</code> 和采样动作放进同一个字典，输出链再一起处理：</p>
+<ol>
+  <li><code>Unnormalize</code> 用 checkpoint 里的 q01、q99，把 <code>state</code> 和 <code>actions</code> 解回物理量。关节此时还是增量，夹爪还是绝对开合。</li>
+  <li><code>AbsoluteActions</code> 用这块掩码把当前 <code>state</code> 加回关节维。双臂掩码是 6 真、1 假、6 真、1 假；单臂是 6 真、1 假。夹爪不加。</li>
+  <li><code>CobotOutputs</code> 只留前 14 维，<code>CobotSingleArmOutputs</code> 只留前 7 维。这两份 Cobot 配置 <code>adapt_to_pi=False</code>，不做 Aloha 关节变号。</li>
+  <li><code>OptimizeActionsQP</code> 在绝对关节上平滑，<code>dt=0.033</code>，不改维度。</li>
+</ol>
+<p><code>real_env.step</code> 收到的就是这 14 或 7 个数。双臂时前 7 给左臂，后 7 给右臂。单右臂时左臂目标保持复位姿态 <code>_reset_position_left0</code>。图像没有逆变换，它们只作为条件进过三个槽。</p>
+<div class="formula">$$
+q_{\text{示教}}
+\xrightarrow{\ -\ s\ }
+\delta
+\xrightarrow{\ \text{分位数}\ }
+\hat\delta
+\xrightarrow{\ \text{网络}\ }
+\hat\delta'
+\xrightarrow{\ \text{反分位数}\ }
+\delta'
+\xrightarrow{\ +\ s_{\text{now}}\ }
+q_{\text{下发}}
+$$</div>
+<p>减的 state 和加回去的 state 都是当时的关节，不是 chunk 里相邻帧的差分。因此模型槽在训练和推理内部不变；变的是槽里的数，以及推理没有示教 <code>actions</code>。</p>
 
 <section class="appendix" id="appendix">
 <h2>附录 · 推理侧算法推导</h2>

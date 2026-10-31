@@ -45,6 +45,7 @@
     <li><a href="#loss">Actor 与 Critic</a></li>
     <li><a href="#steps">可落地步骤</a></li>
     <li><a href="#analysis">数量级核对</a></li>
+    <li><a href="#rlt-now">当前 RLT 改动</a></li>
     <li><a href="#appendix">附录 · 推导</a></li>
   </ol>
 </nav>
@@ -288,6 +289,17 @@ $$</div>
 
 <h3>7.6 在线 actor 看见的 VLA 是哪一种 RTC</h3>
 <p>yaml 打开了 <code>use_rtc: true</code>，VLA 的执行视野 20、延迟 7，RL 块视野 10。Machine A 若仍走 <code>guided_inference</code>，参考块是测试期引导采样，不是第 RTC 文档 7.1 节那种钉死前缀的采样。actor 的 BC 目标跟着这个参考走。把 Machine A 换成 <code>pi05_cobot_screw_sorting_single_rtc</code> 的 checkpoint 而不改采样函数，BC 会去模仿一个训练分布之外的样本。在线环和离线 token 训练可以分开换，但参考块的生成方式要和那个 checkpoint 的 <code>rtc_max_delay</code> 一致。</p>
+
+<h2 id="rlt-now">8. 当前 RLT 改动</h2>
+<p>token 的结构没换：1 个查询、2 层交叉注意力、宽 2048，重建的仍是 stop-gradient 之后的图像 prefix。改的是这块 token 坐在哪一份 VLA 上，以及那份 VLA 在 Cobot 上怎么采样。</p>
+<h3>8.1 两阶段 token 接在 RTC-SFT 上面</h3>
+<p><code>pi05_cobot_screw_sorting_single_two_staged_rlt_rtc</code> 的模型是 <code>Pi0Config(pi05=True, rtc_max_delay=10, action_horizon=32)</code>。权重从 <code>pi05_cobot_screw_sorting_single_rtc</code> 的 step 29999 加载，而不是从视野 50 的普通 SFT。数据是 <code>screw_sorting_single_sft_ep279_annotated</code>，相机仍是高位和右腕。<code>rlt_alpha=0</code>，<code>ema_decay=None</code>，优化器只动 <code>rlt_module</code>。冻结的 VLA 因此保持 RTC 训练出来的速度场，不会被 EMA 漂走。</p>
+<p>因为 <code>rtc_max_delay</code> 留在配置里，服务这份 checkpoint 时 <code>Policy._training_rtc</code> 为真。在线或 RTC 客户端一旦把剩余动作放进 <code>obs["actions"]</code>，<code>guided_inference</code> 会钉死前 <code>d</code> 步，而不是用 \(W,\lambda\) 去拉。参考块 <code>ref_chunk</code> 就是这种前缀条件样本切出来的短块。actor 的 BC 目标跟着它走。把这份权重装进仍按引导采样的服务，token 没坏，坏的是 VLA 参考和训练条件不一致。</p>
+<p>α=0 时重建不走动作损失，<code>extract_prefix_embeddings</code> 只看图像。RTC 改变的是动作专家看见的时间，不改变图像 token 的槽。所以同一套三槽（单臂左腕 mask 为假）上，token 的输入契约和普通两阶段 RLT 相同。变的是部署时 VLA 吐出的参考轨迹。</p>
+<h3>8.2 双臂扎带上的同一套 token</h3>
+<p><code>pi05_cobot_zip_tie_two_staged_rlt</code> 用 <code>LeRobotCobotDataConfig</code>：14 维、三路相机都映射进 <code>cam_high</code>、<code>cam_left_wrist</code>、<code>cam_right_wrist</code>，三槽 mask 都为真。它加载扎带 SFT <code>pi05_zip_tie</code> 的 step 29999，训 15 000 步，α 仍是 0。模型视野保持默认 50，没有 <code>rtc_max_delay</code>。和螺丝 RTC 版相比，token 宽度和层数一样，进编码器的图像 token 多了左腕那 256 个有效 patch。在线 actor 若仍按 7 维 proprio 去接，会和这 14 维状态对不上；扎带的 \(z_{\mathrm{rl}}\) 要配双臂的 state 和动作统计。</p>
+<h3>8.3 和螺丝在线环的关系</h3>
+<p>原先的 <code>pi05_cobot_screw_sorting_single_two_staged_rlt</code> 仍从视野 50 的 SFT step 20000 出发，<code>rtc_max_delay=0</code>。Machine A 若换到 <code>…_two_staged_rlt_rtc</code>，warmup journal 里的 <code>ref_chunk</code> 不能沿用旧 VLA 的样本：块长从 50 变成 32，而且重叠区是钉死的前缀，不是引导拉出来的前缀。重建损失的数量级讨论不变；要重做的是参考块和 <code>norm_stats</code> 所描述的那条增量分布。</p>
 
 <section class="appendix" id="appendix">
 <h2>附录 · 算法推导</h2>

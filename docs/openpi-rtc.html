@@ -45,6 +45,7 @@
     <li><a href="#ode">引导后的欧拉步</a></li>
     <li><a href="#code">两套实现对照</a></li>
     <li><a href="#analysis">两条 RTC 不要合成一条</a></li>
+    <li><a href="#train-rtc">训练期 RTC 的机理与应用</a></li>
     <li><a href="#appendix">附录 · 推导</a></li>
   </ol>
 </nav>
@@ -268,7 +269,7 @@ $$</div>
 
 <h3>7.2 和这条损失匹配的采样</h3>
 <p><code>sample_actions_with_action_prefix</code> 把给定前缀写进噪声的前 \(d\) 行，每步欧拉之后再写回去，并且这些位置的流时间恒为 0，其余位置从 1 积分到 0。前缀因此一直停在数据端，和训练时 \(x_i=a_i,\ t_i=0\) 相同。前缀必须已经在模型空间里：pad 到 32 维、分位数归一化之后的 delta，不是 ROS 上的绝对弧度。函数注释写明它不替换 <code>sample_actions</code>。</p>
-<p><code>src/openpi/policies/policy.py</code> 里把 <code>action_prefix</code> 送进这个函数的 <code>infer</code> 目前整段注释。默认 <code>Policy.infer</code> 在 <code>use_rtc=True</code> 时走 <code>guided_inference</code>。那条路径对整段使用同一个标量时间，前缀从噪声出发，只靠引导项靠近上一块剩余。一个按第 7.1 节训练的网络，如果部署时不把前缀钉在 \(t=0\)，看到的输入分布是「所有位置同一个 \(t\)、前缀也是噪声」，训练里没有这个条件。</p>
+<p><code>Policy.infer</code> 在 <code>use_rtc=True</code> 时仍进入 <code>guided_inference</code>，并传入 <code>training_rtc</code>。该标志来自 checkpoint 的 <code>rtc_max_delay&gt;0</code>。为真时，函数在内部改走 <code>sample_actions_with_action_prefix</code>，前 <code>d</code> 步钉在 \(t=0\)。为假时，整段仍用一个标量时间，前缀从噪声出发，只靠引导项靠近上一块剩余。普通 SFT 权重若被当成 RTC-SFT 来钉前缀，看到的就是训练里没有的条件。接线细节在第 8 节。</p>
 
 <h3>7.3 引导路径上的一个数</h3>
 <p>仍用 \(t=0.4\)、\(\sigma=0.2\)、\(\beta=10\)。先验方差 \(\sigma^2=0.04\)。</p>
@@ -282,9 +283,36 @@ $$</div>
 <p>单位雅可比时，修正量等于 \(W(A-\hat a_1)\)，欧拉步减去 \(\Delta t\cdot 10\cdot e\)。\(\Delta t=-0.1\)，所以这一步在硬锁区（\(W=1\)）沿误差方向移动 \(1.0\times e\)。误差若是 0.3（归一化动作单位），单步就把潜变量拽动 0.3，和流匹配步 \(0.1 v\) 同阶甚至更大。这就是 \(\beta\) 截断的作用：不截断时 \(\lambda\approx 18\)，同一步会拽动 \(1.8 e\)。JAX 默认 \(\sigma=0.2\) 比 PyTorch <code>sigma_d=1</code> 更强，因为分母里的 \(\sigma^2\) 更小。</p>
 
 <h3>7.4 哪条路径在训练</h3>
-<p><code>scripts/train.py</code> 走 JAX <code>Pi0.compute_loss</code>，前缀时间不会被盖掉。PyTorch <code>pi0_pytorch.py</code> 的 <code>forward</code> 在 <code>rtc_max_delay&gt;0</code> 分支里先把 <code>time</code> 变成 <code>(B, H)</code>，紧接着又执行 <code>time_expanded = time[:, None, None]</code>。这一行会把刚算好的逐位置时间盖掉。理解 RTC-SFT 的损失时以 <code>src/openpi/models/pi0.py</code> 和 <code>rtc.py</code> 为准，不要以这段 PyTorch <code>forward</code> 为准。</p>
+<p><code>scripts/train.py</code> 走 JAX <code>Pi0.compute_loss</code>。PyTorch <code>PI0Pytorch.forward</code> 现在同样在 <code>rtc_max_delay&gt;0</code> 时把 <code>time</code> 乘上 postfix 掩码，并用这个逐位置时间做 <code>x_t</code> 和 <code>embed_suffix</code>。两条实现的训练目标对齐。部署时谁走前缀钉死、谁走引导，由下一节的 <code>training_rtc</code> 决定。</p>
 
-<div class="callout note"><strong>部署时要选同一条条件。</strong> 普通 SFT checkpoint 用 <code>guided_inference</code>。RTC-SFT checkpoint 要用 <code>sample_actions_with_action_prefix</code>，并且前缀长度不要超过训练见过的 10。现在服务端默认没有把第二条接上。</div>
+<div class="callout note"><strong>部署时要选同一条条件。</strong> 普通 SFT 的 <code>training_rtc</code> 为假，走引导。RTC-SFT 的 <code>training_rtc</code> 为真，走前缀钉死，前缀长度不要超过训练见过的 10。服务端按权重上的 <code>rtc_max_delay</code> 自动分支，见第 8 节。</div>
+
+<h2 id="train-rtc">8. 训练期 RTC 的机理与应用</h2>
+<p>最早写进模型的训练期 RTC 在 <code>src/openpi/models/rtc.py</code>，没有自己的权重。<code>Pi0Config.rtc_max_delay=0</code> 时 <code>compute_loss</code> 不调用它，整段动作共享一个流时间。大于 0 时，每条样本先抽延迟，再只在后半段上回归速度。</p>
+<h3>8.1 机理</h3>
+<p>四个纯函数把条件写进现有的流匹配，不改网络结构：</p>
+<ol>
+  <li><code>sample_delays</code>：\(d\sim\mathrm{Unif}\{0,\ldots,D_{\max}\}\)。螺丝 RTC 配置 \(D_{\max}=10\)，\(H=32\)。</li>
+  <li><code>postfix_mask</code>：下标 \(i&lt;d\) 为 0，其余为 1。</li>
+  <li><code>interpolate</code>：\(t_i=t_b m_i\)。前缀 \(t_i=0\)，所以 \(x_i=a_i\)，就是干净示教。后半段仍是 \(x_i=t_b\varepsilon_i+(1-t_b)a_i\)。速度目标 \(u=\varepsilon-a\) 两段都算。</li>
+  <li><code>scale_per_pos_loss</code>：前缀损失乘 0，再乘 \(H/n_{\mathrm{post}}\)。<code>train.py</code> 对结果取均值时，等于只平均后半段，延迟长的样本不会因为非零项更少而变轻。</li>
+</ol>
+<div class="formula">$$
+x_i=
+\begin{cases}
+a_i & i&lt;d\\
+t_b\varepsilon_i+(1-t_b)a_i & i\ge d
+\end{cases}
+\qquad
+\tilde\ell_i=\ell_i\, m_i\, \frac{H}{\sum_j m_j}
+$$</div>
+<p>π0.5 把这个 <code>(B, H)</code> 时间送进 adaRMS。<code>posemb_sincos</code> 对二维时间做 <code>einsum("bi,j-&gt;bij")</code>，每个动作 token 有自己的 scale、shift、gate。前缀 token 的条件是 \(t=0\)。注意力块不变：后半段看得到前缀上的干净关节，这是条件，不是损失。</p>
+<p>和它匹配的采样是 <code>sample_actions_with_action_prefix</code>。给定前缀写进潜变量的前 \(d\) 行，那些位置的流时间恒为 0，每步欧拉后再写回。前缀因此一直停在数据端。前缀必须已经在模型空间里：分位数之后、补到 32 维的增量，不是 ROS 上的绝对弧度。</p>
+<h3>8.2 和测试期引导怎么接上</h3>
+<p><code>guided_inference</code> 增加了 <code>training_rtc</code>。为真且带来了 <code>prev_action</code> 时，取前 <code>d</code> 步交给 <code>sample_actions_with_action_prefix</code>，不再走 \(W\) 和 \(\lambda\)。为假时仍是整段从噪声积分的引导。<code>Policy</code> 用权重上的 <code>rtc_max_delay&gt;0</code> 设置这个开关，并把它放进 <code>module_jit</code> 的 <code>static_argnames</code>，避免两种采样编进同一个 XLA 图。</p>
+<p>客户端 <code>RuntimeRTC</code> 在队列短于阈值时取出剩余动作，用 <code>pad_rtc_prev_actions_hold_last</code> 把长度补到 <code>execution_horizon</code>：不够就重复最后一拍，而不是补 0。然后放进 <code>obs["actions"]</code>。<code>Policy.infer</code> 先跑输入变换，再把变换后的 <code>actions</code> 当作 <code>prev_action</code>。因此钉死用的前缀和训练时的 \(a_i\) 在同一空间。长度短于 <code>d</code> 会直接报错，要求先 hold-pad 到执行视野。</p>
+<p>当前把 <code>rtc_max_delay=10</code>、<code>action_horizon=32</code> 写进配置的有 <code>pi05_cobot_screw_sorting_single_rtc</code>（数据 <code>screw_sorting_single_sft_ep279_annotated</code>，单右臂两相机）、<code>pi05_cobot_fold_clothes_rtc</code>（双臂三相机），以及下面 RLT 文档里的 <code>pi05_cobot_screw_sorting_single_two_staged_rlt_rtc</code>。普通 SFT 的 <code>rtc_max_delay</code> 仍是 0，推理继续走引导，不钉前缀。</p>
+<div class="callout note"><strong>应用时对的是条件，不是名字。</strong> RTC-SFT 的 checkpoint 在 <code>use_rtc=True</code> 时走前缀钉死。普通 SFT 的 checkpoint 在同样的客户端上走引导。两边都可以吃 Cobot 的 <code>obs["actions"]</code>，但前一种把前 <code>d</code> 步当成已经干净的数据，后一种只是用权重把去噪结果往剩余动作上拉。</div>
 
 <section class="appendix" id="appendix">
 <h2>附录 · RTC 的推导</h2>

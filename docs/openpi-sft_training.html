@@ -45,6 +45,7 @@
     <li><a href="#model">模型与损失</a></li>
     <li><a href="#run">训练循环与产物</a></li>
     <li><a href="#analysis">逐张量核对</a></li>
+    <li><a href="#cobot-map">Cobot 字段往返</a></li>
     <li><a href="#appendix">附录 · 数学推导</a></li>
   </ol>
 </nav>
@@ -339,6 +340,29 @@ $$</div>
 <p>0.99 的半衰期大约是 \(\ln 2 / 0.01 \approx 69\) 步，所以推理用的 EMA 几乎是最近一两百步的平均，不是全程平均。存盘间隔 5000 步，中间的 EMA 状态不会单独留档。</p>
 
 <div class="callout warn"><strong>和 RTC-SFT 不要混用同一句「流匹配损失」。</strong> <code>rtc_max_delay=0</code> 时，50 个时间步共享一个 \(t\)，损失盖住整段。RTC 配置把每个样本的前 \(d\) 步钉在干净示教上，损失只平均后半段，并且 \(H\) 是 32 不是 50。把普通 SFT 的 checkpoint 拿去按前缀采样，或把 RTC checkpoint 拿去整段从噪声积分，条件分布都对不上。细节在 RTC 文档。</div>
+
+<h2 id="cobot-map">8. Cobot 字段往返</h2>
+<p>训练配置里的 <code>RepackTransform</code> 只解决「磁盘上的键」和「后面变换要的键」不是同一套。右边是 LeRobot 里真实存在的路径，左边是 <code>CobotInputs</code> 要读的名字。模型内部不看见这张表。</p>
+<p>以双臂扎带 <code>pi05_zip_tie_merged_20260902</code> 为例，<code>LeRobotCobotDataConfig</code> 的默认映射只认一路 <code>observation.images.top</code>。这份数据是 AgileX 三相机，所以配置把三路都指过去：</p>
+<table>
+  <tr><th>训练时从数据集读取（右边）</th><th>装进流水线（左边）</th><th>接着被谁读</th></tr>
+  <tr><td><code>observation.images.cam_high</code></td><td><code>images.cam_high</code></td><td><code>CobotInputs</code> → 槽 <code>base_0_rgb</code></td></tr>
+  <tr><td><code>observation.images.cam_left_wrist</code></td><td><code>images.cam_left_wrist</code></td><td>槽 <code>left_wrist_0_rgb</code></td></tr>
+  <tr><td><code>observation.images.cam_right_wrist</code></td><td><code>images.cam_right_wrist</code></td><td>槽 <code>right_wrist_0_rgb</code></td></tr>
+  <tr><td><code>observation.state</code></td><td><code>state</code>，14 维</td><td>离散进 π0.5 文本，并给 <code>DeltaActions</code> 当减数</td></tr>
+  <tr><td><code>action</code></td><td><code>actions</code></td><td>先做关节增量，再归一化</td></tr>
+</table>
+<p><code>data_loader.py</code> 把 <code>repack_transforms</code> 放在 <code>CobotInputs</code> 前面。推理的 <code>create_trained_policy</code> 默认不带这份 repack：机器人客户端已经发左边这套名字。装到左边，是为了让训练样本从这一步起和真机观测共用 <code>CobotInputs</code>、<code>DeltaActions</code> 和分位数。</p>
+<p>单臂螺丝分拣用 <code>CobotSingleArmInputs</code>，数据集往往只有高位和右腕。左腕槽仍然存在，填黑图，<code>image_mask</code> 为假。关节是 7 维，delta 掩码是 <code>make_bool_mask(6, -1)</code>。双臂是 14 维，掩码是 <code>make_bool_mask(6, -1, 6, -1)</code>：每条臂 6 个关节减当前 state，夹爪保持绝对开合。</p>
+<p>过了 <code>CobotInputs</code> 之后，训练和推理进模型的字段名相同，π0.5 只认这一套：</p>
+<div class="formula">$$
+\begin{aligned}
+&\texttt{image.base\_0\_rgb},\ \texttt{left\_wrist\_0\_rgb},\ \texttt{right\_wrist\_0\_rgb}\\
+&\texttt{image\_mask},\quad \texttt{state}\in\mathbb R^{32},\quad \texttt{tokenized\_prompt}\\
+&\texttt{actions}\in\mathbb R^{H\times 32}\ \text{（仅训练）}
+\end{aligned}
+$$</div>
+<p><code>cam_high</code> 和 <code>observation.images.*</code> 到不了网络里。14 或 7 维在 <code>PadStatesAndActions</code> 里补到 32。补出来的维同样进流匹配损失，网络会把它们的速度学向 0。推理没有 <code>actions</code>，模型自己采样；槽的名字不因此改变。</p>
 
 <section class="appendix" id="appendix">
 <h2>附录 · 工程里的数学</h2>
