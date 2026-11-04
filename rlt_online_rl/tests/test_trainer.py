@@ -419,37 +419,4 @@ def test_delta_chunk_normalization_broadcasts_batched_state0(tmp_path) -> None:
     assert np.allclose(restored, chunk_abs, atol=1e-5)
 
 
-def test_truncate_policy_return_stops_before_human() -> None:
-    from rlt_online_rl.inference import truncate_policy_return_at_intervention
-
-    class Step:
-        def __init__(self, source: int, reward_flag: bool = False) -> None:
-            self.source = source
-            self.intervention_flag = reward_flag
-
-    policy = Step(int(TransitionSource.RL))
-    human = Step(int(TransitionSource.HUMAN))
-    rewards = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
-    trimmed, truncated = truncate_policy_return_at_intervention(
-        rewards,
-        [policy, policy, human, human],
-        next_step_is_human=False,
-    )
-    assert truncated
-    assert np.allclose(trimmed, [0.0, 0.0, 0.0, 0.0])
-
-    kept, started_human = truncate_policy_return_at_intervention(
-        rewards,
-        [human, human, human, human],
-        next_step_is_human=False,
-    )
-    assert not started_human
-    assert np.allclose(kept, rewards)
-
-    _, next_human = truncate_policy_return_at_intervention(
-        np.zeros(4, dtype=np.float32),
-        [policy, policy, policy, policy],
-        next_step_is_human=True,
-    )
-    assert next_human
 

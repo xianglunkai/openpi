@@ -744,37 +744,6 @@ class MachineAFeatureClient:
         return unpacked
 
 
-def _step_is_human(step: Any) -> bool:
-    source = int(step.source)
-    return (
-        source == int(TransitionSource.HUMAN)
-        or source == int(TransitionSource.MIXED)
-        or bool(step.intervention_flag)
-    )
-
-
-def truncate_policy_return_at_intervention(
-    rewards: np.ndarray,
-    window_steps: list[Any],
-    *,
-    next_step_is_human: bool,
-) -> tuple[np.ndarray, bool]:
-    """Drop policy credit once a human takes over.
-
-    A window that already starts under human control keeps its reward. A policy
-    window that hits a human step, or whose next step is human, is terminal so
-    the later success does not bootstrap back onto the policy actions.
-    """
-    human_at = next((index for index, step in enumerate(window_steps) if _step_is_human(step)), None)
-    if human_at is None:
-        return rewards, bool(next_step_is_human)
-    if human_at == 0:
-        return rewards, False
-    trimmed = np.array(rewards, dtype=np.float32, copy=True)
-    trimmed[human_at:] = 0.0
-    return trimmed, True
-
-
 class EnvDriver:
     """B4 rollout driver.
 
@@ -1522,15 +1491,9 @@ class EnvDriver:
         source_chunk = np.asarray([int(step.source) for step in window_steps], dtype=np.uint8)
         source, intervention = self._resolve_window_source(window_steps)
         actual_steps = len(window_steps)
-        next_offset = window.start_offset + actual_steps
-        next_step_is_human = False
-        if next_offset < len(segment.raw_indices):
-            next_step_is_human = _step_is_human(raw_episode.steps[segment.raw_indices[next_offset]])
-        rewards, truncated = truncate_policy_return_at_intervention(
-            rewards,
-            window_steps,
-            next_step_is_human=next_step_is_human,
-        )
+        # One trajectory: a human takeover does not end the return. The success
+        # reward stays on the executed steps and bootstraps back through the
+        # policy actions that led up to the intervention.
         # Human actions always stay in action_chunk for bc_imitate_human.
         # "executed" also copies them into ref on those rows; "vla" does not.
         ref_chunk = np.asarray(current_payload["ref_chunk"], dtype=np.float32)
@@ -1543,7 +1506,7 @@ class EnvDriver:
             ref_chunk=ref_chunk,
             action_chunk=action_chunk,
             rewards=rewards,
-            done=bool(any(step.done for step in window_steps) or last_step.done or truncated),
+            done=bool(any(step.done for step in window_steps) or last_step.done),
             next_z_rl=np.asarray(next_payload["z_rl"], dtype=np.float32),
             next_proprio=np.asarray(next_payload["proprio"], dtype=np.float32),
             next_ref_chunk=np.asarray(next_payload["ref_chunk"], dtype=np.float32),

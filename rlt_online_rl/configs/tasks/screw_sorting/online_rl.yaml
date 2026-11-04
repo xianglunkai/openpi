@@ -91,7 +91,7 @@ runtime:
     seed: 0
     # Fixed mix so warmup VLA rows do not dominate the batch.
     sample_strategy: stratified
-    recent_episode_window: 30
+    recent_episode_window: 60
     recent_online_ratio: 0.4
     warmup_demo_ratio: 0.3
     human_intervention_ratio: 0.3
@@ -118,7 +118,7 @@ runtime:
     - -0.00476837158203125
     - -0.00209808349609375
     - 0.09
-    actor_deterministic: false
+    actor_deterministic: true
     # Paper screw vla_horizon=50; RL chunk_length=15 (≈2*delay + margin at 180ms / 30Hz).
     vla_chunk_exec_horizon: 32
     rl_chunk_exec_horizon: null
