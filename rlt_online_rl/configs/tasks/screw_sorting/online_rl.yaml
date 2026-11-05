@@ -12,7 +12,7 @@ experiment:
 
     gamma: 0.99
     # Overrides gamma: 1/(1-γ) = 30 Hz * 4 s = 120 control steps.
-    credit_horizon_sec: 4.0
+    credit_horizon_sec: 5
     fixed_std: 0.002
 
      # vla: ref stays the live VLA chunk reference_dropout_prob=0. 
@@ -35,7 +35,7 @@ experiment:
     l2c2_critic_weight: 0.0
     warmup_bc_weight: 3.0
     warmup_q_weight: 1.0
-    online_bc_weight: 3.0
+    online_bc_weight: 1.5
     online_q_weight: 1.0
     # HUMAN/MIXED steps BC to the executed action.
     bc_imitate_human: true
@@ -52,10 +52,11 @@ experiment:
     actor_update_period: 2
 
     # Critic TD next-action source: online/target.
-    td_bootstrap_actor: target
-    # BC only on successful episodes (warmup counts as success).
-    # Q maximization and smoothness stay on the full replay.
-    actor_success_only: true
+    td_bootstrap_actor: online
+    # BC: warmup, autonomous successes, and the human/mixed rows of an
+    # intervened success. The policy prefix of an intervened success is not
+    # cloned back to the VLA. Q and smoothness stay on the full replay.
+    actor_success_only: false
 
     warmup_min_size: 1200
     warmup_post_collect_updates: 50000
@@ -118,7 +119,7 @@ runtime:
     - -0.00476837158203125
     - -0.00209808349609375
     - 0.09
-    actor_deterministic: true
+    actor_deterministic: false
     # Paper screw vla_horizon=50; RL chunk_length=15 (≈2*delay + margin at 180ms / 30Hz).
     vla_chunk_exec_horizon: 32
     rl_chunk_exec_horizon: null

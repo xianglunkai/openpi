@@ -12,7 +12,7 @@
 # Usage:
 #   bash run_start_eval.sh
 #   bash run_start_eval.sh --attach
-#   RLT_ACTOR_SNAPSHOT=runs/screw_sorting/actor_snapshot/actor_snapshot.pkl bash run_start_eval.sh
+#   RLT_ACTOR_SNAPSHOT=runs/screw_sorting/offline_train_bcq/actor_snapshot/actor_snapshot.pkl bash run_start_eval.sh
 #
 # Inside tmux:
 #   Ctrl+b then window number   switch window
@@ -26,6 +26,7 @@ OPENPI_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SESSION_NAME="${RLT_EVAL_TMUX_SESSION:-rlt_eval}"
 CONDA_ENV="${RLT_CONDA_ENV:-rl-tokens}"
 CONDA_SH="${CONDA_SH:-${HOME}/miniconda3/etc/profile.d/conda.sh}"
+export RLT_ACTOR_SNAPSHOT="${RLT_ACTOR_SNAPSHOT:-runs/screw_sorting/offline_train_bcq/best_actor_snapshot.pkl}"
 ATTACH_ONLY=0
 
 usage() {
@@ -38,7 +39,7 @@ Options:
 
 Environment overrides:
   RLT_EVAL_CONFIG       Config YAML (default: configs/tasks/screw_sorting/online_rl.yaml)
-  RLT_ACTOR_SNAPSHOT    Actor snapshot for eval (default: runs/screw_sorting/best_actor_snapshot.pkl)
+  RLT_ACTOR_SNAPSHOT    Actor snapshot for eval (default: runs/screw_sorting/offline_train_bcq/best_actor_snapshot.pkl)
   RLT_MACHINE_A_WS_URL  Machine A websocket URL (default: ws://0.0.0.0:8000)
 
 Windows created:

@@ -19,7 +19,7 @@ cd "${SCRIPT_DIR}"
 
 TASK="${RLT_TASK:-screw_sorting}"
 TASK_DIR="${RLT_TASK_DIR:-runs/${TASK}}"
-REPLAY_PATH="${RLT_REPLAY_PATH:-${TASK_DIR}/replay/replay_journal_sft_chunk10.pkl}"
+REPLAY_PATH="${RLT_REPLAY_PATH:-${TASK_DIR}/replay/replay_journal.pkl}"
 MODEL_DIR="${RLT_MODEL_DIR:-${TASK_DIR}/offline_train_bcq}"
 PHASE="${RLT_PHASE:-all}"
 SOURCE="${RLT_SOURCE:-all}"

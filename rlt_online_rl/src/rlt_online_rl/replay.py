@@ -447,15 +447,40 @@ class ReplayBuffer:
             return {key: value[indices].copy() for key, value in self._storage.items()}
 
     def _actor_success_indices(self) -> np.ndarray:
-        """Warmup rows, plus every row from an episode that has success=1 anywhere."""
+        """Rows whose behavior-cloning label is a successful action.
+
+        Warmup stays in. A success with no intervention keeps every row.
+        An intervened success keeps the human and mixed rows only: the policy
+        prefix of that episode is the VLA motion the human replaced, so it is
+        not a cloning target. Q sampling does not use this mask.
+        """
         assert self._storage is not None
         phase = np.asarray(self._storage["collection_phase_id"][: self._size])
         success = np.asarray(self._storage["success"][: self._size]).reshape(-1)
         episode_id = np.asarray(self._storage["episode_id"][: self._size]).reshape(-1)
+        source = np.asarray(self._storage["source"][: self._size]).reshape(-1)
+        source_chunk = np.asarray(self._storage["source_chunk"][: self._size])
+        intervention = np.asarray(self._storage["intervention_flag"][: self._size]).reshape(-1)
         good_episodes = np.unique(episode_id[success > 0])
-        in_success_episode = np.isin(episode_id, good_episodes) if good_episodes.size else np.zeros(self._size, dtype=bool)
+        in_success_episode = (
+            np.isin(episode_id, good_episodes) if good_episodes.size else np.zeros(self._size, dtype=bool)
+        )
+        human_or_mixed = (
+            intervention
+            | (source == int(TransitionSource.HUMAN))
+            | (source == int(TransitionSource.MIXED))
+            | np.any(source_chunk == int(TransitionSource.HUMAN), axis=1)
+            | np.any(source_chunk == int(TransitionSource.MIXED), axis=1)
+        )
+        intervened_episodes = np.unique(episode_id[in_success_episode & human_or_mixed])
+        in_intervened_success = (
+            np.isin(episode_id, intervened_episodes)
+            if intervened_episodes.size
+            else np.zeros(self._size, dtype=bool)
+        )
+        policy_prefix = in_success_episode & in_intervened_success & ~human_or_mixed
         warmup = phase == COLLECTION_PHASE_WARMUP
-        return np.flatnonzero(in_success_episode | warmup)
+        return np.flatnonzero((in_success_episode & ~policy_prefix) | warmup)
 
     def _sample_uniform_indices(self, batch_size: int, *, allowed: np.ndarray | None = None) -> np.ndarray:
         if allowed is None:
