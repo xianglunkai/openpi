@@ -33,7 +33,7 @@ class FakeReplay:
         self._batch = batch
         self._adds_total = batch["z_rl"].shape[0]
 
-    def sample_batch(self, _batch_size: int, *, success_only: bool = False) -> dict[str, np.ndarray]:
+    def sample_batch(self, _batch_size: int) -> dict[str, np.ndarray]:
         return self._batch
 
     def stats(self) -> dict[str, int]:
@@ -146,64 +146,6 @@ def test_train_step_bc_stays_on_ref_when_human_imitate_disabled() -> None:
     # Policy-only metric is undefined on an all-human batch (mask sum=0 → 0).
     # Disabled path BCs to ref (zeros), not executed (ones), so the two penalties differ.
     assert not np.isclose(float(metrics["bc_penalty"]), float(metrics["bc_human_penalty"]))
-
-
-def _params_allclose(left, right) -> bool:
-    return all(
-        np.allclose(np.asarray(old), np.asarray(new))
-        for old, new in zip(jax.tree.leaves(left), jax.tree.leaves(right), strict=True)
-    )
-
-
-def test_success_batch_filters_bc_but_q_uses_full_replay() -> None:
-    cfg = dataclasses.replace(
-        _config(),
-        actor_update_period=1,
-        reference_dropout_prob=0.0,
-        delta_acc_weight=0.0,
-        delta_jerk_weight=0.0,
-        l2c2_policy_weight=0.0,
-    )
-    full_np = _batch(cfg)
-    success_np = _batch(cfg)
-    full_np["z_rl"] = np.ones_like(full_np["z_rl"])
-    success_np["z_rl"] = np.zeros_like(success_np["z_rl"])
-    full = {k: jax.numpy.asarray(v) for k, v in full_np.items()}
-    success = {k: jax.numpy.asarray(v) for k, v in success_np.items()}
-
-    def _step(full_batch, success_batch, *, bc_weight: float, q_weight: float):
-        state, actor, critic = init_train_state(cfg, rng=jax.random.PRNGKey(0))
-        return train_step(
-            state,
-            full_batch,
-            actor=actor,
-            critic=critic,
-            rl_config=cfg,
-            actor_batch=success_batch,
-            bc_weight=bc_weight,
-            q_weight=q_weight,
-        )
-
-    full_shift = dict(full)
-    full_shift["z_rl"] = jax.numpy.full_like(full["z_rl"], 0.5)
-    success_shift = dict(success)
-    success_shift["z_rl"] = jax.numpy.full_like(success["z_rl"], -0.5)
-
-    state_bc_ref, bc_base = _step(full, success, bc_weight=1.0, q_weight=0.0)
-    state_bc_full, bc_full = _step(full_shift, success, bc_weight=1.0, q_weight=0.0)
-    state_bc_success, bc_success = _step(full, success_shift, bc_weight=1.0, q_weight=0.0)
-    assert _params_allclose(state_bc_ref.actor_params, state_bc_full.actor_params)
-    assert np.isclose(float(bc_base["bc_penalty"]), float(bc_full["bc_penalty"]))
-    assert not _params_allclose(state_bc_ref.actor_params, state_bc_success.actor_params)
-    assert not np.isclose(float(bc_base["bc_penalty"]), float(bc_success["bc_penalty"]))
-
-    state_q_ref, q_base = _step(full, success, bc_weight=0.0, q_weight=1.0)
-    state_q_full, q_full = _step(full_shift, success, bc_weight=0.0, q_weight=1.0)
-    state_q_success, q_success = _step(full, success_shift, bc_weight=0.0, q_weight=1.0)
-    assert np.isclose(float(q_base["actor_q"]), float(q_success["actor_q"]))
-    assert _params_allclose(state_q_ref.actor_params, state_q_success.actor_params)
-    assert not np.isclose(float(q_base["actor_q"]), float(q_full["actor_q"]))
-    assert not _params_allclose(state_q_ref.actor_params, state_q_full.actor_params)
 
 
 def test_soft_update_changes_target_params() -> None:

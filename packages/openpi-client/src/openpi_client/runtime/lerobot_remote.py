@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import socket
 import struct
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -82,6 +84,20 @@ def build_lerobot_frame(observation: dict, action: dict, task: str) -> dict:
     is_intervention = 1.0 if bool(hil_info.get("is_intervention", False)) else 0.0
     frame["is_intervention"] = np.array([is_intervention], dtype=np.float32)
     return frame
+
+
+def append_hil_outcome(root: Path, episode_index: int, status: str) -> None:
+    """Record the episode outcome next to a saved LeRobot episode.
+
+    ``s`` is ``success``. ``f`` and a timeout are both ``failure``. Neither is a
+    column in the frame parquet. ``episode_index`` is the index LeRobot
+    assigned, not the runtime counter.
+    """
+    path = Path(root) / "meta" / "hil_outcomes.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"episode_index": int(episode_index), "status": str(status)}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
 
 
 def storage_config_to_dict(cfg: Any) -> dict[str, Any]:

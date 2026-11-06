@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>螺丝分拣 π0.5 · FlashRT 落地手册</title>
+<style>
+  :root {
+    --paper: #f4efe6;
+    --ink: #241c16;
+    --muted: #6d6258;
+    --line: #e3d7c6;
+    --card: #fffaf3;
+    --copper: #b85a2a;
+    --copper-deep: #8a3e18;
+    --pine: #1f6b45;
+    --pine-bg: #e7f3eb;
+    --amber: #8a5a12;
+    --amber-bg: #fbf3df;
+    --sea: #1d4e5f;
+    --sea-bg: #e6f1f4;
+    --code: #1c1612;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    color: var(--ink);
+    background:
+      radial-gradient(900px 420px at 0% -10%, #f8e4cf 0%, transparent 60%),
+      radial-gradient(700px 380px at 100% 0%, #e7f0ea 0%, transparent 50%),
+      var(--paper);
+    font: 17px/1.65 "Iowan Old Style", Palatino, "Songti SC", "Noto Serif CJK SC", serif;
+  }
+  a { color: var(--copper-deep); }
+  .wrap { max-width: 70rem; margin: 0 auto; padding: 0 1.3rem; }
+  header.hero { padding: 2.6rem 0 1rem; }
+  .kicker {
+    font-family: "Avenir Next", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    font-size: .72rem;
+    color: var(--copper);
+    margin: 0 0 .45rem;
+  }
+  h1 {
+    font-size: clamp(2.1rem, 4.4vw, 3.3rem);
+    line-height: 1.08;
+    font-weight: 650;
+    letter-spacing: -.03em;
+    margin: 0 0 .7rem;
+  }
+  .lede { max-width: 42rem; font-size: 1.12rem; margin: 0; }
+  h2 { font-size: 1.55rem; margin: 2.3rem 0 .4rem; letter-spacing: -.02em; }
+  h3 { font-size: 1.05rem; margin: 1.15rem 0 .3rem; }
+  p, li { max-width: 46rem; }
+  nav.steps { display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 0; }
+  nav.steps a {
+    text-decoration: none;
+    font-family: "Avenir Next", "PingFang SC", sans-serif;
+    font-size: .8rem;
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .28rem .7rem;
+    color: var(--ink);
+  }
+  nav.steps a:hover { border-color: var(--copper); color: var(--copper-deep); }
+  .figure {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 1rem 1rem .8rem;
+    margin: 1.1rem 0 0;
+    box-shadow: 0 18px 40px rgba(60, 36, 12, .05);
+  }
+  .figure figcaption {
+    font-family: "Avenir Next", "PingFang SC", sans-serif;
+    font-size: .78rem;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin: .35rem .2rem 0;
+  }
+  svg { width: 100%; height: auto; display: block; }
+  .tech {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .8rem;
+    margin-top: .8rem;
+  }
+  .tech article, .pick article, .plate {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: .95rem 1rem 1rem;
+  }
+  .tech h3, .pick h3 { margin: .15rem 0 .35rem; }
+  .tag {
+    font-family: "Avenir Next", "PingFang SC", sans-serif;
+    font-size: .68rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--copper);
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: .65rem .9rem;
+    margin-top: .8rem;
+  }
+  .facts span {
+    display: block;
+    font-family: "Avenir Next", "PingFang SC", sans-serif;
+    font-size: .72rem;
+    color: var(--muted);
+  }
+  .step { display: grid; grid-template-columns: auto 1fr; gap: .9rem; margin-top: 1.35rem; }
+  .num {
+    width: 2.25rem; height: 2.25rem; border-radius: 50%;
+    background: var(--ink); color: #f6efe4;
+    display: grid; place-items: center;
+    font-family: "Avenir Next", sans-serif; font-size: .92rem;
+  }
+  .where {
+    font-family: "Avenir Next", "PingFang SC", sans-serif;
+    font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; color: var(--copper);
+  }
+  .see { background: var(--pine-bg); border-radius: 12px; padding: .65rem .85rem; color: #143d28; max-width: 46rem; }
+  .see b, .trap b, .note b {
+    font-family: "Avenir Next", "PingFang SC", sans-serif;
+    font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+  }
+  .trap { background: var(--amber-bg); border-radius: 14px; padding: .8rem .95rem; margin: .8rem 0; max-width: 46rem; }
+  .trap b { color: var(--amber); }
+  .note { background: var(--sea-bg); border-radius: 14px; padding: .8rem .95rem; margin: .8rem 0; max-width: 46rem; color: #14343f; }
+  .note b { color: var(--sea); }
+  .pick { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; max-width: 52rem; }
+  pre {
+    background: var(--code); color: #f6efe6; border-radius: 14px;
+    padding: .9rem 1rem; overflow-x: auto; line-height: 1.5; max-width: 52rem;
+  }
+  code, pre { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .82rem; }
+  p code, li code, td code, .facts code { background: #efe6d8; color: var(--ink); padding: .04rem .28rem; border-radius: 5px; }
+  table { width: 100%; max-width: 52rem; border-collapse: collapse; background: var(--card); border-radius: 14px; overflow: hidden; font-size: .92rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: .5rem .7rem; text-align: left; vertical-align: top; }
+  th { font-family: "Avenir Next", "PingFang SC", sans-serif; font-size: .75rem; background: #f7f1e6; }
+  tr:last-child td { border-bottom: 0; }
+  footer { color: var(--muted); font-size: .86rem; margin: 2.4rem 0 3rem; max-width: 46rem; }
+  @media (max-width: 860px) {
+    .tech, .pick { grid-template-columns: 1fr; }
+    .step { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header class="hero"><div class="wrap">
+  <p class="kicker">OpenPI · FlashRT · 螺丝分拣 · 2026-11-06</p>
+  <h1>同一份仓库，<br>x86 训练，板上加速。</h1>
+  <p class="lede">x86 和 Orin 跑的都是这份 OpenPI。权重是 <code>pi05_cobot_screw_sorting_single</code> 的 29999。机器人仍连 8000，客户端不改。FlashRT 只替换板上这一个进程。</p>
+  <nav class="steps">
+    <a href="#flow">流程</a>
+    <a href="#tech">关键技术</a>
+    <a href="#s1">1 转换</a>
+    <a href="#s2">2 统计量</a>
+    <a href="#s3">3 精度</a>
+    <a href="#s4">4 换 PyTorch</a>
+    <a href="#s5">5 板上编译</a>
+    <a href="#s6">6 FlashRT 服务</a>
+    <a href="#s7">7 开关</a>
+  </nav>
+</div></header>
+<main><div class="wrap">
+
+<h2 id="flow">方法流程</h2>
+<p>上面四步在 x86 完成。下面两步只在要加速的那块板上做。8000 上始终只有一个策略进程。</p>
+<figure class="figure">
+  <svg viewBox="0 0 980 250" role="img" aria-label="从 JAX 权重到板上 FlashRT 的六步流程">
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1.2 L 8 5 L 0 8.8 z" fill="#b85a2a"/>
+      </marker>
+    </defs>
+    <rect x="16" y="28" width="948" height="78" rx="16" fill="#fff6ec" stroke="#e3d7c6"/>
+    <text x="32" y="50" fill="#8a3e18" font-family="Avenir Next, PingFang SC, sans-serif" font-size="12" letter-spacing="1.5">X86 · 训练环境 UV</text>
+    <g font-family="Avenir Next, PingFang SC, sans-serif" font-size="13" fill="#241c16">
+      <rect x="32" y="60" width="150" height="32" rx="8" fill="#241c16"/>
+      <text x="48" y="81" fill="#f6efe6">1  JAX 29999</text>
+      <path d="M190 76 H214" stroke="#b85a2a" stroke-width="1.6" marker-end="url(#arr)"/>
+      <rect x="222" y="60" width="170" height="32" rx="8" fill="#fff" stroke="#e3d7c6"/>
+      <text x="236" y="81">2  safetensors</text>
+      <path d="M400 76 H424" stroke="#b85a2a" stroke-width="1.6" marker-end="url(#arr)"/>
+      <rect x="432" y="60" width="200" height="32" rx="8" fill="#fff" stroke="#e3d7c6"/>
+      <text x="446" y="81">3  补上 norm_stats</text>
+      <path d="M640 76 H664" stroke="#b85a2a" stroke-width="1.6" marker-end="url(#arr)"/>
+      <rect x="672" y="60" width="270" height="32" rx="8" fill="#e7f3eb" stroke="#1f6b45"/>
+      <text x="686" y="81">4  8 帧余弦 ≥ 0.99</text>
+    </g>
+    <rect x="16" y="128" width="948" height="96" rx="16" fill="#eef6f4" stroke="#e3d7c6"/>
+    <text x="32" y="152" fill="#1d4e5f" font-family="Avenir Next, PingFang SC, sans-serif" font-size="12" letter-spacing="1.5">部署机 · 仍是这份仓库</text>
+    <g font-family="Avenir Next, PingFang SC, sans-serif" font-size="13" fill="#241c16">
+      <rect x="32" y="166" width="430" height="40" rx="10" fill="#fff" stroke="#e3d7c6"/>
+      <text x="48" y="191">x86 或 Orin：停 JAX，改跑 pytorch 启动脚本，端口 8000</text>
+      <rect x="490" y="166" width="450" height="40" rx="10" fill="#241c16"/>
+      <text x="506" y="191" fill="#f6efe6">Orin / Thor：另开 flashrt-venv，换 FlashRT 进程</text>
+    </g>
+  </svg>
+  <figcaption>客户端 main.py 不动。只有把进程从一台机器挪到另一台时，才改 host。</figcaption>
+</figure>
+
+<h2 id="tech">关键技术</h2>
+<div class="tech">
+  <article>
+    <div class="tag">动作</div>
+    <h3>先反归一化，再把增量加回关节</h3>
+    <p>模型吐出的是分位数空间里的数。训练时前 6 维先减去当前关节，变成增量，夹爪保持绝对值，然后才做 q01/q99。反归一化只把这个增量还原成弧度，还不是电机目标。</p>
+    <figure class="figure" style="box-shadow:none;margin-top:.6rem">
+      <svg viewBox="0 0 640 92" role="img" aria-label="动作从模型空间到关节目标">
+        <g font-family="Avenir Next, PingFang SC, sans-serif" font-size="13" fill="#241c16">
+          <rect x="8" y="22" width="132" height="48" rx="10" fill="#241c16"/>
+          <text x="22" y="44" fill="#f6efe6">模型 (50,32)</text>
+          <text x="22" y="60" fill="#e7cbb8" font-size="11">分位数空间</text>
+          <path d="M148 46 H176" stroke="#b85a2a" stroke-width="1.6" marker-end="url(#arr)"/>
+          <rect x="184" y="22" width="150" height="48" rx="10" fill="#fff6ec" stroke="#e3d7c6"/>
+          <text x="198" y="44">反归一化</text>
+          <text x="198" y="60" fill="#6d6258" font-size="11">前 6 维仍是增量</text>
+          <path d="M342 46 H370" stroke="#b85a2a" stroke-width="1.6" marker-end="url(#arr)"/>
+          <rect x="378" y="22" width="250" height="48" rx="10" fill="#e7f3eb" stroke="#1f6b45"/>
+          <text x="392" y="44">[:, :6] += 当前关节</text>
+          <text x="392" y="60" fill="#1f6b45" font-size="11">夹爪第 7 维不加 · 得到 (50,7)</text>
+        </g>
+      </svg>
+    </figure>
+  </article>
+  <article>
+    <div class="tag">环境</div>
+    <h3>两套 Python，不要装进对方</h3>
+    <p>x86 的 <code>uv</code> 里是 JAX 和 <code>torch==2.7.1</code>。板上的 <code>~/flashrt-venv</code> 里是 Jetson 轮子和 <code>flash_rt</code>。在 FlashRT 环境里 <code>pip install -e</code> 这份仓库，会把板上的 PyTorch 盖掉。</p>
+    <p>FlashRT 服务不再 import JAX。那个 venv 只再补 <code>websockets msgpack osqp scipy</code>。用它的 python 跑脚本，不要 <code>uv run</code>。</p>
+  </article>
+  <article>
+    <div class="tag">形状</div>
+    <h3>50 是动作块，10 是去噪步</h3>
+    <p>这份配置 <code>action_horizon=50</code>、<code>action_dim=32</code>。前 7 维才是右臂。官方 FlashRT 示例的 <code>(10, 7)</code> 是 LIBERO。时间维如果是 10，说明加载错了头，不要接电机。</p>
+    <p>相机是三路槽位：头顶、<b>全黑的左腕</b>、右腕。<code>num_views</code> 保持 3。收成 2 会让 token 错位。</p>
+  </article>
+  <article>
+    <div class="tag">不必改脚本的三处</div>
+    <h3>和 serve_policy 的已知差别</h3>
+    <p>左腕在正式路径里 <code>image_mask=False</code>。FlashRT 的 <code>predict</code> 没有 mask，黑图仍会被看见。接口补不上，不要为此改成两路相机。</p>
+    <p>缩放到 224 已在 <code>env.py</code> 里做完，正式服务再缩一次没有变化。<code>Task: …, State: …</code> 交给 FlashRT 的 <code>state=</code>，脚本里再包一次会把状态离散两遍。</p>
+  </article>
+</div>
+
+<div class="plate" style="margin-top:1rem">
+  <div class="tag">这份权重</div>
+  <div class="facts">
+    <div><span>配置</span><strong>pi05_cobot_screw_sorting_single</strong></div>
+    <div><span>JAX</span><code>checkpoints/pi05_cobot/.../29999</code></div>
+    <div><span>提示词</span>句号要留着，与现有启动脚本一致</div>
+    <div><span>数据集</span>130 集，53231 帧，30 Hz，480×640</div>
+    <div><span>现有入口</span><code>run_server_screw_sorting_single.sh</code></div>
+    <div><span>不碰</span>9101 的 RLT actor，也不写回 29999</div>
+  </div>
+</div>
+
+<h2 id="s1">1. 在 x86 上转成 safetensors</h2>
+<div class="step"><div class="num">1</div><div>
+  <p class="where">x86 · /home/xlk/work/openpi · uv 环境</p>
+  <p>只读 29999，不改它。不要在板上跑，板上没有这套 JAX。</p>
+<pre><code>cd /home/xlk/work/openpi
+uv run examples/convert_jax_model_to_pytorch.py \
+  --checkpoint_dir /home/xlk/work/openpi/checkpoints/pi05_cobot/pi05_cobot_screw_sorting_single/pi05_cobot_screw_sorting_single/29999 \
+  --config_name pi05_cobot_screw_sorting_single \
+  --output_path /home/xlk/work/openpi/checkpoints/pi05_cobot_screw_sorting_single_pytorch</code></pre>
+  <p><code>--checkpoint_dir</code> 指到含有 <code>params/</code> 的 29999，不要指进 <code>params</code>。</p>
+  <div class="see"><b>做完应看到</b><br><code>config.json</code> 里 <code>action_dim</code> 是 32，<code>action_horizon</code> 是 50，<code>precision</code> 是 <code>bfloat16</code>，旁边有 <code>model.safetensors</code>。</div>
+</div></div>
+
+<h2 id="s2">2. 补上统计量和分词器</h2>
+<div class="step"><div class="num">2</div><div>
+  <p>转换脚本到上一级目录找 <code>assets/</code>，会静默跳过。29999 的统计量在自己目录里，必须手动拷。π0.5 用 q01/q99，不用 mean/std。</p>
+<pre><code>OUT=/home/xlk/work/openpi/checkpoints/pi05_cobot_screw_sorting_single_pytorch
+mkdir -p "$OUT/assets/screw_sorting_single"
+cp /home/xlk/work/openpi/checkpoints/pi05_cobot/pi05_cobot_screw_sorting_single/pi05_cobot_screw_sorting_single/29999/assets/screw_sorting_single/norm_stats.json \
+   "$OUT/assets/screw_sorting_single/norm_stats.json"
+ls /home/xlk/work/openpi/models/paligemma_tokenizer/paligemma_tokenizer.model</code></pre>
+  <div class="see"><b>做完应看到</b><br>状态和动作的 <code>q01</code> 长度都是 7。分词器用训练时这份 SentencePiece，拷到板子的 <code>/data/checkpoints/paligemma_tokenizer.model</code>，并设 <code>FLASH_RT_PALIGEMMA_TOKENIZER</code>。</div>
+</div></div>
+
+<h2 id="s3">3. 在真实帧上对 JAX</h2>
+<div class="step"><div class="num">3</div><div>
+  <p class="where">x86 · 数据集 /data/huggingface/lerobot/openpi/screw_sorting_single_sft</p>
+  <p>均匀抽 8 帧。两边吃同一张图、同一个 7 维状态、同一段噪声，再走 <code>serve_policy</code> 的同一套输出，包括 QP。比的是机械臂会收到的 7 维指令。示教余弦只作参照，两边接近即可，不必等于 1。</p>
+<pre><code>cd /home/xlk/work/openpi
+uv run scripts/eval_screw_sorting_conversion.py \
+  --pytorch_dir /home/xlk/work/openpi/checkpoints/pi05_cobot_screw_sorting_single_pytorch \
+  --num 8 \
+  --out /tmp/screw_sorting_conversion.json</code></pre>
+  <div class="see"><b>通过线</b><br><code>cosine_min ≥ 0.99</code>。低于这条脚本会退出，不要换服务器。打印的毫秒是这台 x86 的耗时，不是板上的指标。第一次调用是编译，不计入。</div>
+</div></div>
+
+<h2 id="s4">4. 在当前部署机上换成 PyTorch</h2>
+<div class="step"><div class="num">4</div><div>
+  <p>x86 和 Orin 现在都是 <code>run_server_screw_sorting_single.sh</code>，读 JAX。余弦过线之后，在正在对外服务的那台机器上停掉它，改跑：</p>
+<pre><code>bash examples/mobile_aloha_AgileX/run_server_screw_sorting_single_pytorch.sh</code></pre>
+  <p>还是 <code>serve_policy.py</code>，还是 8000，还是原来的观测和 QP，只是目录里换成 <code>model.safetensors</code>。这是 OpenPI 自己的 PyTorch，不是 FlashRT。Orin 上先把第 2 步的目录拷过来。客户端 host 不用改。</p>
+  <div class="note"><b>拷到另一台机器时</b><br><code>rsync -a</code> 整个 pytorch 目录，以及分词器文件。不要把这个目录指回 29999，也不要把板子上可能多出来的缓存同步回去覆盖 JAX。</div>
+</div></div>
+
+<h2 id="s5">5. 只在板上编译 FlashRT</h2>
+<div class="step"><div class="num">5</div><div>
+  <p class="where">Orin 或 Thor · ~/flashrt-venv · 不要用 uv</p>
+<pre><code>python3 -m venv ~/flashrt-venv
+source ~/flashrt-venv/bin/activate
+python -m pip install -U pip
+# 先装本机 JetPack 对应的 aarch64 PyTorch。Orin 不要装 x86 的 cu124 轮子。
+pip install pybind11 cmake "numpy>=1.24" safetensors "transformers&lt;4.56" pandas pillow pyarrow
+git clone https://github.com/flashrt-project/FlashRT.git
+cd FlashRT
+git clone --depth 1 --branch v4.4.2 https://github.com/NVIDIA/cutlass.git third_party/cutlass
+pip install -e ".[torch]"</code></pre>
+  <p><code>transformers</code> 从 4.56 起分词路径坏了。可编辑安装必须在 <code>cmake</code> 之前，这样 <code>.so</code> 才会落进这个环境。</p>
+  <div class="pick">
+    <article>
+      <h3>Orin · SM87</h3>
+      <p>没有 FP8。快路径是 INT8。用 <code>-j4</code>，避免统一内存被编译打满。</p>
+<pre><code>sudo nvpmodel -m 0 && sudo jetson_clocks
+export PATH=/usr/local/cuda/bin:$PATH
+export CUDACXX=/usr/local/cuda/bin/nvcc
+cmake -B build_orin_sm87 -S . -DGPU_ARCH=87 \
+  -DFA2_ARCH_NATIVE_ONLY=ON \
+  -DFA2_HDIMS='96;128;256' -DFA2_DTYPES='bf16' \
+  -DPython3_EXECUTABLE="$(which python)"
+cmake --build build_orin_sm87 -j4</code></pre>
+    </article>
+    <article>
+      <h3>Thor · SM110</h3>
+      <p>默认 FP8。不生成 <code>flash_rt_fa2.so</code> 是预期。x86 的 flashrt 镜像不能拿来跑。</p>
+<pre><code>sudo jetson_clocks
+cmake -B build -S . -DGPU_ARCH=110
+cmake --build build -j$(nproc)</code></pre>
+    </article>
+  </div>
+  <div class="see"><b>做完应看到</b><br><code>python -c "import torch; print(torch.cuda.is_available())"</code> 为 True，并且能 <code>import flash_rt</code>。同一块板、同一个 JetPack，已经能 import 就不要重编。</div>
+</div></div>
+
+<h2 id="s6">6. 用 FlashRT 接上原来的 8000</h2>
+<div class="step"><div class="num">6</div><div>
+  <p>先停掉 <code>serve_policy</code>。仍在 <code>~/flashrt-venv</code> 里，不要 <code>uv run</code>，也不要 <code>pip install -e</code> 这份 OpenPI。</p>
+<pre><code>source ~/flashrt-venv/bin/activate
+pip install websockets msgpack osqp scipy
+export FLASH_RT_PALIGEMMA_TOKENIZER=/data/checkpoints/paligemma_tokenizer.model
+cd /home/xlk/work/openpi
+python scripts/serve_flashrt_screw_policy.py \
+  --checkpoint /data/checkpoints/pi05_cobot_screw_sorting_single_pytorch \
+  --port 8000</code></pre>
+  <p>脚本自己做这几件事，和 <code>policy_config.py</code> 的输出对齐：7 维状态按 q01/q99 归一化后连同裸提示词交给 FlashRT；回来后反归一化；前 6 维加上当前关节；夹爪不加；QP 权重 <code>w_data=1</code>、<code>w_acc=100</code>、<code>w_jerk=100</code>。Orin（计算能力 8.7）会在进程内打开 <code>FVK_PI05_RTX_FORCE_INT8</code>，退出即失效。</p>
+  <p>提示词与现有服务逐字相同，包括句号：<code>Please sort and return the silver screws in the grey box to their proper places.</code></p>
+  <div class="trap"><b>三件不要在脚本里再补</b><br>不要自己再包一层 <code>Task: …, State: …</code>。不要把 <code>num_views</code> 改成 2 来假装左腕 mask。480×640 的原始图不要直接送进这个进程，客户端已经在 <code>env.py</code> 缩到 224。RTC 会直接拒绝，当前这条螺丝服务本来也没开。</div>
+  <div class="see"><b>上电前</b><br>时间维必须是 50。前 6 维是绝对关节角，夹爪落在统计量里大约 0 到 0.036。空跑确认前 32 步不越限位，再低速跟一块。客户端每次仍只执行 32 步，不要在板上先砍成 10。</div>
+</div></div>
+
+<h2 id="s7">7. 板上开关，第一版就用这一列</h2>
+<table>
+  <tr><th>开关</th><th>这份模型</th><th>原因</th></tr>
+  <tr><td><code>num_views</code></td><td>3</td><td>头顶、黑左腕、右腕。2 会错位</td></tr>
+  <tr><td><code>num_steps</code></td><td>10</td><td>去噪步数，与 <code>sample_actions</code> 默认一致</td></tr>
+  <tr><td><code>vision_num_layers</code> / <code>pool</code></td><td>27 / 1</td><td>少一层或池化会先抹掉小螺丝</td></tr>
+  <tr><td><code>cache_frames</code></td><td>Orin 第一版 1</td><td>1 与 BF16 逐 bit 相同。2 复用上一帧视觉，工件在动时先不要开</td></tr>
+  <tr><td><code>FORCE_INT8</code></td><td>只在 Orin</td><td>SM87 没有 FP8。脚本已按计算能力设置</td></tr>
+  <tr><td><code>use_fp8</code></td><td>Thor 第一版</td><td>NVFP4 等这一版的形状和空跑都对了再开，且必须带 AWQ</td></tr>
+  <tr><td><code>state_prompt</code></td><td>fixed / 200</td><td>对齐 <code>max_token_len</code>。状态一变，exact 会重捕图</td></tr>
+</table>
+<div class="pick">
+  <article>
+    <h3>Orin 上别人公布的数字</h3>
+    <p>DROID、2 相机、<code>cache_frames=1</code>：124 ms，8.04 Hz，与 BF16 逐 bit 相同。这份权重是 3 路槽位、动作块 50，会更慢。用自己的 p50，不要拿 124 ms 当验收线。</p>
+  </article>
+  <article>
+    <h3>Thor 上别人公布的数字</h3>
+    <p>2 相机 FP8：纯 graph 40.71 ms，quickstart 约 44 ms。3 相机 encoder NVFP4 是 51.51 ms。协议不同就不要相减。锁频后再计，预热至少 20 次。</p>
+  </article>
+</div>
+
+<div class="note"><b>污染边界</b><br>脚本放在仓库里不会改训练，也不会被 <code>serve_policy</code> 引用。不要把 FlashRT 装进 uv。不要把 <code>--checkpoint</code> 指到 29999。8000 上先停再起，端口被占会直接失败，不会悄悄替换原来的服务。</div>
+
+<footer>
+  <p>权重与提示词来自 <code>run_server_screw_sorting_single.sh</code> 和 <code>pi05_cobot_screw_sorting_single</code>。增量动作来自 <code>use_delta_joint_actions</code> 与 <code>AbsoluteActions</code>。输出顺序对照 <code>policy_config.py</code>。板上延迟来自 FlashRT 的 Orin 指南和 README，测的是别的 checkpoint。</p>
+</footer>
+</div></main>
+</body>
+</html>

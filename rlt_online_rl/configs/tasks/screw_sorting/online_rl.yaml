@@ -17,7 +17,7 @@ experiment:
 
      # vla: ref stays the live VLA chunk reference_dropout_prob=0. 
      # executed: human rows of ref become， reference_dropout_prob > 0.
-    intervened_ref: vla
+    intervened_ref: executed
     reference_dropout_prob: 0.5
 
     bc_reduction: sum
@@ -26,14 +26,14 @@ experiment:
     action_clip_min: -1.0
     action_clip_max: 1.0
     # delta_weight scales ||Δμ - Δref||²; acc/jerk use OpenPI-style weights (dt=1/control_frequency_hz).
-    delta_weight: 1000.0
+    delta_weight: 0.0
     control_frequency_hz: 30.0
     delta_acc_weight: 300.0
     delta_jerk_weight: 300.0
     # L2C2 smoothness (HoST). 0 = off. Try policy=1.0, critic=0.1 to start.
     l2c2_policy_weight: 0.0
     l2c2_critic_weight: 0.0
-    warmup_bc_weight: 3.0
+    warmup_bc_weight: 1.5
     warmup_q_weight: 1.0
     online_bc_weight: 1.5
     online_q_weight: 1.0
@@ -52,15 +52,11 @@ experiment:
     actor_update_period: 2
 
     # Critic TD next-action source: online/target.
-    td_bootstrap_actor: online
-    # BC: warmup, autonomous successes, and the human/mixed rows of an
-    # intervened success. The policy prefix of an intervened success is not
-    # cloned back to the VLA. Q and smoothness stay on the full replay.
-    actor_success_only: false
+    td_bootstrap_actor: target
 
-    warmup_min_size: 1200
-    warmup_post_collect_updates: 50000
-    freeze_after_warmup: false
+    warmup_min_size: 3000
+    warmup_post_collect_updates: 30000
+    freeze_after_warmup: true
     grad_updates_per_cycle: 5
 
 runtime:
@@ -91,11 +87,11 @@ runtime:
     port: 9102
     seed: 0
     # Fixed mix so warmup VLA rows do not dominate the batch.
-    sample_strategy: stratified
-    recent_episode_window: 60
-    recent_online_ratio: 0.4
-    warmup_demo_ratio: 0.3
-    human_intervention_ratio: 0.3
+    # sample_strategy: stratified
+    # recent_episode_window: 30
+    # recent_online_ratio: 0.4
+    # warmup_demo_ratio: 0.3
+    # human_intervention_ratio: 0.3
 
   env_driver:
     machine_a_ws_url: ws://0.0.0.0:8000

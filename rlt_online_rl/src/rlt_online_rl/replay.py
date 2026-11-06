@@ -429,65 +429,23 @@ class ReplayBuffer:
         for record in records:
             self.add(record)
 
-    def sample(self, batch_size: int, *, success_only: bool = False) -> ArrayDict:
+    def sample(self, batch_size: int) -> ArrayDict:
         with self._lock:
             if self._storage is None or self._size == 0:
                 raise RuntimeError("Cannot sample from an empty replay buffer.")
             batch_size = min(batch_size, self._size)
-            allowed = self._actor_success_indices() if success_only else None
-            if allowed is not None and allowed.size == 0:
-                logger.warning("actor success pool is empty; falling back to the full replay")
-                allowed = None
             if self._sample_strategy == "stratified":
-                indices = self._sample_stratified_indices(batch_size, allowed=allowed)
+                indices = self._sample_stratified_indices(batch_size)
             elif self._sample_strategy == "uniform":
-                indices = self._sample_uniform_indices(batch_size, allowed=allowed)
+                indices = self._sample_uniform_indices(batch_size)
             else:
                 raise ValueError(f"Unknown replay sample_strategy: {self._sample_strategy}")
             return {key: value[indices].copy() for key, value in self._storage.items()}
 
-    def _actor_success_indices(self) -> np.ndarray:
-        """Rows whose behavior-cloning label is a successful action.
+    def _sample_uniform_indices(self, batch_size: int) -> np.ndarray:
+        return self._rng.integers(0, self._size, size=batch_size)
 
-        Warmup stays in. A success with no intervention keeps every row.
-        An intervened success keeps the human and mixed rows only: the policy
-        prefix of that episode is the VLA motion the human replaced, so it is
-        not a cloning target. Q sampling does not use this mask.
-        """
-        assert self._storage is not None
-        phase = np.asarray(self._storage["collection_phase_id"][: self._size])
-        success = np.asarray(self._storage["success"][: self._size]).reshape(-1)
-        episode_id = np.asarray(self._storage["episode_id"][: self._size]).reshape(-1)
-        source = np.asarray(self._storage["source"][: self._size]).reshape(-1)
-        source_chunk = np.asarray(self._storage["source_chunk"][: self._size])
-        intervention = np.asarray(self._storage["intervention_flag"][: self._size]).reshape(-1)
-        good_episodes = np.unique(episode_id[success > 0])
-        in_success_episode = (
-            np.isin(episode_id, good_episodes) if good_episodes.size else np.zeros(self._size, dtype=bool)
-        )
-        human_or_mixed = (
-            intervention
-            | (source == int(TransitionSource.HUMAN))
-            | (source == int(TransitionSource.MIXED))
-            | np.any(source_chunk == int(TransitionSource.HUMAN), axis=1)
-            | np.any(source_chunk == int(TransitionSource.MIXED), axis=1)
-        )
-        intervened_episodes = np.unique(episode_id[in_success_episode & human_or_mixed])
-        in_intervened_success = (
-            np.isin(episode_id, intervened_episodes)
-            if intervened_episodes.size
-            else np.zeros(self._size, dtype=bool)
-        )
-        policy_prefix = in_success_episode & in_intervened_success & ~human_or_mixed
-        warmup = phase == COLLECTION_PHASE_WARMUP
-        return np.flatnonzero((in_success_episode & ~policy_prefix) | warmup)
-
-    def _sample_uniform_indices(self, batch_size: int, *, allowed: np.ndarray | None = None) -> np.ndarray:
-        if allowed is None:
-            return self._rng.integers(0, self._size, size=batch_size)
-        return self._rng.choice(allowed, size=batch_size, replace=True)
-
-    def _sample_stratified_indices(self, batch_size: int, *, allowed: np.ndarray | None = None) -> np.ndarray:
+    def _sample_stratified_indices(self, batch_size: int) -> np.ndarray:
         assert self._storage is not None
         phase = self._storage["collection_phase_id"][: self._size]
         episode_id = self._storage["episode_id"][: self._size]
@@ -495,8 +453,6 @@ class ReplayBuffer:
         source_chunk = self._storage["source_chunk"][: self._size]
         intervention = self._storage["intervention_flag"][: self._size]
         all_indices = np.arange(self._size, dtype=np.int64)
-        if allowed is not None:
-            all_indices = np.intersect1d(all_indices, allowed, assume_unique=False)
 
         max_episode_id = int(np.max(episode_id)) if episode_id.size else -1
         recent_start = max_episode_id - max(self._recent_episode_window, 1) + 1
@@ -509,10 +465,6 @@ class ReplayBuffer:
             | np.any(source_chunk == int(TransitionSource.HUMAN), axis=1)
             | np.any(source_chunk == int(TransitionSource.MIXED), axis=1)
         )
-        if allowed is not None:
-            recent_online_pool = np.intersect1d(recent_online_pool, allowed, assume_unique=False)
-            warmup_demo_pool = np.intersect1d(warmup_demo_pool, allowed, assume_unique=False)
-            human_intervention_pool = np.intersect1d(human_intervention_pool, allowed, assume_unique=False)
 
         n_recent = int(round(batch_size * self._recent_online_ratio))
         n_warmup = int(round(batch_size * self._warmup_demo_ratio))
@@ -552,7 +504,7 @@ class ReplayBuffer:
 
 
 class ReplayBatchSource(Protocol):
-    def sample_batch(self, _batch_size: int, *, success_only: bool = False) -> ArrayDict: ...
+    def sample_batch(self, _batch_size: int) -> ArrayDict: ...
     def stats(self) -> dict[str, Any]: ...
 
 
@@ -637,8 +589,8 @@ class ReplayManager:
             )
             self._append_stats_metric(stats)
 
-    def sample_batch(self, batch_size: int, *, success_only: bool = False) -> ArrayDict:
-        return self._buffer.sample(batch_size, success_only=success_only)
+    def sample_batch(self, batch_size: int) -> ArrayDict:
+        return self._buffer.sample(batch_size)
 
     def stats(self) -> dict[str, Any]:
         return {
@@ -711,10 +663,7 @@ class ReplayManager:
                     return
                 if self.path == "/sample":
                     payload = msgpack_numpy.unpackb(body)
-                    batch = manager.sample_batch(
-                        int(payload["batch_size"]),
-                        success_only=bool(payload.get("success_only", False)),
-                    )
+                    batch = manager.sample_batch(int(payload["batch_size"]))
                     self._write_msgpack(batch)
                     return
                 self.send_error(http.HTTPStatus.NOT_FOUND)
@@ -778,8 +727,8 @@ class ReplayClient:
             payload.append(transition.to_journal_record() if isinstance(transition, RLTTransition) else transition)
         self._post("/extend", {"transitions": payload})
 
-    def sample_batch(self, batch_size: int, *, success_only: bool = False) -> ArrayDict:
-        return self._post("/sample", {"batch_size": batch_size, "success_only": bool(success_only)})
+    def sample_batch(self, batch_size: int) -> ArrayDict:
+        return self._post("/sample", {"batch_size": batch_size})
 
     def stats(self) -> dict[str, Any]:
         req = urllib_request.Request(f"{self._base_url}/stats", method="GET")

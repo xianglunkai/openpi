@@ -49,9 +49,6 @@ experiment:
 
     # Critic TD next-action source: online=Evo-RLT π_θ; target=TD3 π_θ⁻.
     td_bootstrap_actor: online
-    # BC only on successful episodes (warmup counts as success).
-    # Q maximization and smoothness stay on the full replay.
-    actor_success_only: true
 
     warmup_min_size: 1200
     warmup_post_collect_updates: 50000

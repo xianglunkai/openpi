@@ -16,7 +16,7 @@ class Args:
     port: int = 8000
 
     # Episode parameters
-    num_episodes: int = 20
+    num_episodes: int = 100
     max_episode_time_s: int = 30
 
     # RTC parameters

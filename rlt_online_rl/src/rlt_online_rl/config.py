@@ -60,11 +60,6 @@ class RLTOnlineRLConfig:
     # Which actor produces a' in the critic Bellman target.
     # "online" = current π_θ (Evo-RLT); "target" = Polyak π_θ⁻ (textbook TD3).
     td_bootstrap_actor: Literal["online", "target"] = "online"
-    # When true, the actor BC term samples successful episodes (any row with
-    # success=1) plus every warmup row. Q maximization and smoothness stay on
-    # the full replay, so failure states still get a policy gradient.
-    # Critic always uses the full replay.
-    actor_success_only: bool = False
 
     actor_hidden_dim: int = 256
     actor_num_layers: int = 3

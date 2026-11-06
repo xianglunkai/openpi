@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HIL 成功数据抽取 · 自动成功与干预片段</title>
+<link rel="stylesheet" href="devdoc.css" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,460;7..72,680&family=Source+Sans+3:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="openpi-sft_training.html">OpenPI · AgileX Cobot Magic</a>
+  <nav class="nav">
+    <a href="openpi-sft_training.html">SFT 训练</a>
+    <a href="openpi-sft_inference.html">SFT 推理</a>
+    <a href="openpi-rtc.html">RTC</a>
+    <a href="opnepi-rlt.html">RLT</a>
+    <a class="active" href="openpi-hil-extract.html">HIL 抽取</a>
+  </nav>
+</header>
+
+<main class="wrap">
+<article>
+<header class="hero">
+  <p class="kicker">Human-in-the-loop · LeRobot v2.1</p>
+  <h1>HIL 成功数据抽取</h1>
+  <p class="lede">螺丝分拣的人在回路录制会把策略帧和人手帧写进同一条情节。抽取脚本只留下按 <code>s</code> 成功的数据，并按情节形态切开：整段都是自动的成功原样复制；成功但中途有人手的，只保留连续的干预片段。按 <code>f</code> 和超时都不进新数据集。</p>
+  <div class="meta">
+    <span class="chip">成功才保留</span>
+    <span class="chip">纯自动整段 · 干预按段</span>
+    <span class="chip alt">meta/hil_outcomes.jsonl</span>
+    <span class="chip alt">输出仍是图像帧，不是 mp4</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#system">从录制到新数据集</a></li>
+    <li><a href="#record">录的时候写了什么</a></li>
+    <li><a href="#rule">四条情节怎么切</a></li>
+    <li><a href="#run">怎么跑</a></li>
+    <li><a href="#output">新数据集里有什么</a></li>
+    <li><a href="#old">旧数据为什么抽不了</a></li>
+  </ol>
+</nav>
+
+<h2 id="system">1. 从录制到新数据集</h2>
+<figure class="figure">
+<svg viewBox="0 0 920 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="HIL 录制与抽取">
+  <rect width="920" height="430" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <rect x="24" y="28" width="250" height="150" rx="12" fill="#243044"/>
+    <text x="40" y="56" font-weight="700" fill="#fff">RuntimeRTCHil</text>
+    <text x="40" y="82" fill="#d7efe9">空格 / i：人手开关</text>
+    <text x="40" y="106" fill="#d7efe9">s 成功 · f 失败</text>
+    <text x="40" y="130" fill="#d7efe9">超时也记成 failure</text>
+    <text x="40" y="154" fill="#d7efe9">每帧带 is_intervention</text>
+
+    <rect x="334" y="28" width="260" height="150" rx="12" fill="#fff" stroke="#e4d9c8"/>
+    <text x="350" y="56" font-weight="700">录像服务</text>
+    <text x="350" y="82">tcp://127.0.0.1:8765</text>
+    <text x="350" y="106">save_episode() 之后</text>
+    <text x="350" y="130">追加 hil_outcomes.jsonl</text>
+    <text x="350" y="154" fill="#5c564c">编号用数据集里的 index</text>
+
+    <rect x="654" y="28" width="242" height="150" rx="12" fill="#e6f3f1" stroke="#0e6b66"/>
+    <text x="670" y="56" font-weight="700" fill="#0e6b66">源 LeRobot 数据集</text>
+    <text x="670" y="82">data/…/episode_*.parquet</text>
+    <text x="670" y="106">帧列 is_intervention</text>
+    <text x="670" y="130">meta/episodes.jsonl</text>
+    <text x="670" y="154">meta/hil_outcomes.jsonl</text>
+
+    <rect x="24" y="230" width="420" height="168" rx="12" fill="#f8eee6" stroke="#9a4e1c"/>
+    <text x="40" y="258" font-weight="700" fill="#9a4e1c">extract_hil_lerobot_subset</text>
+    <text x="40" y="286">只读 status == success 的情节</text>
+    <text x="40" y="310">全自动：整段变成一条新情节</text>
+    <text x="40" y="334">有人手：每段连续干预各成一条</text>
+    <text x="40" y="358" fill="#5c564c">失败、超时、自动帧（混在成功里的）丢掉</text>
+
+    <rect x="504" y="230" width="392" height="168" rx="12" fill="#fff" stroke="#0e6b66"/>
+    <text x="520" y="258" font-weight="700" fill="#0e6b66">新数据集 · *_auto_and_intervention</text>
+    <text x="520" y="286">kind = auto_success 或 intervention</text>
+    <text x="520" y="310">图像仍是 parquet 里的 PNG</text>
+    <text x="520" y="334">meta/hil_extract.jsonl 记下出处</text>
+    <text x="520" y="358" fill="#5c564c">源情节编号、起止帧、长度、任务</text>
+  </g>
+  <path d="M274 100 H334" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M594 100 H654" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M775 178 V210 H234 V230" stroke="#243044" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+  <path d="M444 314 H504" stroke="#9a4e1c" stroke-width="1.6" fill="none" marker-end="url(#arr2)"/>
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#243044"/>
+    </marker>
+    <marker id="arr2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1.2 L 9 5 L 0 8.8 z" fill="#9a4e1c"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>图 1. 客户端只负责打标签。成功或失败写在数据集旁边的 jsonl 里，不写进每一帧。抽取脚本读这份结果，再按干预列把成功情节切开。</figcaption>
+</figure>
+
+<h2 id="record">2. 录的时候写了什么</h2>
+<p>一帧能不能说明「这条情节成功了」？不能。<code>is_intervention</code> 只表示这一帧是策略还是人手。整段都是 0，只说明没有人碰，不能说明按过 <code>s</code>。超时、按 <code>f</code>、按右箭头，从帧上看可以和一次自动成功一模一样。</p>
+<p>所以结果另写在 <code>meta/hil_outcomes.jsonl</code>。每一行是数据集保存之后的情节编号和结束状态。编号用的是 LeRobot 分配的 <code>episode_index</code>，不是运行时那个会因重录而重复的计数。</p>
+<pre><code>{"episode_index": 0, "status": "success"}
+{"episode_index": 1, "status": "failure"}</code></pre>
+<table>
+  <thead>
+    <tr><th>操作</th><th>写入的 status</th><th>抽取时</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>s</code></td><td><code>success</code>，奖励 1</td><td>进入候选</td></tr>
+    <tr><td><code>f</code></td><td><code>failure</code>，奖励 0</td><td>整条丢掉</td></tr>
+    <tr><td>超过 <code>max_episode_time_s</code></td><td>同样写成 <code>failure</code></td><td>整条丢掉</td></tr>
+    <tr><td>左箭头 / <code>r</code></td><td>清空缓冲，不落盘，不写 jsonl</td><td>没有这条情节</td></tr>
+    <tr><td>右箭头、环境结束、Esc</td><td><code>next_episode</code> / <code>end</code> / <code>abort_all</code></td><td>不是 success，丢掉</td></tr>
+    <tr><td>空格 / <code>i</code>，或 SpaceMouse 介入</td><td>不结束情节；该帧 <code>is_intervention = 1</code></td><td>用来切片段</td></tr>
+  </tbody>
+</table>
+<div class="callout note"><strong>两条写入路径写的是同一份文件。</strong> 机器人客户端走 <code>tcp://127.0.0.1:8765</code> 时，由 <code>lerobot_recorder_service.py</code> 在 <code>save_episode()</code> 之后调用 <code>append_hil_outcome</code>。不走远程录像时，<code>RuntimeRTCHil._finish_lerobot_episode</code> 自己写。重录清空缓冲，不会留下半条结果。</div>
+
+<h2 id="rule">3. 四条情节怎么切</h2>
+<p>先读 <code>hil_outcomes.jsonl</code>。状态不是 <code>success</code> 的情节直接跳过，里面的人手片段也不要。成功的情节再看 <code>is_intervention &gt; 0.5</code> 的连续段。</p>
+<figure class="figure">
+<svg viewBox="0 0 920 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="四种情节的取舍">
+  <rect width="920" height="360" rx="16" fill="#fffdf8"/>
+  <g font-family="Source Sans 3, sans-serif" font-size="13" fill="#1c1915">
+    <text x="24" y="36" font-weight="700">纯自动成功</text>
+    <rect x="24" y="48" width="420" height="28" rx="6" fill="#0e6b66"/>
+    <text x="36" y="67" fill="#fff">整段 is_intervention = 0，且 status = success</text>
+    <text x="460" y="67" fill="#0e6b66">整段复制 · kind = auto_success</text>
+
+    <text x="24" y="116" font-weight="700">成功，但中间有人手</text>
+    <rect x="24" y="128" width="120" height="28" rx="6" fill="#d9d3c7"/>
+    <rect x="148" y="128" width="150" height="28" rx="6" fill="#9a4e1c"/>
+    <rect x="302" y="128" width="70" height="28" rx="6" fill="#d9d3c7"/>
+    <rect x="376" y="128" width="110" height="28" rx="6" fill="#9a4e1c"/>
+    <text x="500" y="147" fill="#9a4e1c">只留两段铜色</text>
+    <text x="24" y="178" fill="#5c564c">灰色是成功情节里的自动帧，丢掉。每段连续人手单独成为一条新情节。</text>
+
+    <text x="24" y="220" font-weight="700">整段都是人手，并且成功</text>
+    <rect x="24" y="232" width="420" height="28" rx="6" fill="#9a4e1c"/>
+    <text x="36" y="251" fill="#fff">一段连续干预</text>
+    <text x="460" y="251" fill="#9a4e1c">整段保留 · kind = intervention</text>
+
+    <text x="24" y="300" font-weight="700">失败或超时</text>
+    <rect x="24" y="312" width="160" height="28" rx="6" fill="#efe7da" stroke="#c9bba6"/>
+    <rect x="188" y="312" width="140" height="28" rx="6" fill="#efe7da" stroke="#c9bba6"/>
+    <rect x="332" y="312" width="112" height="28" rx="6" fill="#efe7da" stroke="#c9bba6"/>
+    <text x="460" y="331" fill="#5c564c">人手片段也不要</text>
+  </g>
+</svg>
+<figcaption>图 2. 青色整段保留。铜色按连续段切开。灰色和失败情节不写入新数据集。短于 <code>--min-frames</code> 的自动情节或干预段也会丢掉，默认是 1 帧。</figcaption>
+</figure>
+<div class="callout warn"><strong>成功情节里的自动帧不会和人手帧拼在同一条新情节里。</strong> 一旦这条成功里出现过干预，自动部分全部留在源数据里。新数据集里，<code>auto_success</code> 的每一帧 <code>is_intervention</code> 写成 0，<code>intervention</code> 的每一帧写成 1。</div>
+
+<h2 id="run">4. 怎么跑</h2>
+<p>在仓库根目录执行。脚本会激活 <code>.venv</code>，并要求源目录里已经有 <code>meta/info.json</code> 和 <code>meta/hil_outcomes.jsonl</code>。</p>
+<pre><code>bash examples/mobile_aloha_AgileX/run_extract_hil_lerobot_subset.sh \
+  /data/huggingface/lerobot/openpi_hil/hil_screw_sorting_20261029_171747</code></pre>
+<p>第二个参数是输出目录。不写时，输出放在源目录旁边，目录名加上 <code>_auto_and_intervention</code>。脚本固定带 <code>--overwrite</code>，同名目录会被换掉。只要更长的片段时，先设 <code>MIN_FRAMES</code>。</p>
+<pre><code>MIN_FRAMES=8 bash examples/mobile_aloha_AgileX/run_extract_hil_lerobot_subset.sh \
+  /path/to/src_dataset \
+  /path/to/output_dataset</code></pre>
+<p>只看计划、不写文件时，直接跑模块并加上 <code>--plan-only</code>。没有 <code>hil_outcomes.jsonl</code> 时，计划仍会打印每条情节的长度和干预帧数，然后停住。</p>
+<pre><code>python -m examples.mobile_aloha_AgileX.extract_hil_lerobot_subset \
+  --src /path/to/src_dataset \
+  --plan-only</code></pre>
+<ol class="steps">
+  <li>
+    <h3>核对结果文件</h3>
+    <p>源数据集的 <code>meta/hil_outcomes.jsonl</code> 里，按过 <code>s</code> 的情节是 <code>"status": "success"</code>。超时和 <code>f</code> 都是 <code>failure</code>，不要改成成功。</p>
+  </li>
+  <li>
+    <h3>先看计划</h3>
+    <p>终端会按源情节打印长度、干预帧数、<code>fully_auto</code>、状态，以及这条会留下几段。汇总行给出纯自动成功条数、干预段数和总帧数。</p>
+  </li>
+  <li>
+    <h3>写出新数据集</h3>
+    <p>跑 shell 脚本。它调用同一个模块，带上 <code>--output</code> 和 <code>--overwrite</code>。写完后到输出目录的 <code>meta/hil_extract.jsonl</code> 核对每条新情节的来源。</p>
+  </li>
+</ol>
+
+<h2 id="output">5. 新数据集里有什么</h2>
+<p>输出仍是 LeRobot v2.1，<code>use_videos=False</code>。图像从源 parquet 里的 PNG 解码成 RGB 再写入。源特征里如果有视频列，脚本会直接停住。时间戳、<code>frame_index</code>、<code>episode_index</code>、<code>index</code>、<code>task_index</code> 由 LeRobot 在保存时重写，不从源帧拷贝。</p>
+<table>
+  <thead>
+    <tr><th>新情节字段</th><th>含义</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>observation.state</code> / <code>action</code></td><td>源帧里的向量，float32</td></tr>
+    <tr><td><code>observation.images.*</code></td><td>对应相机的 RGB 帧</td></tr>
+    <tr><td><code>is_intervention</code></td><td>这条新情节的种类：自动成功为 0，干预段为 1</td></tr>
+    <tr><td><code>task</code></td><td>源情节 <code>episodes.jsonl</code> 里的任务字符串</td></tr>
+  </tbody>
+</table>
+<p><code>meta/hil_extract.jsonl</code> 每一行对应一条新情节：</p>
+<pre><code>{"episode_index": 0, "kind": "auto_success", "source_episode": 2,
+ "source_start": 0, "source_end": 402, "length": 402, "task": "..."}
+{"episode_index": 1, "kind": "intervention", "source_episode": 4,
+ "source_start": 80, "source_end": 210, "length": 130, "task": "..."}</code></pre>
+<p><code>source_start</code> 含、<code>source_end</code> 不含。同一条源情节可以贡献多条 <code>intervention</code>。新情节之间不再保留原来夹在中间的自动帧。</p>
+
+<h2 id="old">6. 旧数据为什么抽不了</h2>
+<p>2026-10-29 那份 <code>hil_screw_sorting_20261029_171747</code> 的每一帧都有 <code>is_intervention</code>，所以干预段数得出来。当时结束一条情节只在终端打印 <code>status=</code>，<code>meta/episodes.jsonl</code> 里只有编号、任务和长度。没有 <code>hil_outcomes.jsonl</code> 时，超时、按 <code>f</code>、按 <code>s</code> 无法从帧里区分，脚本拒绝写出新数据集。</p>
+<div class="callout warn"><strong>这份旧数据不会被自动补上结果。</strong> 之后新录的数据会在保存时写 <code>meta/hil_outcomes.jsonl</code>。对那之后的目录，直接运行本页的 shell 脚本即可。</div>
+
+<footer class="colophon">
+  对照代码：<code>examples/mobile_aloha_AgileX/extract_hil_lerobot_subset.py</code> · <code>examples/mobile_aloha_AgileX/run_extract_hil_lerobot_subset.sh</code> · <code>examples/mobile_aloha_AgileX/lerobot_recorder_service.py</code> · <code>packages/openpi-client/src/openpi_client/runtime/lerobot_remote.py</code> · <code>packages/openpi-client/src/openpi_client/runtime/runtime_rtc_hil.py</code>
+</footer>
+</article>
+</main>
+</body>
+</html>

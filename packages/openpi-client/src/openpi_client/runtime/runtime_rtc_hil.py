@@ -33,6 +33,7 @@ from openpi_client.time_utils import precise_sleep
 
 from openpi_client.runtime.lerobot_remote import (
     LeRobotRemoteRecorderClient,
+    append_hil_outcome,
     build_lerobot_features,
     build_lerobot_frame,
 )
@@ -188,10 +189,10 @@ class KeyboardListener:
         print(
             "Keyboard controls:\n"
             "  Esc        abort all episodes\n"
-            "  Right      next episode\n"
+            "  Right      start the next episode now; after s/f/timeout, start inference\n"
             "  Left / r   rerecord current episode\n"
-            "  s          success (+reward 1.0)\n"
-            "  f          failure\n"
+            "  s          success (+reward 1.0), save, reset, wait for Right\n"
+            "  f          failure, save, reset, wait for Right\n"
             "  Space / i  toggle human intervention (policy <-> teleop)\n"
         )
 
@@ -454,7 +455,16 @@ class RuntimeRTCHil(RuntimeRTC):
                     print(f"Rerecording episode {episode_idx + 1}...")
                     self._say(f"Rerecording episode {episode_idx + 1}.")
                     continue
+                if outcome.status == EpisodeEndStatus.NEXT_EPISODE:
+                    episode_idx += 1
+                    continue
+                # s / f / timeout: stop inference, go home, wait for Right.
+                self._reset_to_initial_pose()
                 episode_idx += 1
+                if episode_idx >= self._num_episodes or self._shutdown_event.is_set():
+                    break
+                if not self._wait_for_next_episode():
+                    break
 
             self._environment.reset()
             self._log_statistics()
@@ -471,6 +481,32 @@ class RuntimeRTCHil(RuntimeRTC):
                 self._teleop.disconnect()
             if self._keyboard is not None:
                 self._keyboard.stop()
+
+    def _reset_to_initial_pose(self) -> None:
+        """Move the arm home after the episode has stopped recording."""
+        print("Resetting to the initial pose.")
+        self._say("Resetting to the initial pose.")
+        self._environment.reset()
+
+    def _wait_for_next_episode(self) -> bool:
+        """Block until Right starts the next episode. False means abort or shutdown."""
+        print("At the initial pose. Press Right to start the next episode.")
+        self._say("Press right arrow to start the next episode.")
+        self._commands.consume_end_status()
+        while not self._shutdown_event.is_set():
+            if self._commands.should_abort_all():
+                return False
+            pending = self._commands.peek_end_status()
+            if pending == EpisodeEndStatus.NEXT_EPISODE:
+                self._commands.consume_end_status()
+                return True
+            if pending == EpisodeEndStatus.ABORT_ALL:
+                self._commands.consume_end_status()
+                return False
+            if pending is not None:
+                self._commands.consume_end_status()
+            precise_sleep(0.05)
+        return False
 
     def _reset_episode_state(self, episode_idx: int) -> None:
         """Reset per-episode state without restarting worker threads."""
@@ -541,7 +577,8 @@ class RuntimeRTCHil(RuntimeRTC):
                 terminal_status = pending
                 break
             if self._max_episode_time_s > 0 and (time.perf_counter() - start_time) > self._max_episode_time_s:
-                terminal_status = EpisodeEndStatus.END
+                print(f"Episode timed out after {self._max_episode_time_s}s; recording as failure.")
+                terminal_status = EpisodeEndStatus.FAILURE
                 break
 
         if terminal_status is None:
@@ -993,9 +1030,11 @@ class RuntimeRTCHil(RuntimeRTC):
                 return
 
             self._lerobot_dataset.save_episode()
+            saved_index = int(self._lerobot_dataset.meta.total_episodes) - 1
+            append_hil_outcome(Path(self._lerobot_dataset.root), saved_index, terminal_status.value)
             logger.info(
                 "LeRobot episode saved (v2.1): index=%s status=%s success=%s",
-                self._current_episode_idx,
+                saved_index,
                 terminal_status.value,
                 terminal_status == EpisodeEndStatus.SUCCESS,
             )

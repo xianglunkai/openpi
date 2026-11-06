@@ -282,18 +282,12 @@ def update_actor(
     use_action_adapter: bool = False,
     action_q01: jax.Array | None = None,
     action_q99: jax.Array | None = None,
-    bc_batch: dict[str, jax.Array] | None = None,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
-    # ``batch`` is the full replay sample (Q and smoothness). ``bc_batch`` is the
-    # success-only sample used by the BC term; None means BC shares ``batch``.
     actor_rng, next_rng = jax.random.split(state.rng)
 
     def loss_fn(actor_params: PyTree) -> tuple[jax.Array, dict[str, jax.Array]]:
         # Binary ref dropout per batch element (same mask for all C*A of that sample).
-        if bc_batch is None:
-            dropout_rng, mix_rng = jax.random.split(actor_rng)
-        else:
-            dropout_rng, bc_dropout_rng, mix_rng = jax.random.split(actor_rng, 3)
+        dropout_rng, mix_rng = jax.random.split(actor_rng)
 
         def _actions(data: dict[str, jax.Array], rng: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
             dropped_ref = apply_reference_dropout(
@@ -330,11 +324,7 @@ def update_actor(
             batch["proprio"],
             action_chunk,
         )
-        if bc_batch is None:
-            bc_terms = _behavior_cloning_terms(q_bc_action, batch, rl_config)
-        else:
-            _, _, bc_action = _actions(bc_batch, bc_dropout_rng)
-            bc_terms = _behavior_cloning_terms(bc_action, bc_batch, rl_config)
+        bc_terms = _behavior_cloning_terms(q_bc_action, batch, rl_config)
         bc_penalty = bc_terms["bc_penalty"]
         bc_ref_penalty = bc_terms["bc_ref_penalty"]
         bc_human_penalty = bc_terms["bc_human_penalty"]
@@ -438,7 +428,6 @@ def train_step(
     actor: ChunkActor,
     critic: TwinCritic,
     rl_config: RLTOnlineRLConfig,
-    actor_batch: dict[str, jax.Array] | None = None,
     bc_weight: float = 1.0,
     q_weight: float = 1.0,
     delta_weight: float = 0.0,
@@ -446,8 +435,6 @@ def train_step(
     action_q01: jax.Array | None = None,
     action_q99: jax.Array | None = None,
 ) -> tuple[RLTTrainState, dict[str, jax.Array]]:
-    # Critic, actor Q, and smoothness use the full replay. ``actor_batch`` is the
-    # success-only sample and feeds only the BC term.
     # update the critic
     state, critic_metrics = update_critic(state, batch, actor, critic, rl_config)
     # keep the target critic aligned with every online critic step
@@ -492,7 +479,6 @@ def train_step(
             use_action_adapter=use_action_adapter,
             action_q01=action_q01,
             action_q99=action_q99,
-            bc_batch=actor_batch,
         )
         # Keep a Polyak actor copy for "target" bootstrap mode / checkpoints.
         target_actor = soft_update_targets(
@@ -705,15 +691,6 @@ class LearnerService:
             self._replay_source.sample_batch(self._service_config.sample_batch_size),
             self._rl_config.chunk_len,
         )
-        actor_batch_np = None
-        if self._rl_config.actor_success_only:
-            actor_batch_np = _prepare_sampled_batch(
-                self._replay_source.sample_batch(
-                    self._service_config.sample_batch_size,
-                    success_only=True,
-                ),
-                self._rl_config.chunk_len,
-            )
         # calculate sample metrics
         max_episode_id = int(stats.get("max_episode_id", -1))
         recent_window = int(stats.get("recent_episode_window", 20))
@@ -725,12 +702,7 @@ class LearnerService:
         # prepare training batch
         if self._action_adapter is not None:
             batch_np = self._action_adapter.prepare_training_batch(batch_np)
-            if actor_batch_np is not None:
-                actor_batch_np = self._action_adapter.prepare_training_batch(actor_batch_np)
         batch = {key: jnp.asarray(value) for key, value in batch_np.items()}
-        actor_batch = None
-        if actor_batch_np is not None:
-            actor_batch = {key: jnp.asarray(value) for key, value in actor_batch_np.items()}
         # resolve actor loss weights， bc_weight is the weight for the behavior cloning loss, q_weight is the weight for the Q-value loss
         bc_weight, q_weight = _resolve_actor_loss_weights(self._rl_config, progress)
         # train the actor
@@ -740,7 +712,6 @@ class LearnerService:
             actor=self._actor,
             critic=self._critic,
             rl_config=self._rl_config,
-            actor_batch=actor_batch,
             bc_weight=bc_weight,
             q_weight=q_weight,
             delta_weight=self._rl_config.delta_weight,
