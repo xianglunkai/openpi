@@ -29,6 +29,7 @@ from rlt_online_rl.config import EnvDriverConfig
 from rlt_online_rl.config import RLTOnlineRLConfig
 from rlt_online_rl.networks import ChunkActor
 from rlt_online_rl.networks import PyTree
+from rlt_online_rl.replay import apply_intervention_training_labels
 from rlt_online_rl.replay import DEFAULT_COLLECTION_PHASE
 from rlt_online_rl.replay import RawEpisodeChunk
 from rlt_online_rl.replay import RawEpisodeStep
@@ -1217,7 +1218,9 @@ class EnvDriver:
             windows, terminal_window_added = self._build_dense_replay_windows(raw_episode, segments)
         else:
             windows, terminal_window_added = self._build_chunk_replay_windows(raw_episode, segments, raw_positions)
-        transitions = self._build_replay_transitions(raw_episode, segments, windows, feature_cache, stats)
+        transitions = apply_intervention_training_labels(
+            self._build_replay_transitions(raw_episode, segments, windows, feature_cache, stats)
+        )
         stats["replay_window_count"] = len(windows)
         stats["terminal_window_added"] = int(terminal_window_added)
         stats["replay_transition_count"] = len(transitions)
@@ -1491,11 +1494,9 @@ class EnvDriver:
         source_chunk = np.asarray([int(step.source) for step in window_steps], dtype=np.uint8)
         source, intervention = self._resolve_window_source(window_steps)
         actual_steps = len(window_steps)
-        # One trajectory: a human takeover does not end the return. The success
-        # reward stays on the executed steps and bootstraps back through the
-        # policy actions that led up to the intervention.
-        # Human actions always stay in action_chunk for bc_imitate_human.
-        # "executed" also copies them into ref on those rows; "vla" does not.
+        # The action chunk, rewards, and policy-step BC target stay as executed.
+        # A failed human rescue is later dropped from BC. "vla" leaves the live VLA
+        # chunk as the actor input on human rows; "executed" overwrites those rows.
         ref_chunk = np.asarray(current_payload["ref_chunk"], dtype=np.float32)
         if self._rl_config.intervened_ref == "executed":
             ref_chunk = self._replace_intervened_ref_rows(ref_chunk, window_steps)

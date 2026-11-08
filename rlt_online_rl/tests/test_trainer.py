@@ -107,6 +107,22 @@ def test_train_step_bc_target_switches_to_human_actions() -> None:
     assert np.isclose(float(metrics["bc_ref_penalty"]), 0.0)
 
 
+def test_bc_skips_human_rows_of_a_failed_rescue() -> None:
+    cfg = dataclasses.replace(_config(), bc_imitate_human=True)
+    source = np.zeros((1, cfg.chunk_len), dtype=np.int32)
+    source[0, 2:] = int(TransitionSource.HUMAN)
+    batch = {
+        "source_chunk": jnp.asarray(source),
+        "ref_chunk": jnp.zeros((1, cfg.chunk_len, cfg.action_dim), dtype=jnp.float32),
+        "action_chunk": jnp.ones((1, cfg.chunk_len, cfg.action_dim), dtype=jnp.float32),
+        "bc_human_scale": jnp.zeros((1,), dtype=jnp.float32),
+    }
+    bc_action = jnp.zeros((1, cfg.chunk_len, cfg.action_dim), dtype=jnp.float32)
+    penalty = _behavior_cloning_terms(bc_action, batch, cfg)["bc_penalty"]
+    # Policy rows match the zero reference. Failed human rows are not imitated.
+    assert np.isclose(float(penalty), 0.0)
+
+
 def test_bc_stops_pushing_when_label_exceeds_clip() -> None:
     cfg = _config()
     label = jnp.ones((1, cfg.chunk_len, cfg.action_dim), dtype=jnp.float32) * 1.4

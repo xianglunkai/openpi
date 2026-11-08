@@ -202,6 +202,14 @@ def update_critic(
     return new_state, metrics
 
 
+def _bc_row_weight(batch: dict[str, jax.Array], human_mask: jax.Array) -> jax.Array:
+    """Policy rows always count. Human rows use ``bc_human_scale`` when present."""
+    if "bc_human_scale" not in batch:
+        return jnp.ones(human_mask.shape, dtype=jnp.float32)
+    human_scale = jnp.asarray(batch["bc_human_scale"], dtype=jnp.float32).reshape(-1)
+    return jnp.where(human_mask, human_scale[:, None], jnp.ones(human_mask.shape, dtype=jnp.float32))
+
+
 def _behavior_cloning_terms(
     bc_action: jax.Array,
     batch: dict[str, jax.Array],
@@ -216,6 +224,7 @@ def _behavior_cloning_terms(
     )
     human_mask_chunk = jnp.any(human_mask, axis=-1).astype(jnp.float32)
     policy_mask_chunk = 1.0 - human_mask_chunk
+    row_weight = _bc_row_weight(batch, human_mask)
 
     # BC target: human/mixed steps → behavior (demo/exec); else → VLA ref.
     # Clip to the deployed range. A label past ±1 cannot be executed, and the
@@ -241,7 +250,8 @@ def _behavior_cloning_terms(
     )
 
     # Squared error summed over (C, A), then averaged over the batch.
-    bc_error = jnp.square(bc_action - bc_target)
+    # row_weight is 0 on human rows of a failed rescue. Policy rows always count.
+    bc_error = jnp.square(bc_action - bc_target) * row_weight[..., None]
     per_sample_bc = jnp.sum(bc_error, axis=(-2, -1))
     if rl_config.bc_reduction == "sum":
         bc_penalty = jnp.mean(per_sample_bc)
@@ -530,7 +540,12 @@ def _ensure_actual_steps(batch_np: dict[str, np.ndarray], chunk_len: int) -> dic
 
 
 def _prepare_sampled_batch(batch_np: dict[str, np.ndarray], chunk_len: int) -> dict[str, np.ndarray]:
-    return _ensure_actual_steps(_ensure_source_chunk(batch_np, chunk_len), chunk_len)
+    batch_np = dict(_ensure_actual_steps(_ensure_source_chunk(batch_np, chunk_len), chunk_len))
+    batch_size = int(np.asarray(batch_np["z_rl"]).shape[0])
+    if "bc_human_scale" not in batch_np:
+        batch_np["bc_human_scale"] = np.ones((batch_size,), dtype=np.float32)
+    batch_np["bc_human_scale"] = np.asarray(batch_np["bc_human_scale"], dtype=np.float32).reshape(batch_size)
+    return batch_np
 
 
 def _ensure_source_chunk(batch_np: dict[str, np.ndarray], chunk_len: int) -> dict[str, np.ndarray]:

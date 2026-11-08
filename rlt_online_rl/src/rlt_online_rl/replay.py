@@ -114,6 +114,8 @@ class RLTTransition:
     episode_id: int
     step_id: int
     actual_steps: int = 0
+    # 1: human rows are BC targets. 0: a failed rescue is not imitated.
+    bc_human_scale: float = 1.0
 
     def to_numpy(self) -> ArrayDict:
         return {
@@ -134,6 +136,7 @@ class RLTTransition:
             "intervention_flag": _ensure_array(self.intervention_flag, dtype=np.bool_),
             "episode_id": _ensure_array(self.episode_id, dtype=np.int32),
             "step_id": _ensure_array(self.step_id, dtype=np.int32),
+            "bc_human_scale": _ensure_array(self.bc_human_scale, dtype=np.float32),
         }
 
     def to_journal_record(self) -> dict[str, Any]:
@@ -168,6 +171,7 @@ class RLTTransition:
             episode_id=int(data.get("episode_id", 0)),
             step_id=int(data.get("step_id", 0)),
             actual_steps=int(data.get("actual_steps", np.asarray(data["ref_chunk"]).shape[0])),
+            bc_human_scale=float(data.get("bc_human_scale", 1.0)),
         )
 
 
@@ -359,6 +363,39 @@ def build_chunk_transitions_from_episode(
         transitions.append(_build_chunk_transition(steps, start=start, chunk_len=chunk_len))
 
     return transitions
+
+
+def _transition_has_human(transition: RLTTransition) -> bool:
+    if transition.intervention_flag:
+        return True
+    if int(transition.source) in (int(TransitionSource.HUMAN), int(TransitionSource.MIXED)):
+        return True
+    source_chunk = np.asarray(transition.source_chunk)
+    human = int(TransitionSource.HUMAN)
+    mixed = int(TransitionSource.MIXED)
+    return bool(np.any(source_chunk == human) or np.any(source_chunk == mixed))
+
+
+def apply_intervention_training_labels(transitions: list[RLTTransition]) -> list[RLTTransition]:
+    """Keep executed chunks and rewards. Policy rows always stay BC targets.
+
+    Human rows are imitation targets only when that intervention inserted the screw.
+    A failed rescue is not imitated.
+    """
+    if not transitions:
+        return transitions
+    phase_name = str(transitions[0].collection_phase).split(":", 1)[0].lower()
+    if phase_name == "warmup":
+        return list(transitions)
+    aided = any(_transition_has_human(transition) for transition in transitions)
+    succeeded = any(int(transition.success) > 0 for transition in transitions)
+    labeled: list[RLTTransition] = []
+    for transition in transitions:
+        human_scale = 1.0
+        if aided and not succeeded:
+            human_scale = 0.0
+        labeled.append(dataclasses.replace(transition, bc_human_scale=human_scale))
+    return labeled
 
 
 def build_terminal_aligned_chunk_transition(

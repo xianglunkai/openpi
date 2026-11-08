@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人在回路对 RLT 训练的影响</title>
+<style>
+  :root {
+    --bg: #f6f4ef;
+    --paper: #fffcf8;
+    --ink: #24302c;
+    --muted: #66706b;
+    --line: #e3ddd3;
+    --soft: #f3efe8;
+    --policy: #3e6d8c;
+    --policy-bg: #e8f0f5;
+    --human: #8d6844;
+    --human-bg: #f6efe6;
+    --ok: #2f6b56;
+    --ok-bg: #e7f2ec;
+    --mark: #8a4e3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17.5px/1.75 "Iowan Old Style", Palatino, "Songti SC", "Noto Serif SC", serif;
+  }
+  main { max-width: 900px; margin: 0 auto; padding: 52px 28px 100px; }
+  h1 { font-size: 32px; line-height: 1.28; font-weight: 560; margin: 8px 0 8px; letter-spacing: -0.01em; }
+  h2 { font-size: 21px; margin: 46px 0 12px; padding-top: 20px; border-top: 1px solid var(--line); font-weight: 560; }
+  h3 { font-size: 17.5px; margin: 28px 0 8px; font-weight: 560; }
+  p { margin: 0 0 13px; }
+  .kicker { font: 12px/1.4 "IBM Plex Sans", "Noto Sans SC", sans-serif; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0; }
+  .meta { color: var(--muted); font-size: 14px; margin: 0 0 26px; }
+  .claims { background: var(--paper); border: 1px solid var(--line); padding: 6px 22px 8px; margin: 0 0 28px; }
+  .claims ol { margin: 10px 0 12px; padding-left: 1.25em; }
+  .claims li { margin: 0 0 8px; }
+  figure { margin: 18px 0 8px; background: var(--paper); border: 1px solid var(--line); padding: 16px 14px 8px; }
+  figcaption { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 8px 4px 4px; }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font-family: "IBM Plex Sans", "Noto Sans SC", "Source Han Sans SC", sans-serif; fill: var(--ink); }
+  table { width: 100%; border-collapse: collapse; background: var(--paper); font-size: 14.5px; margin: 8px 0 8px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { background: var(--soft); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px; }
+  .cap { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.86em; background: var(--soft); padding: 1px 4px; }
+  .eq {
+    background: var(--paper); border: 1px solid var(--line); padding: 12px 16px; margin: 12px 0 16px;
+    overflow-x: auto; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 14.5px; line-height: 1.6;
+  }
+  ol.step, ul { margin: 0 0 14px; padding-left: 1.25em; }
+  li { margin: 0 0 6px; }
+  .aside { background: var(--ok-bg); border: 1px solid #d3e4db; padding: 12px 16px; margin: 14px 0 18px; }
+  a { color: var(--ok); }
+</style>
+</head>
+<body>
+<main>
+  <p class="kicker">RLT · screw sorting</p>
+  <h1>人在回路对 RLT 训练的影响</h1>
+  <p class="meta">当前仓库的 chunk actor-critic。对照 RLT 论文算法 1、Evo-RLT 和 SiLRI（arXiv:2512.24288）。控制频率 30 Hz，<code>chunk_len = 10</code>，<code>credit_horizon_sec = 5</code>，因此单步折扣 <code>γ = 1 − 1/150 = 0.9933</code>。</p>
+
+  <section class="claims">
+    <h2 style="border:0; margin:14px 0 0; padding:0;">结论</h2>
+    <ol>
+      <li>时序差分目标里有两个动作。被估值的是这条样本存下来的动作 <code>a</code>。往后看的是当前策略在下一状态上的动作 <code>π(s′)</code>。二者不是同一个量。</li>
+      <li>一块里只有一个控制者时，策略前缀的目标是 <code>γ<sup>n</sup> Q(s′, π(s′))</code>。人在 <code>s′</code> 做了什么不进入这个目标。<code>π(s′)</code> 还不会做恢复动作时，前缀目标是 0。<code>π(s′)</code> 学会之后，前缀目标变成恢复动作的折扣价值。</li>
+      <li>一个窗口同时包含策略步和人手步，并且成功落在这个窗口里时，<code>done = 1</code> 把自举项去掉，奖励和里已经有那个 1。接收这个目标的动作向量包含插歪的前缀。这是换手造成的错误赋值，发生在 <code>π</code> 学会恢复之前。</li>
+      <li>动作、奖励和策略步的回归都保持原样。策略步继续回归 VLA 参考。人手步只在这次真的插入成功时回归 <code>h</code>，输入参考是部署时的 VLA 块。没插进去的接手不回归。</li>
+      <li><code>chunk_len = 1</code> 能消除第 3 条，同时拆掉 RLT 用块缩短信用分配的原因。它不改变第 2 条里学会恢复之后的数值。状态乘子和 0.05 的探索噪声依赖另一套策略，不替换现在的 VLA 参考。</li>
+    </ol>
+  </section>
+
+  <h2>1. 一条轨迹上实际存了什么</h2>
+  <p>下面所有计算用同一次插钉子。40 个控制步，分成 4 块，每块 10 步。chunk 0 由策略执行，钉子偏了。chunk 1 由人执行，把钉子抬起并对准。chunk 2 和 chunk 3 在松开之后由策略执行，第 39 步插入到位，该步奖励为 1，回合结束。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 168" role="img" aria-label="四十步分成四块，前十步和后二十步是策略，中间十步是人">
+      <rect x="24" y="36" width="190" height="64" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <rect x="230" y="36" width="190" height="64" fill="#f6efe6" stroke="#8d6844"/>
+      <rect x="436" y="36" width="190" height="64" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <rect x="642" y="36" width="190" height="64" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <text x="119" y="62" text-anchor="middle" font-size="14">chunk 0 · 策略</text>
+      <text x="119" y="82" text-anchor="middle" font-size="13" fill="#66706b">步 0–9 · 插歪 · p</text>
+      <text x="325" y="62" text-anchor="middle" font-size="14">chunk 1 · 人</text>
+      <text x="325" y="82" text-anchor="middle" font-size="13" fill="#66706b">步 10–19 · 抬起 · h</text>
+      <text x="531" y="62" text-anchor="middle" font-size="14">chunk 2 · 策略</text>
+      <text x="531" y="82" text-anchor="middle" font-size="13" fill="#66706b">步 20–29 · 插入 · a</text>
+      <text x="737" y="62" text-anchor="middle" font-size="14">chunk 3 · 策略</text>
+      <text x="737" y="82" text-anchor="middle" font-size="13" fill="#66706b">步 30–39 · 到位 · a′</text>
+      <circle cx="812" cy="68" r="5" fill="#2f6b56"/>
+      <text x="24" y="128" font-size="13" fill="#66706b">奖励除第 39 步为 1 外全是 0。γ⁹ = 0.942，γ¹⁰ = 0.935，γ¹⁹ = 0.881，γ²⁹ = 0.824，γ³⁹ = 0.770。</text>
+      <line x1="214" y1="68" x2="230" y2="68" stroke="#c8c2b8"/>
+      <line x1="420" y1="68" x2="436" y2="68" stroke="#c8c2b8"/>
+      <line x1="626" y1="68" x2="642" y2="68" stroke="#c8c2b8"/>
+    </svg>
+    <figcaption>图 1. 同一次执行的四块。颜色只区分控制者。绿点是奖励为 1 的那一步。</figcaption>
+  </figure>
+
+  <p>每一块在回放里是一条转移。策略自己执行的块，行为克隆目标 <code>ã</code> 是该状态上的 VLA 参考 <code>v</code>。人手块的 <code>ã</code> 是 <code>h</code>。执行过的动作 <code>p</code>、<code>h</code>、<code>a</code>、<code>a′</code> 进入 critic，用来拟合 <code>Q(s, ·)</code>。Actor 的更新对象始终是它自己的输出 <code>μ</code>：</p>
+  <div class="eq">L = β ‖μ − ã‖² − λ Q(z, s, μ)</div>
+  <p>参考 dropout 只把输入里的参考置零，<code>ã</code> 不变。后面先把 <code>Q</code> 的目标算清楚，再回到这个损失怎样移动 <code>μ</code>。</p>
+
+  <h2>2. 备份里的两个动作</h2>
+  <p>一块的时序差分目标是</p>
+  <div class="eq">Q̂(s, a) = Σᵢ γⁱ rᵢ + (1 − done) γⁿ Q(s′, π(s′))</div>
+  <p><code>a</code> 是这块存下来的动作，<code>n</code> 是这块实际执行的控制步数，<code>s′</code> 是下一块的起点。<code>π(s′)</code> 由目标 actor 在 <code>s′</code> 上计算，条件是该状态的 VLA 参考，不是缓冲里下一块存着的动作。</p>
+  <p>所以一条样本同时碰两个动作变元。左边的 <code>Q(s, a)</code> 把价值赋给已经执行的 <code>a</code>。右边的 <code>Q(s′, π(s′))</code> 问的是：若从 <code>s′</code> 起改由当前策略行动，价值是多少。人在 <code>s′</code> 实际执行的 <code>h</code> 只出现在下一条样本的左变元里，即 <code>Q(s′, h)</code>。它不代入上一条样本的右变元。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 210" role="img" aria-label="chunk 0 的自举指向 π，chunk 1 单独估值人手动作">
+      <rect x="36" y="28" width="250" height="72" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <text x="161" y="56" text-anchor="middle" font-size="15">Q(s₀, p)</text>
+      <text x="161" y="78" text-anchor="middle" font-size="13" fill="#66706b">左变元：存下的插歪</text>
+      <rect x="520" y="28" width="300" height="72" fill="#fffcf8" stroke="#3e6d8c"/>
+      <text x="670" y="56" text-anchor="middle" font-size="15">Q(s₁, π(s₁))</text>
+      <text x="670" y="78" text-anchor="middle" font-size="13" fill="#66706b">右变元：策略在换手处的输出</text>
+      <line x1="286" y1="64" x2="512" y2="64" stroke="#3e6d8c"/>
+      <polygon points="512,64 500,58 500,70" fill="#3e6d8c"/>
+      <text x="398" y="54" text-anchor="middle" font-size="12" fill="#66706b">γ¹⁰</text>
+      <rect x="520" y="124" width="300" height="64" fill="#f6efe6" stroke="#8d6844"/>
+      <text x="670" y="150" text-anchor="middle" font-size="15">Q(s₁, h)</text>
+      <text x="670" y="170" text-anchor="middle" font-size="13" fill="#66706b">另一条样本的左变元</text>
+      <text x="36" y="168" font-size="13" fill="#66706b">h 不代入上面的箭头。</text>
+    </svg>
+    <figcaption>图 2. chunk 0 的目标读取 <code>Q(s₁, π(s₁))</code>。人手抬起是 chunk 1 自己的动作变元。</figcaption>
+  </figure>
+
+  <p>RLT 论文算法 1 写的是同一结构：块内奖励求和，再加上 <code>γ<sup>C</sup> Q(x′, a′)</code>，<code>a′</code> 从当前策略采样。SiLRI 的式 (9) 是控制步上的同一结构，<code>r + γ Q̂(s′, π̂(s′))</code>。差别在求和覆盖多少步，以及这几步是否属于同一个控制者。下一步先在「每块只有一个控制者」的条件下把不动点算出来。</p>
+
+  <h2>3. 四块对齐时的不动点</h2>
+  <p>假设重复备份已经收敛，并且 chunk 2、chunk 3 上 <code>π</code> 与当时执行的插入一致。这两块都是策略执行的，这个假设就是 actor 还停在自己刚执行过的动作附近。再假设换手状态上策略仍输出往下顶，且 <code>Q(s₁, 往下顶) = 0</code>。后一个假设对应「该动作没有成功样本」。函数逼近可能在 <code>h</code> 和往下顶之间给出中间值，那个中间值不是下面的 <code>γ³⁹</code>。</p>
+  <p>chunk 3 的奖励在块内第 9 步，<code>done = 1</code>，自举项为 0：</p>
+  <div class="eq">Q̂₃ = γ⁹ · 1 = 0.942</div>
+  <p>chunk 2 的十步奖励都是 0，<code>done = 0</code>，右变元是已经收敛的 <code>Q₃</code>：</p>
+  <div class="eq">Q̂₂ = γ¹⁰ · 0.942 = γ¹⁹ = 0.881</div>
+  <p>chunk 1 的左变元是 <code>h</code>。它的下一块是策略自己的插入，所以右变元是 <code>Q₂</code>，不是人的下一步：</p>
+  <div class="eq">Q̂(s₁, h) = γ¹⁰ · 0.881 = γ²⁹ = 0.824</div>
+  <p>chunk 0 的左变元是 <code>p</code>。右变元是 <code>π(s₁)</code>，此时是往下顶：</p>
+  <div class="eq">Q̂(s₀, p) = γ¹⁰ · Q(s₁, π(s₁)) = γ¹⁰ · 0 = 0</div>
+
+  <table>
+    <thead>
+      <tr><th>样本</th><th>左变元 <code>a</code></th><th>右变元</th><th class="num">不动点</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>chunk 0</td><td><code>p</code> 插歪</td><td><code>π(s₁) =</code> 往下顶</td><td class="num">0</td></tr>
+      <tr><td>chunk 1</td><td><code>h</code> 抬起</td><td><code>π(s₂) = a</code></td><td class="num">0.824</td></tr>
+      <tr><td>chunk 2</td><td><code>a</code> 插入</td><td><code>π(s₃) = a′</code></td><td class="num">0.881</td></tr>
+      <tr><td>chunk 3</td><td><code>a′</code> 到位</td><td>无，<code>done = 1</code></td><td class="num">0.942</td></tr>
+    </tbody>
+  </table>
+  <p class="cap">表 1. <code>π</code> 在 <code>s₁</code> 还不会抬起时的不动点。0.824 赋给 <code>h</code>，因为 <code>s₁</code> 之后的成功插入是策略执行的。</p>
+
+  <p>把 chunk 1 的 <code>h</code> 代进 chunk 0 的右变元，会得到 <code>γ³⁹ = 0.770</code>。那个式子描述的是沿人手动作的回报，不是这条备份。备份在 <code>π(s₁) ≠ h</code> 时给出 0。</p>
+  <p>SiLRI 若用同一个 <code>γ</code> 和同一个终局 1，把这 40 步拆开，递推的右变元仍是 <code>π</code>。从第 39 步传到第 20 步得到 <code>γ¹⁹ = 0.881</code>，再沿 <code>h</code> 传到第 10 步得到 <code>γ²⁹ = 0.824</code>。第 9 步读取的是 <code>Q(s₁₀, π(s₁₀))</code>。策略还不会抬时，这里同样是 0。一步和一块在这四段上是同一个不动点。</p>
+
+  <h2>4. 策略在换手状态上输出 h 之后</h2>
+  <p>行为克隆把 chunk 1 的目标设为 <code>h</code>。训练之后 <code>π(s₁) = h</code>，于是 chunk 0 的右变元从 0 变成上一节的 0.824：</p>
+  <div class="eq">Q̂(s₀, p) = γ¹⁰ · 0.824 = γ³⁹ = 0.770</div>
+  <p>单步递推从第 0 步乘到第 39 步，也是 <code>γ³⁹ = 0.770</code>。数值出现的条件是 <code>π</code> 在换手后的状态上已经会做恢复，并且恢复之后的插入仍由策略完成。在此之前，第 3 节的 0 保持不变。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 196" role="img" aria-label="学会抬起前后 chunk 0 的目标从 0 变为 0.770">
+      <text x="40" y="28" font-size="13" fill="#66706b">π(s₁) 仍是往下顶</text>
+      <rect x="40" y="44" width="150" height="44" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <text x="115" y="71" text-anchor="middle" font-size="16">0</text>
+      <text x="210" y="71" font-size="14" fill="#66706b">chunk 0</text>
+      <rect x="330" y="44" width="150" height="44" fill="#f6efe6" stroke="#8d6844"/>
+      <text x="405" y="71" text-anchor="middle" font-size="16">0.824</text>
+      <text x="496" y="71" font-size="14" fill="#66706b">chunk 1 · h</text>
+      <rect x="640" y="44" width="170" height="44" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <text x="725" y="71" text-anchor="middle" font-size="16">0.881 / 0.942</text>
+      <text x="40" y="124" font-size="13" fill="#66706b">π(s₁) = h</text>
+      <rect x="40" y="140" width="150" height="44" fill="#e7f2ec" stroke="#2f6b56"/>
+      <text x="115" y="167" text-anchor="middle" font-size="16">0.770</text>
+      <text x="210" y="167" font-size="14" fill="#66706b">chunk 0</text>
+      <rect x="330" y="140" width="150" height="44" fill="#f6efe6" stroke="#8d6844"/>
+      <text x="405" y="167" text-anchor="middle" font-size="16">0.824</text>
+      <text x="496" y="167" font-size="14" fill="#66706b">chunk 1 不变</text>
+      <rect x="640" y="140" width="170" height="44" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <text x="725" y="167" text-anchor="middle" font-size="16">0.881 / 0.942</text>
+    </svg>
+    <figcaption>图 3. 人手样本和后续策略样本的目标不依赖 <code>π(s₁)</code> 是否已经等于 <code>h</code>。插歪样本的目标依赖这一点。</figcaption>
+  </figure>
+
+  <p>0.770 的含义可以直接从公式读出来：到达 <code>s₀</code> 并执行 <code>p</code> 之后，当前策略自己能够从 <code>s₁</code> 恢复并完成任务，因此 <code>p</code> 的价值是后续回报的折扣。它描述的是策略已经具备的恢复，不是人曾经做过的恢复。</p>
+
+  <h2>5. 一个窗口跨过两个控制者</h2>
+  <p>改动前，回放窗口按固定长度切片，不在换手处断开。取步 0 到步 9 这一窗：步 0–3 是策略，步 4–9 是人，第 9 步奖励为 1 且 <code>done = 1</code>。自举项因为 <code>done</code> 消失。奖励和只剩最后一格：</p>
+  <div class="eq">Q̂ = γ⁹ · 1 = 0.942</div>
+  <p>接收这个目标的动作是十步向量 <code>[p₀, p₁, p₂, p₃, h₄, …, h₉]</code>。插歪的前缀在左变元里面。右变元没有被计算，因为回合在这个窗口内结束。<code>π</code> 是否会抬起，不参与这次赋值。0.942 在策略学会恢复之前就已经写在包含插歪的动作上。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 250" role="img" aria-label="同一窗口把 0.942 赋给包含插歪的动作；切开后 0.942 只接触人手段">
+      <text x="28" y="24" font-size="13" fill="#66706b">切开前 · 一个窗口</text>
+      <rect x="28" y="36" width="150" height="52" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <rect x="178" y="36" width="226" height="52" fill="#f6efe6" stroke="#8d6844"/>
+      <text x="103" y="66" text-anchor="middle" font-size="13">p₀…p₃</text>
+      <text x="291" y="66" text-anchor="middle" font-size="13">h₄…h₉ · r=1</text>
+      <text x="430" y="66" font-size="14">目标 0.942，done = 1</text>
+      <text x="28" y="124" font-size="13" fill="#66706b">切开后 · 两条样本</text>
+      <rect x="28" y="140" width="180" height="52" fill="#e8f0f5" stroke="#3e6d8c"/>
+      <text x="118" y="162" text-anchor="middle" font-size="13">p₀…p₃</text>
+      <text x="118" y="180" text-anchor="middle" font-size="12" fill="#66706b">奖励和 = 0</text>
+      <line x1="208" y1="166" x2="268" y2="166" stroke="#3e6d8c"/>
+      <polygon points="268,166 256,160 256,172" fill="#3e6d8c"/>
+      <text x="238" y="156" text-anchor="middle" font-size="11" fill="#66706b">γ⁴</text>
+      <rect x="276" y="140" width="200" height="52" fill="#fffcf8" stroke="#3e6d8c"/>
+      <text x="376" y="170" text-anchor="middle" font-size="13">Q(s₄, π(s₄))</text>
+      <rect x="520" y="140" width="250" height="52" fill="#f6efe6" stroke="#8d6844"/>
+      <text x="645" y="162" text-anchor="middle" font-size="13">h₄…h₉ · r₉ = 1</text>
+      <text x="645" y="180" text-anchor="middle" font-size="12" fill="#66706b">目标 γ⁵ = 0.967</text>
+      <text x="28" y="224" font-size="13" fill="#66706b">π(s₄) 还不会抬时，前一条的目标是 0。0.967 只写入 h。</text>
+    </svg>
+    <figcaption>图 4. 成功落在混合窗口内部时，自举被 <code>done</code> 去掉，奖励和直接作用在混合动作上。切开后，奖励和的下标集合和下一状态的位置一起改变。</figcaption>
+  </figure>
+
+  <p>切开后前一段的 <code>n = 4</code>，四步奖励为 0，<code>done</code> 仍为 0，因为回合没有在策略步上结束：</p>
+  <div class="eq">Q̂(s₀, p₀:₃) = γ⁴ Q(s₄, π(s₄)) = 0.974 · Q(s₄, π(s₄))</div>
+  <p><code>π(s₄)</code> 还不会抬时，若该动作的价值为 0，则这段目标为 0。后一段六步，奖励在局部下标 5，<code>done = 1</code>：</p>
+  <div class="eq">Q̂(s₄, h₄:₉) = γ⁵ · 1 = 0.967</div>
+  <p>这是第 3 节的结构用在窗口中间的换手上。左变元和奖励和属于同一个控制者，右变元仍是 <code>π</code>。要写出这两条样本，动作尾必须重复最后一条指令，或者丢掉换手前不足 10 步的执行。那些指令没有出现在轨迹里，所以缓冲仍保存实际执行的 10 步。上面两个式子是对照，不是当前样本。</p>
+
+  <h2>6. 错误状态的价值从哪一个项来</h2>
+  <p>把「策略是否会再去插歪」写成 <code>Q(s₀, p)</code> 的来源。有两条互不包含的途径。</p>
+  <p>途径 A 是第 5 节的混合窗口。终局 1 在奖励和里，自举项为 0。高目标写在包含 <code>p</code> 的动作上，不经过 <code>π(s₄)</code>。若缓冲里成功样本都是这种窗口，critic 在块起点附近见到的高价值动作都带插歪前缀。Actor 在 <code>μ</code> 处读取的是 <code>Q(z, s, μ)</code>。当 <code>μ</code> 靠近这些前缀时，<code>−λ Q</code> 的梯度提高它们的概率。这一步不要求策略已经会抬。</p>
+  <p>途径 B 是第 4 节的不动点。<code>π(s₁) = h</code> 之后，<code>Q(s₀, p) = 0.770</code>。这里的 <code>p</code> 有价值，是因为当前策略从后续状态能够完成任务。若另有一条从对准开始、无人接手、25 个控制步就在最后一步得到 1 的轨迹，它从起点看到的回报是 <code>γ²⁴ = 0.852</code>。40 步那条是 <code>γ³⁹ = 0.770</code>。同样的终局 1，短轨迹的折扣回报更高，<code>Q</code> 会给短轨迹上的动作更高的目标。这条比较只在两条轨迹都作为左变元出现过之后才存在。缓冲里只有绕路的成功时，<code>Q</code> 没有另一组动作可以给出 0.852。</p>
+  <p>第一次严重插歪不接手、让回合以奖励 0 结束，是在途径 B 尚未接通时，给 <code>(s₀, p)</code> 放进一个目标为 0 的样本。它不改变公式，只改变左变元里有哪些动作。</p>
+  <p>在换手处把 <code>done</code> 设为 1，会把途径 B 的 0.770 也变成 0，包括 <code>π</code> 已经会恢复之后。恢复动作对前一状态的价值被截断。人手抬起若因此不再进入 critic，<code>Q(s₁, h)</code> 与 <code>Q(s₁, 往下顶)</code> 的差别也不再被估计。不采用这个截断。</p>
+
+  <h2>7. 自主成功之后，策略能移动的范围</h2>
+  <p>损失对 <code>μ</code> 的驻点满足</p>
+  <div class="eq">μᵢ − ãᵢ = λ (∂Q/∂μᵢ) / (2β)</div>
+  <p>偏离参考的距离与 <code>Q</code> 对动作的导数成正比，与 <code>β</code> 成反比。导数接近 0 时，改变 <code>λ/β</code> 不改变驻点，驻点仍是 <code>μ = ã</code>。2026-09-23 那次离线拟合里，相对参考的平均绝对偏差约 0.00092，<code>Q</code> 约 0.53 且随动作几乎不变。那是导数消失的情形，不是权重还没调大。</p>
+  <p><code>ã</code> 在策略块上是 <code>v</code>，在人手块上是 <code>h</code>。抬起进入 <code>μ</code>，是因为人手样本把 <code>ã</code> 设成了 <code>h</code>，不是因为 <code>Q</code> 在 <code>v</code> 处的梯度指向了 <code>h</code>。<code>h</code> 与 <code>v</code> 在 <code>10×7</code> 维上相距很远。梯度是 <code>μ</code> 附近的导数。<code>fixed_std = 0.002</code> 的采样也留在这个邻域里。邻域外的动作没有样本，<code>Q</code> 在那里的外推不是一次备份。</p>
+  <p>人不再接手、整段由策略完成并得到终局 1 之后，途径 B 沿策略自己的动作接通。不同长度的成功给出第 6 节的 <code>γ²⁴</code> 和 <code>γ³⁹</code>。驻点公式仍把 <code>μ</code> 限制在对应状态的 <code>v</code> 附近，移动量由 <code>∂Q/∂μ</code> 和 <code>β</code> 决定。能改变的是这条已有轨迹上的时机和对准，例如少停、推入更直接。缓冲中不存在的另一种抓取或另一侧送入，驻点条件不把它产生出来。</p>
+  <p>每步一个小的负奖励会拉开短轨迹和长轨迹的目标，但只有在终局 1 已经只出现在策略自己的样本上时，这个差才比较的是策略的两种完成方式。在混合窗口仍把 1 写进前缀时，负奖励改变的是那条混合动作的目标高低。</p>
+
+  <h2>8. 行为克隆在这四块上的目标</h2>
+  <p>Actor 回归的是 <code>ã</code>，不是 critic 的左变元。四块分别是：</p>
+  <table>
+    <thead>
+      <tr><th></th><th><code>ã</code></th><th>critic 的左变元</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>chunk 0</td><td><code>v</code></td><td><code>p</code></td></tr>
+      <tr><td>chunk 1</td><td><code>h</code></td><td><code>h</code></td></tr>
+      <tr><td>chunk 2</td><td><code>v</code></td><td><code>a</code></td></tr>
+      <tr><td>chunk 3</td><td><code>v</code></td><td><code>a′</code></td></tr>
+    </tbody>
+  </table>
+  <p class="cap">表 2. 自主块的克隆目标保持 VLA 参考。这与 RLT 式 (5) 和 Evo-RLT 的 <code>actor_loss</code> 一致。执行动作只出现在 <code>Q</code> 的左变元。</p>
+  <p>若 <code>Q(s₂, a) &gt; Q(s₂, v)</code>，驻点把 <code>μ</code> 从 <code>v</code> 推向 <code>a</code>，距离由 <code>∂Q/∂μ</code> 和 <code>β</code> 限制。不需要把 chunk 2 的 <code>ã</code> 改成 <code>a</code>。</p>
+  <p>Evo-RLT 在人的步数不少于策略步数时，把整块参考换成执行动作。一块里 6 步人手、4 步策略，克隆目标变成 <code>[p₀…p₃, h₄…h₉]</code>。Actor 从块起点一次输出整段，于是插歪前缀也成为回归目标。按步设置 <code>ã</code> 时，那 4 步仍回归 <code>v</code>。两种做法都不改写奖励和。整块投票不处理第 5 节的赋值。</p>
+  <p>当前配置是 <code>bc_imitate_human: true</code> 与 <code>intervened_ref: vla</code>。人手行的回归目标是 <code>h</code>，输入参考仍是该状态的 VLA 块 <code>v</code>。部署时送入的也是 <code>v</code>。RLT 和 Evo-RLT 把参考换成 <code>h</code>，再靠 dropout 避免只抄参考。</p>
+
+  <h2>9. 不改块长，也不换一套权重</h2>
+  <p>第 3 节已经表明，块长不是第 4 节里 0 与 0.770 的分界。分界是右变元用 <code>π</code> 还是用 <code>h</code>。块长决定的是第 5 节：固定长度的窗口会不会把两个控制者的奖励和动作放进同一次求和。<code>chunk_len = 1</code> 使这种窗口无法形成。RLT 的消融把 <code>C = 10</code> 换成单步之后，价值要沿控制频率回溯整段任务，该变体不能稳定达到 VLA 基线。这里的终局奖励只有一个 1，<code>γ = 0.9933</code>，从到位传回对准需要与步数同量级的备份。块的作用是让这十步在一次目标里完成折扣。</p>
+  <p>SiLRI 的 <code>λ(s)</code> 把上面的 <code>β</code> 换成状态的函数，约束宽度正比于人手动作在该状态上的标准差。人对齐的状态上约束紧，人对不齐的状态上 <code>Q</code> 可以离开人的均值。估计这个标准差需要同一状态上的多次干预。螺丝任务的干预稀、状态不重复，方差不稳定。它还要求克隆目标是一个只在干预数据上拟合的高斯，而不是 VLA 参考块。推理时他们使用标准差 0.05，对应从零开始、在平移工作空间内探索。这里的 actor 以 VLA 块为条件，<code>fixed_std = 0.002</code>。两套数不能互换。</p>
+  <p>SiLRI 附录 IX 的采集规则可以直接用，因为它不改网络。前几条整段由人完成。此后第一次严重偏航不接手，直到超时。同一偏航再出现，下一次在偏航开始处接手。连续失败再给一条完整演示。评估时的成功指整段没有人手。这改变的是途径 A、B 里有哪些 <code>(s, a)</code>，不改变备份公式。</p>
+
+  <h2>10. 回报和回归各自用哪些步</h2>
+  <p>一条转移仍是连续执行的最多 10 步。奖励留在实际插入的那一步，策略步继续回归 VLA 参考。人接手并且插入成功时，人手步回归 <code>h</code>，输入参考是当时的 VLA 块。人接手但没有插入时，人手步不回归。预热数据不经过这步。分层采样按最近在线 0.4、预热 0.3、人手 0.3 取批。</p>
+  <p>代码解决不了「每次对歪都接手到插入再记成功」。那样策略步的回归目标仍是对不准的 <code>v</code>，人手步的回归目标是 <code>h</code>，两边会拉同一个 actor。采集要改成：第一次严重对歪不接手，记失败；同一种对歪再出现，再接手并插入。是否变好只看没有人手的成功。</p>
+
+  <h2>11. 训练时看什么</h2>
+  <p>2026-09-23 的检查点在预热后冻结，不能当作当前配置的结果。</p>
+  <ol class="step">
+    <li>按第 9 节的顺序采集。日志里的成功率只统计没有人手步的回合，人完成的回合单独计数。</li>
+    <li>抽一条人接手后按成功的回合。最后一块的奖励在插入那一步仍是 1，人手步的 <code>bc_human_scale</code> 是 1。接手但失败的回合，这个系数是 0。</li>
+    <li>没有人手的成功出现之后，那条回合的最后一步奖励也是 1。</li>
+    <li>训练先限制在偏了之后的抬起和插入。这段能够无人完成之后，再放到整段任务上。</li>
+    <li>看 <code>Q</code> 是否随动作变化。同一批里 <code>Q</code> 仍挤在一个常数附近时，不提高 <code>online_q_weight</code>。驻点公式说明这时权重不移动 <code>μ</code>。</li>
+    <li>连续出现无人接手的成功之后，再考虑每步负奖励，用来分开 <code>γ²⁴</code> 与 <code>γ³⁹</code>。在那之前，终局 1 的位置比步惩罚更决定目标。</li>
+  </ol>
+  <div class="aside">
+    <p>可称为改进的观察是：无人接手的成功率上升，同样成功的步数下降，人手步占比下降。只有人完成的回合在增加，或 <code>Q</code> 仍然不随动作变化，就停在数据上，不继续加大价值项的权重。</p>
+  </div>
+  <p>策略学会恢复之后，插歪状态的价值可以升到约 0.770。它是否低于直接对准，取决于缓冲里有没有那条更短的成功。</p>
+</main>
+</body>
+</html>

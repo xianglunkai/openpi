@@ -17,6 +17,7 @@ from rlt_online_rl.replay import EpisodeStepRecord
 from rlt_online_rl.replay import ReplayBuffer
 from rlt_online_rl.replay import ReplayManager
 from rlt_online_rl.replay import TransitionSource
+from rlt_online_rl.replay import apply_intervention_training_labels
 from rlt_online_rl.replay import build_chunk_transitions_from_episode
 from rlt_online_rl.replay import build_terminal_aligned_chunk_transition
 
@@ -52,6 +53,37 @@ def _make_episode(
             )
         )
     return steps
+
+
+def test_aided_success_keeps_return_and_drops_policy_bc() -> None:
+    steps = _make_episode(length=6, intervention_at=3, collection_phase="online")
+    original = build_chunk_transitions_from_episode(steps, chunk_len=3, stride=3)
+    labeled = apply_intervention_training_labels(original)
+    assert np.allclose(labeled[0].action_chunk, original[0].action_chunk)
+    assert np.allclose(labeled[0].rewards, original[0].rewards)
+    assert np.allclose(labeled[1].rewards, original[1].rewards)
+    assert labeled[1].bc_human_scale == 1.0
+    assert int(labeled[1].source_chunk[0]) == int(TransitionSource.HUMAN)
+
+
+def test_aided_failure_is_not_imitated() -> None:
+    steps = _make_episode(length=6, intervention_at=3, collection_phase="online")
+    for step in steps:
+        step.success = 0
+        step.reward = 0.0
+    labeled = apply_intervention_training_labels(
+        build_chunk_transitions_from_episode(steps, chunk_len=3, stride=3)
+    )
+    assert all(transition.bc_human_scale == 0.0 for transition in labeled)
+    assert all(np.allclose(transition.rewards, 0.0) for transition in labeled)
+
+
+def test_autonomous_success_keeps_return_and_reference_bc() -> None:
+    labeled = apply_intervention_training_labels(
+        build_chunk_transitions_from_episode(_make_episode(collection_phase="online"), chunk_len=3, stride=3)
+    )
+    assert any(float(np.sum(transition.rewards)) > 0.0 for transition in labeled)
+    assert all(transition.bc_human_scale == 1.0 for transition in labeled)
 
 
 def test_partial_chunk_records_actual_steps() -> None:
