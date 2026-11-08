@@ -149,6 +149,10 @@ def test_replay_stores_collection_phase_id() -> None:
     )[0]
     record = transition.to_numpy()
     assert int(record["collection_phase_id"]) == COLLECTION_PHASE_WARMUP
+    assert record["action_chunk"].dtype == np.float32
+    assert record["ref_chunk"].dtype == np.float32
+    assert record["next_ref_chunk"].dtype == np.float32
+    assert record["z_rl"].dtype == np.float16
 
 
 def test_stratified_replay_samples_recent_warmup_and_human_pools() -> None:
