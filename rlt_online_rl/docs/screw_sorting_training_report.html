@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>螺丝分拣 RLT：训练方法与采集修正</title>
+<style>
+  :root {
+    --bg: #f4f1ea;
+    --paper: #fffcf7;
+    --ink: #1f2a27;
+    --muted: #5e6a65;
+    --line: #e0d9ce;
+    --soft: #f3efe6;
+    --policy: #2f5f7a;
+    --policy-bg: #e7f0f5;
+    --human: #8a5a32;
+    --human-bg: #f6eee4;
+    --ok: #245e49;
+    --ok-bg: #e6f2ec;
+    --mark: #8a4032;
+    --mark-bg: #f8ebe7;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 17px/1.72 "Iowan Old Style", Palatino, "Songti SC", "Noto Serif SC", serif;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 48px 26px 96px; }
+  h1 { font-size: 34px; line-height: 1.25; font-weight: 560; margin: 8px 0 10px; letter-spacing: -0.015em; }
+  h2 { font-size: 22px; margin: 48px 0 12px; padding-top: 18px; border-top: 1px solid var(--line); font-weight: 560; }
+  h3 { font-size: 18px; margin: 28px 0 8px; font-weight: 560; }
+  p { margin: 0 0 14px; }
+  a { color: var(--ok); }
+  .kicker {
+    font: 12px/1.4 "IBM Plex Sans", "Noto Sans SC", sans-serif;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); margin: 0;
+  }
+  .meta { color: var(--muted); font-size: 14.5px; margin: 0 0 22px; }
+  nav.toc {
+    background: var(--paper); border: 1px solid var(--line); padding: 14px 20px 8px; margin: 0 0 26px;
+    font: 15px/1.55 "IBM Plex Sans", "Noto Sans SC", sans-serif;
+  }
+  nav.toc ol { margin: 8px 0 10px; padding-left: 1.3em; }
+  nav.toc li { margin: 0 0 4px; }
+  .claims { background: var(--paper); border: 1px solid var(--line); padding: 4px 22px 10px; margin: 0 0 8px; }
+  .claims ol { margin: 8px 0 12px; padding-left: 1.25em; }
+  .claims li { margin: 0 0 8px; }
+  figure { margin: 16px 0 6px; background: var(--paper); border: 1px solid var(--line); padding: 14px 12px 6px; }
+  figcaption { color: var(--muted); font-size: 13.5px; line-height: 1.55; margin: 8px 4px 6px; }
+  svg { display: block; width: 100%; height: auto; }
+  svg text { font-family: "IBM Plex Sans", "Noto Sans SC", sans-serif; fill: var(--ink); }
+  table { width: 100%; border-collapse: collapse; background: var(--paper); font-size: 14.5px; margin: 10px 0 6px; }
+  th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { background: var(--soft); font-weight: 600; }
+  td.num, th.num {
+    text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap;
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 13px;
+  }
+  .cap { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  code, pre {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 13px;
+  }
+  code { background: var(--soft); padding: 1px 4px; }
+  pre {
+    background: #1d2623; color: #f3efe6; padding: 14px 16px; overflow-x: auto;
+    line-height: 1.55; margin: 10px 0 8px;
+  }
+  pre .c { color: #9bb0a6; }
+  .src { color: var(--muted); font: 12.5px/1.4 "IBM Plex Sans", "Noto Sans SC", sans-serif; margin: 0 0 14px; }
+  .eq {
+    background: var(--paper); border: 1px solid var(--line); padding: 12px 16px; margin: 12px 0 16px;
+    overflow-x: auto; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 14.5px; line-height: 1.65;
+  }
+  ul, ol.step { margin: 0 0 14px; padding-left: 1.25em; }
+  li { margin: 0 0 6px; }
+  .aside { background: var(--ok-bg); border: 1px solid #cfe3d8; padding: 12px 16px; margin: 14px 0 18px; }
+  .note { background: var(--mark-bg); border: 1px solid #edd4cd; padding: 12px 16px; margin: 14px 0 18px; }
+  .tag {
+    display: inline-block; font: 12px/1.3 "IBM Plex Sans", "Noto Sans SC", sans-serif;
+    letter-spacing: 0.04em; padding: 1px 6px; border-radius: 2px; vertical-align: 1px;
+  }
+  .tag.p { background: var(--policy-bg); color: var(--policy); }
+  .tag.h { background: var(--human-bg); color: var(--human); }
+</style>
+</head>
+<body>
+<main>
+  <p class="kicker">RLT · AgileX · screw sorting · 对外研究材料</p>
+  <h1>先让策略自己会恢复，再比较哪条插入更早</h1>
+  <p class="meta">仓库 <code>openpi</code>，分支 <code>fix/screw-sorting-hil-bc</code>，采集修正提交 <code>51c3656</code>。任务配置 <code>rlt_online_rl/configs/tasks/screw_sorting/online_rl.yaml</code>。控制频率 30 Hz，<code>chunk_len = 10</code>，<code>credit_horizon_sec = 5</code>。本文只依据当前代码和这条配置。</p>
+
+  <nav class="toc">
+    <strong>目录</strong>
+    <ol>
+      <li><a href="#conclusion">结论</a></li>
+      <li><a href="#method">正确的训练方法</a></li>
+      <li><a href="#calc">同一条轨迹上的计算</a></li>
+      <li><a href="#local">Q 只能做局部挪动</a></li>
+      <li><a href="#code">这次落地的采集修正</a></li>
+      <li><a href="#config">配置里已经生效的设定</a></li>
+      <li><a href="#read">怎样看一轮是否走在这条路上</a></li>
+    </ol>
+  </nav>
+
+  <section class="claims" id="conclusion">
+    <h2 style="border:0;margin:16px 0 0;padding:0;">结论</h2>
+    <ol>
+      <li>螺丝任务上的 RL 是细调。actor 被模仿项拴在参考动作上，探索标准差是 0.002。它比较的是策略自己已经做成过的邻近轨迹，把更早插入的那条排到前面。</li>
+      <li>人手的作用是把恢复动作写进策略。同一种对歪，第一次记失败；再出现时接手到插入。人手步模仿实际执行的抬起、对准、插入。策略自己走出的步仍模仿 VLA 参考。曲线只看零人手步的成功。</li>
+      <li>critic 往后看的动作是目标策略在下一状态的输出，不是样本里人手的下一步。策略还不会在接手点抬起时，对歪段的目标接近 0。学会之后，这段目标变成恢复路径的折扣价值，约 0.770。</li>
+      <li>Q 权重在 30000 次更新后已经从 0 变为 1.0。在出现零人手成功、并且这些成功的 Q 不再是一条平线之前，再加大 Q 权重不会把对歪的动作拉开。</li>
+      <li>本次代码改的是记录与真实发送一致：过期计划不再发出，晚按的成功留在最后一拍真实动作上，全零关节目标按走到 0 来学习。训练损失和「下一步用目标策略」没有改。</li>
+    </ol>
+  </section>
+
+  <h2 id="method">1. 正确的训练方法</h2>
+  <p>分两段。第一段让策略在曾经对歪的状态上自己做出恢复。第二段在已经能自己插进的轨迹里，用折扣比较谁更早完成。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 196" role="img" aria-label="两段训练：先模仿恢复，再比较自主成功的早晚">
+      <rect x="16" y="28" width="400" height="140" fill="#f6eee4" stroke="#8a5a32"/>
+      <rect x="444" y="28" width="400" height="140" fill="#e7f0f5" stroke="#2f5f7a"/>
+      <text x="32" y="54" font-size="15" font-weight="650">第一段 · 模仿吸收恢复</text>
+      <text x="32" y="82" font-size="13">同一种对歪，第一次记失败</text>
+      <text x="32" y="104" font-size="13">再出现时接手到插入，人手步学 h</text>
+      <text x="32" y="126" font-size="13">策略步仍学 VLA 的 v</text>
+      <text x="32" y="148" font-size="13">前 30000 次更新，Q 不拉动 actor</text>
+      <text x="460" y="54" font-size="15" font-weight="650">第二段 · 比较自主插入</text>
+      <text x="460" y="82" font-size="13">只统计零人手步的成功</text>
+      <text x="460" y="104" font-size="13">0.002 噪声下的邻近轨迹</text>
+      <text x="460" y="126" font-size="13">更早的 1 折扣后更高</text>
+      <text x="460" y="148" font-size="13">Q 权重保持 1.0，直到斜率出现</text>
+    </svg>
+    <figcaption>图 1. 人手负责把恢复动作交给模仿。Q 负责在策略自己的成功之间排序。</figcaption>
+  </figure>
+
+  <h3>采集规则</h3>
+  <p>这条规则在操作，不在损失里。代码不能从「每次都救到插入并记成功」里变出稳定提升。</p>
+  <ul>
+    <li>同一种对歪第一次出现：不接手，记失败。这一条的回报属于策略自己的 v。</li>
+    <li>同一种对歪再次出现：接手，直到插入，记成功。人手步成为恢复动作的模仿样本。</li>
+    <li>对外只报告零人手步的成功次数和这些成功完成的步数。人手插到底再按成功，用来训练恢复，不记成策略变好。</li>
+  </ul>
+
+  <h3>第一段在代码里怎么吸收</h3>
+  <p>在线回合里，这次接手真的插入了，<code>bc_human_scale = 1</code>。没插进去，人手行的模仿权重是 0。预热数据不走这套标记。</p>
+<pre>def apply_intervention_training_labels(transitions):
+    <span class="c"># warmup 原样返回</span>
+    aided = any(has_human(t) for t in transitions)
+    succeeded = any(t.success &gt; 0 for t in transitions)
+    human_scale = 0.0 if aided and not succeeded else 1.0</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/replay.py，<code>apply_intervention_training_labels</code></p>
+  <p>模仿目标按步分开。人手或混合步用存下来的动作，也就是 h。其余步用参考块，也就是当时的 VLA 计划 v。</p>
+<pre>if rl_config.bc_imitate_human:
+    bc_target = where(human_mask, batch["action_chunk"], batch["ref_chunk"])</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/trainer.py，<code>_behavior_cloning_terms</code></p>
+  <p>配置 <code>intervened_ref: vla</code>。人手步送进 actor 的参考仍是现场的 VLA 块，和部署时一致；要模仿的仍是 h。论文和 Evo-RLT 会把被干预块的参考换成执行动作。这里故意不这么做：部署永远喂当前 VLA 块，若训练时一半批次靠抄参考就能降低损失，部署时抄到的是 v，对歪会复现。</p>
+  <p>前 30000 次更新，actor 的 Q 权重是 0，模仿权重是 1.5。critic 的 TD 更新照常进行，只是这段时间 Q 不移动 actor。</p>
+<pre>if global_step &lt; warmup_required_updates:   <span class="c"># 30000</span>
+    return warmup_bc_weight, warmup_q_weight  <span class="c"># 1.5, 0</span>
+return online_bc_weight, online_q_weight      <span class="c"># 1.5, 1.0</span></pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/trainer.py，<code>_resolve_actor_loss_weights</code></p>
+
+  <h3>第二段比较什么</h3>
+  <p>30000 次之后 Q 权重已经是 1.0，不必再加大。噪声保持 <code>fixed_std: 0.002</code>。只有零人手成功出现，并且这些成功之间的 Q 不再是常数，actor 才会沿斜率离开模仿目标。比较的量是折扣后的完成时刻，计算在下一节。</p>
+
+  <h2 id="calc">2. 同一条轨迹上的计算</h2>
+  <p>40 个控制步，4 块，每块 10 步。块 0 是策略，钉子对歪。块 1 是人，抬起并对准。块 2、块 3 松开后由策略完成，第 39 步插入，该步奖励为 1，回合在块 3 结束。这个例子用来看备份；真实采集里，人经常一直插到成功，第 1 落到人手那一拍，见本节后半。</p>
+
+  <figure>
+    <svg viewBox="0 0 860 150" role="img" aria-label="四十步四块">
+      <rect x="24" y="36" width="190" height="58" fill="#e7f0f5" stroke="#2f5f7a"/>
+      <rect x="230" y="36" width="190" height="58" fill="#f6eee4" stroke="#8a5a32"/>
+      <rect x="436" y="36" width="190" height="58" fill="#e7f0f5" stroke="#2f5f7a"/>
+      <rect x="642" y="36" width="190" height="58" fill="#e7f0f5" stroke="#2f5f7a"/>
+      <text x="48" y="62" font-size="14">块 0 · 策略 v</text>
+      <text x="48" y="82" font-size="12">步 0–9 · 对歪</text>
+      <text x="254" y="62" font-size="14">块 1 · 人手 h</text>
+      <text x="254" y="82" font-size="12">步 10–19 · 抬起对准</text>
+      <text x="460" y="62" font-size="14">块 2 · 策略</text>
+      <text x="460" y="82" font-size="12">步 20–29</text>
+      <text x="666" y="62" font-size="14">块 3 · 策略</text>
+      <text x="666" y="82" font-size="12">步 39 奖励 1，结束</text>
+    </svg>
+    <figcaption>图 2. 计算用的四块。每块单独存一条转移时，自举不读取下一块里人手实际做了什么。</figcaption>
+  </figure>
+
+  <h3>折扣</h3>
+  <p>时间常数设成 5 秒。30 Hz 下是 150 个控制步。</p>
+  <div class="eq">γ = 1 − 1 / (30 × 5) = 1 − 1/150 = 0.993333</div>
+<pre>def resolve_credit_gamma(*, gamma, control_frequency_hz, credit_horizon_sec):
+    steps = control_frequency_hz * credit_horizon_sec
+    return 1.0 - 1.0 / steps</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/networks.py，<code>resolve_credit_gamma</code></p>
+  <p>块内奖励先按块内下标折扣再求和。回合没结束时，再加上 <code>γ^{actual_steps}</code> 乘上下一状态的 Q。下一步动作来自目标 actor 的均值。</p>
+<pre>next_action = actor.actor_mean(actor_params, next_z_rl, next_proprio, next_ref_chunk)
+bootstrap = (1 - done) * γ ** actual_steps * next_q
+return discounted_chunk_rewards(rewards, γ) + bootstrap</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/networks.py，<code>build_td_target</code>。配置 <code>td_bootstrap_actor: target</code>。</p>
+
+  <table>
+    <thead>
+      <tr><th>从当前块起点再过</th><th class="num">γⁿ</th><th>含义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>9 步（1 在块的最后一拍）</td><td class="num">0.9416</td><td>块 3 自己的奖励，不再自举</td></tr>
+      <tr><td>10 步（一整块）</td><td class="num">0.9353</td><td>自举折扣</td></tr>
+      <tr><td>19 步</td><td class="num">0.8807</td><td>块 2 看到块 3 的 0.9416</td></tr>
+      <tr><td>20 步</td><td class="num">0.8748</td><td>若插入提前到第 20 步</td></tr>
+      <tr><td>29 步</td><td class="num">0.8237</td><td>块 1 沿已会插入的策略看下去</td></tr>
+      <tr><td>39 步</td><td class="num">0.7704</td><td>块 0 在策略自己会恢复之后</td></tr>
+    </tbody>
+  </table>
+  <p class="cap">表 1. <code>0.993333ⁿ</code>，保留四位。此前口头使用的 0.942、0.881、0.824、0.770、0.875 是这些值的三位近似。</p>
+
+  <h3>策略还不会抬起</h3>
+  <p>块 3 含有奖励 1 且 <code>done = 1</code>，目标就是 <code>γ⁹ × 1 = 0.9416</code>。被打分的动作是块 3 里存下来的那 10 步。</p>
+  <p>块 0 的 10 步奖励都是 0，<code>done = 0</code>，目标是 <code>γ¹⁰ Q(s₁, π(s₁))</code>。s₁ 是接手时的状态。π(s₁) 若仍输出对歪的 v，而 v 到不了插入，这个 Q 接近 0，块 0 的目标就是 0。人手在 s₁ 之后实际抬起来了，这件事不写入块 0 的自举，因为自举读的是 π(s₁)，不是样本里的 h。</p>
+
+  <h3>策略已经会在接手点抬起</h3>
+  <p>模仿把 h 学进 π(s₁) 之后，从 s₁ 出发的策略自己能走到第 39 步的 1。块 0 的目标变成：</p>
+  <div class="eq">γ¹⁰ × γ²⁹ = γ³⁹ = 0.7704</div>
+  <p>0.7704 是「从对歪之后的状态继续，策略自己能插进」的折扣值。它出现的条件是策略自己会恢复。在那之前块 0 仍接近 0。</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>块</th><th>存下来的动作</th>
+        <th class="num">还不会恢复</th>
+        <th class="num">已经会恢复</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>0 步 0–9</td><td>策略 v</td><td class="num">≈ 0</td><td class="num">0.7704</td></tr>
+      <tr><td>1 步 10–19</td><td>人手 h</td><td class="num">取决于后面的 π</td><td class="num">0.8237</td></tr>
+      <tr><td>2 步 20–29</td><td>策略</td><td class="num">0.8807</td><td class="num">0.8807</td></tr>
+      <tr><td>3 步 30–39</td><td>策略，末拍为 1</td><td class="num">0.9416</td><td class="num">0.9416</td></tr>
+    </tbody>
+  </table>
+  <p class="cap">表 2. 四块各自对齐、奖励只在第 39 步、只在块 3 结束时的目标。块 2 的 0.8807 = γ¹⁰ × 0.9416。块 1 的 0.8237 = γ¹⁰ × 0.8807。</p>
+
+  <div class="aside">
+    <p>人一直插到成功时，1 落在 h 那一拍，critic 学到的是接手状态上 h 的价值。例如 1 在某人手块的最后一拍且该块结束回合，这条人手动作的目标是 0.9416。这是吸收，不是把人手的下一步写进策略块的自举。</p>
+  </div>
+
+  <h3>同一个窗口里既有 v 又有 h</h3>
+  <p>本次没有在接手处把窗口切开。一步轨迹的奖励向量若同时盖住策略步和人手步，并且 1 落在这个窗口里，<code>done = 1</code> 会去掉自举，奖励和里已经有这个 1。接收这个目标的动作向量包含对歪的前缀。这是换手落在同一条存储样本里时的赋值。采集上用「第一次对歪记失败」把策略自己的失败回报留下来；窗口本身仍按执行过的连续步来切。</p>
+
+  <h3>更早插入值多少</h3>
+  <p>两条都是零人手的成功。一条在第 39 步得到 1，从起点看是 0.7704。另一条在第 20 步得到 1，是 0.8748。差值 0.1044 就是第二段要比较的量。actor 只会在自己采样到的邻近轨迹上看到这个差。</p>
+
+  <h2 id="local">3. Q 只能做局部挪动</h2>
+  <p>在线阶段 actor 的损失是模仿惩罚减 Q。模仿对块内所有维求和，再对 batch 取平均。Q 是每条样本一个标量，同样对 batch 取平均。</p>
+  <div class="eq">L = 1.5 · mean Σᵢ (μᵢ − ãᵢ)² − 1.0 · mean Q(s, μ)</div>
+  <p>对第 i 维令导数为 0。求和里只有含 μᵢ 的那一项给出 2(μᵢ − ãᵢ)，batch 平均在两边同时出现，约掉。</p>
+  <div class="eq">μᵢ − ãᵢ = (∂Q/∂μᵢ) / (2 × 1.5) = (∂Q/∂μᵢ) / 3</div>
+  <p>ãᵢ 在策略步上是 v，在成功接手的人手步上是 h。∂Q/∂μᵢ 在 v 附近为 0 时，右边是 0，μᵢ 停在 v。把 Q 权重从 1 再加大，只改变分母里的系数；斜率为 0 时位移仍是 0。</p>
+  <p><code>fixed_std: 0.002</code> 是 actor 在归一化动作上的高斯标准差。采样留在当前输出旁边。从对歪跳到先抬起再对准，超出这团噪声。Q 在 h 上等于 0.94，只说明接手状态配 h 值高，不会自动变成对歪状态上从 v 指向 h 的斜率。</p>
+  <p>斜率要由策略自己的样本产生：在对歪附近试到的动作，有的后来自己插进了，有的没有，或者插入的步数不同。试到之后，μ 沿斜率离开 ã，每一维大约移动斜率的三分之一。移动改的是已经能插进的轨迹，例如少绕一点、早几拍接触。</p>
+
+  <div class="note">
+    <p>因此以前成功率不涨，和「RL 没有比较差异」是同一件事。当时记成成功的回合是人插到底的。自主插入接近零，对歪段的 Q 是平的，30000 次之后把 Q 权重打开，actor 仍停在 v。</p>
+  </div>
+
+  <h2 id="code">4. 这次落地的采集修正</h2>
+  <p>下面五处保证学习用的动作就是发出去的动作。它们不改变第 2 节的备份公式，也不改变两段训练的顺序。提交 <code>51c3656</code>。</p>
+
+  <h3>4.1 推理期间接手，旧动作发不出去</h3>
+  <p>每次开关策略、显式设置控制权、回合复位，控制版本加一。本拍开始时记下版本。真正发送在同一把锁里核对：回合还在、策略仍开着、版本没变、不在恢复冷却里，才调用发送。</p>
+<pre>def dispatch_policy_action(self, expected_epoch, command):
+    with self._lock:
+        if (not self._episode_active or not self._policy_enabled
+            or self._control_epoch != int(expected_epoch)
+            or time.time() &lt; self._resume_until):
+            return False, None
+        return True, command()</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/intervention_state.py</p>
+  <p>例子。P0 已经发出。推理 P1 时人关掉策略，版本从 12 变成 13，P1 被拒绝。人关掉又马上打开，版本变成 14。推理结束时开关又是开的，但手里那份按版本 12 算的计划仍然发不出去。只在循环开头看一次布尔开关挡不住，因为检查和发送之间隔着推理，手臂也已经被挪走。</p>
+
+  <h3>4.2 旧后缀和 RTC 队列一起作废</h3>
+  <p>下一拍发现版本变了，当前计划清空，RTC 队列作废，这一整段标 <code>drop_transition</code>，回放在这里断开。版本变化包括「关了又开」：布尔值回到开，版本已经不同，旧的 P1 不会接着发。</p>
+<pre>def _ownership_changed(self):
+    policy_epoch = self._intervention_state.policy_epoch()
+    previous_epoch = self._last_control_epoch
+    self._tick_policy_epoch = policy_epoch
+    if previous_epoch == policy_epoch:
+        return False
+    self._last_control_epoch = policy_epoch
+    if self._rtc is not None:
+        self._rtc.note_policy_enabled(False)
+    return previous_epoch is not None</pre>
+  <p class="src">rlt_online_rl/train_deploy_alignment/pika_sync_ros1_agilex_single_arm.py。ROS2 适配器同一条规则。被打断的这段整段不进训练，避免把没记下来的抬臂算到 P0 或下一段新计划头上。</p>
+
+  <h3>4.3 人手块不会被更长的 VLA 换掉</h3>
+  <p>RTC 只有来源是 BASE 时，才把短计划展开成完整 VLA 参考。RL 和 HUMAN 保持自己的长度和数值。</p>
+<pre>if (self._env_config.use_rtc
+    and int(source) == int(TransitionSource.BASE)
+    and full_ref_chunk.shape[0] &gt; refined_prefix.shape[0]):
+    action_chunk = full_ref_chunk</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/inference.py，<code>EnvDriver.run_episode</code> 内的 planner</p>
+  <p>例子。人手给 4 步、每维 0.75 的抬起，VLA 参考有 6 步、每维 0.1。旧条件是「只要不是 RL」，这 4 步会被换成 6 步 0.1，回放里的抬起消失。现在保留 4×7 的 0.75。螺丝配置 <code>enable_human_override: false</code>，实机接手走适配器里的人手采样，不走这条 planner 分支。BASE 阶段仍展开完整 VLA，那是原来的 RTC 重叠。</p>
+
+  <h3>4.4 停稳后才按成功，1 记在最后一拍真实动作上</h3>
+  <p>下一次执行没有任何新动作、上一段没有被丢弃、并且回合已经结束时，不新造一步。上一段最后一步标成结束；若这是成功且该步奖励还不超过 0，奖励写成 1。</p>
+<pre>def _label_delayed_terminal(...):
+    if not done or trace_records or not raw_episode.steps:
+        return False
+    if raw_episode.chunks[-1].drop_transition:
+        return False
+    last_step.done = True
+    last_step.success = chunk_success
+    if chunk_success and last_step.reward &lt;= 0.0:
+        last_step.reward = 1.0</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/inference.py，<code>_label_delayed_terminal</code></p>
+  <p>例子。插入已经落在记录过的 h 上，人晚按成功。下一次 <code>execute_chunk</code> 一进来就看到终止信号，一步都没发。critic 看到的仍是这拍 h 带奖励 1，目标按第 2 节计算，而不是一次空的成功事件。上一段本身是断点时不回填，因为中间的移动没有日志。</p>
+
+  <h3>4.5 空取消是断点；全零是真命令</h3>
+  <p>没有动作、回合还没结束、但带 <code>drop_transition</code> 时，只追加接手之后的新观测，步的起点和终点相同，不写动作。后面的步骤从这份新观测另起一段，不能把断点两边拼进同一个 10 步窗口。</p>
+<pre>def _append_empty_breakpoint(...):
+    observation_idx = len(raw_episode.observations)
+    raw_episode.observations.append(next_observation)
+    raw_episode.chunks.append(RawEpisodeChunk(
+        step_start=len(raw_episode.steps),
+        step_stop=len(raw_episode.steps),
+        drop_transition=True,
+    ))</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/inference.py，<code>_append_empty_breakpoint</code></p>
+  <p>全零的六个关节目标不再被当成填充。增量是 <code>0 − 当前关节</code>，也就是走到 0。以前这一行增量被写成 0，反变换后手臂停在原地。</p>
+<pre>chunk_delta = chunk_abs.copy()
+chunk_delta[..., :6] = chunk_abs[..., :6] - state0[..., :6]</pre>
+  <p class="src">rlt_online_rl/src/rlt_online_rl/action_representation.py，<code>_abs_to_delta_chunk</code>。夹爪仍是绝对量，不参与这六维相减。</p>
+
+  <h2 id="config">5. 配置里已经生效的设定</h2>
+  <p>这些不是本次提交新加的开关，而是当前螺丝配置里和上述方法一致的值。</p>
+  <table>
+    <thead><tr><th>项</th><th>值</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td><code>bc_imitate_human</code></td><td>true</td><td>成功接手的人手步模仿 h</td></tr>
+      <tr><td><code>intervened_ref</code></td><td>vla</td><td>人手步的 actor 输入是现场 VLA 块</td></tr>
+      <tr><td><code>reference_dropout_prob</code></td><td>0.5</td><td>一半批次丢掉参考，减轻抄参考</td></tr>
+      <tr><td><code>bc_reduction</code></td><td>sum</td><td>模仿对 10×7 维求和，得到第 3 节的 /3</td></tr>
+      <tr><td><code>warmup_q_weight</code></td><td>0</td><td>前 30000 次 Q 不拉动 actor</td></tr>
+      <tr><td><code>online_bc_weight</code> / <code>online_q_weight</code></td><td>1.5 / 1.0</td><td>第二段的相对权重，先不加大</td></tr>
+      <tr><td><code>warmup_post_collect_updates</code></td><td>30000</td><td>两段的分界</td></tr>
+      <tr><td><code>freeze_after_warmup</code></td><td>false</td><td>预热结束后继续更新</td></tr>
+      <tr><td><code>fixed_std</code></td><td>0.002</td><td>只在当前动作附近采样</td></tr>
+      <tr><td><code>td_bootstrap_actor</code></td><td>target</td><td>自举用目标 actor</td></tr>
+      <tr><td>采样</td><td>0.4 / 0.3 / 0.3</td><td>近期在线、预热、人手三段分层</td></tr>
+      <tr><td><code>delta_acc_weight</code> / <code>delta_jerk_weight</code></td><td>0 / 0</td><td>损失里不惩罚加速度。部署 10 Hz 低通仍开着</td></tr>
+      <tr><td>动作存储</td><td>float32</td><td><code>action</code> 与 <code>ref</code>。表征 <code>z_rl</code> 仍是 float16</td></tr>
+    </tbody>
+  </table>
+  <p class="cap">表 3. 分层比例对应 <code>recent_online_ratio</code>、<code>warmup_demo_ratio</code>、<code>human_intervention_ratio</code>。不足 10 步的片段整段不写入训练窗口，避免把没执行的步填成动作。</p>
+
+  <h2 id="read">6. 怎样看一轮是否走在这条路上</h2>
+  <ol class="step">
+    <li>日志里分开数零人手成功和有人手步的成功。只有前者用来判断策略是否变好。</li>
+    <li>第一段期间，成功接手的人手步模仿误差应下降。失败接手不应被模仿。策略步仍贴近 v。</li>
+    <li>零人手成功还是 0 时，Q 大致是平的，actor 相对 v 的偏差接近 0。这时保持 <code>online_q_weight = 1.0</code>。</li>
+    <li>零人手成功出现之后，看这些成功的完成步数和对应 Q。更早插入的样本 Q 应更高，量级上第 20 步相对第 39 步大约高 0.10。actor 相对 v 出现小的、方向一致的偏差，偏差约是斜率的三分之一。</li>
+    <li>若零人手成功长期为 0，先增加「同一种对歪第二次才接手」的恢复样本，而不是加大 Q 权重或探索标准差。基础轨迹加上被模仿吸收的恢复，还没有产生可比较的回报差。</li>
+  </ol>
+
+  <div class="aside">
+    <p>本次没有改的部分：不把接手标成回合结束，不把成功奖励从插入那一拍拿掉，不把策略步的模仿目标从 v 改成执行动作，不在接手处拆窗口，不把 <code>chunk_len</code> 改成 1，不把探索标准差改成 0.05。这些会改变现在这条「先模仿恢复、再局部比较」的路径。</p>
+  </div>
+</main>
+</body>
+</html>
