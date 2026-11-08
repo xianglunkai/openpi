@@ -377,4 +377,35 @@ def test_delta_chunk_normalization_broadcasts_batched_state0(tmp_path) -> None:
     assert np.allclose(restored, chunk_abs, atol=1e-5)
 
 
+def test_zero_absolute_action_stays_a_real_target(tmp_path) -> None:
+    stats_path = tmp_path / "norm_stats.json"
+    stats_path.write_text(
+        json.dumps(
+            {
+                "norm_stats": {
+                    "actions": {
+                        "q01": [-2.0] * 7,
+                        "q99": [2.0] * 7,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = RLTOnlineRLConfig(
+        action_dim=7,
+        chunk_len=2,
+        proprio_dim=7,
+        action_representation="delta_chunk",
+        action_norm_stats_path=str(stats_path),
+    )
+    adapter = ActionRepresentationAdapter.from_config(cfg)
+    assert adapter is not None
+    state0 = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.4], dtype=np.float32)
+    chunk_abs = np.zeros((cfg.chunk_len, cfg.action_dim), dtype=np.float32)
+    normalized = adapter.normalize_chunk(chunk_abs, state0)
+    restored = adapter.denormalize_to_abs_chunk(normalized, state0)
+    assert np.allclose(restored, chunk_abs, atol=1e-5)
+
+
 

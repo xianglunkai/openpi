@@ -909,11 +909,12 @@ class EnvDriver:
                 if self._safe_action_filter is not None:
                     refined_prefix = self._safe_action_filter(refined_prefix)
 
-                # VLA/BASE → enqueue full guided VLA chunk for RTC overlap.
-                # RL → enqueue only actor prefix (chunk_len).
+                # BASE → enqueue the full guided VLA chunk for RTC overlap.
+                # RL and HUMAN keep their own plans. A human correction must not
+                # be replaced by the longer VLA reference.
                 if (
                     self._env_config.use_rtc
-                    and int(source) != int(TransitionSource.RL)
+                    and int(source) == int(TransitionSource.BASE)
                     and full_ref_chunk.shape[0] > refined_prefix.shape[0]
                 ):
                     action_chunk = full_ref_chunk
@@ -974,20 +975,51 @@ class EnvDriver:
                 collection_phase=collection_phase,
             )
             env_step_id += len(trace_records)
-            current_observation_idx = self._append_raw_chunk(
+            drop_transition = bool(info.get("drop_transition", False))
+            if self._label_delayed_terminal(
                 raw_episode,
-                observation_idx=current_observation_idx,
-                trace_records=trace_records,
-                chunk_step_id=step_id,
-                chunk_source=source,
-                collection_phase=collection_phase,
                 done=done,
-                success=chunk_success,
-                drop_transition=bool(info.get("drop_transition", False)),
-                start_features=info.get("chunk_start_features"),
-                policy_anchor_offsets=info.get("policy_anchor_offsets") or [],
-                policy_anchor_features=info.get("policy_anchor_features") or [],
-            )
+                trace_records=trace_records,
+                chunk_success=chunk_success,
+            ):
+                pass
+            elif trace_records:
+                current_observation_idx = self._append_raw_chunk(
+                    raw_episode,
+                    observation_idx=current_observation_idx,
+                    trace_records=trace_records,
+                    chunk_step_id=step_id,
+                    chunk_source=source,
+                    collection_phase=collection_phase,
+                    done=done,
+                    success=chunk_success,
+                    drop_transition=drop_transition,
+                    start_features=info.get("chunk_start_features"),
+                    policy_anchor_offsets=info.get("policy_anchor_offsets") or [],
+                    policy_anchor_features=info.get("policy_anchor_features") or [],
+                )
+            elif not done and drop_transition:
+                current_observation_idx = self._append_empty_breakpoint(
+                    raw_episode,
+                    next_observation=next_observation,
+                    chunk_step_id=step_id,
+                    collection_phase=collection_phase,
+                )
+            else:
+                current_observation_idx = self._append_raw_chunk(
+                    raw_episode,
+                    observation_idx=current_observation_idx,
+                    trace_records=trace_records,
+                    chunk_step_id=step_id,
+                    chunk_source=source,
+                    collection_phase=collection_phase,
+                    done=done,
+                    success=chunk_success,
+                    drop_transition=drop_transition,
+                    start_features=info.get("chunk_start_features"),
+                    policy_anchor_offsets=info.get("policy_anchor_offsets") or [],
+                    policy_anchor_features=info.get("policy_anchor_features") or [],
+                )
             # update the observation
             observation = next_observation
             step_id += 1
@@ -1113,6 +1145,54 @@ class EnvDriver:
             "human_steps": source_counts.get(int(TransitionSource.HUMAN), 0),
             "mixed_steps": source_counts.get(int(TransitionSource.MIXED), 0),
         }
+
+    @staticmethod
+    def _label_delayed_terminal(
+        raw_episode: RawEpisodeTrace,
+        *,
+        done: bool,
+        trace_records: list[StepTraceRecord],
+        chunk_success: int,
+    ) -> bool:
+        """Put a late success label on the last real action instead of inventing one."""
+        if not done or trace_records or not raw_episode.steps or not raw_episode.chunks:
+            return False
+        if raw_episode.chunks[-1].drop_transition:
+            return False
+        last_step = raw_episode.steps[-1]
+        last_step.done = True
+        last_step.success = int(chunk_success)
+        if chunk_success and last_step.reward <= 0.0:
+            last_step.reward = 1.0
+        raw_episode.chunks[-1].done = True
+        raw_episode.chunks[-1].success = int(chunk_success)
+        raw_episode.summary["terminal_label_without_action"] = True
+        return True
+
+    def _append_empty_breakpoint(
+        self,
+        raw_episode: RawEpisodeTrace,
+        *,
+        next_observation: dict[str, Any],
+        chunk_step_id: int,
+        collection_phase: str,
+    ) -> int:
+        """Record a logged gap without inventing the missing actions."""
+        observation_idx = len(raw_episode.observations)
+        raw_episode.observations.append(next_observation)
+        raw_episode.chunks.append(
+            RawEpisodeChunk(
+                episode_id=raw_episode.episode_id,
+                chunk_step_id=int(chunk_step_id),
+                observation_idx=observation_idx,
+                step_start=len(raw_episode.steps),
+                step_stop=len(raw_episode.steps),
+                source=int(TransitionSource.HUMAN),
+                collection_phase=collection_phase,
+                drop_transition=True,
+            )
+        )
+        return observation_idx
 
     def _append_raw_chunk(
         self,

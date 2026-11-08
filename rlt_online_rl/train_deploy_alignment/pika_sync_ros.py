@@ -78,6 +78,7 @@ from rlt_online_rl.inference import ChunkFeatures
 from rlt_online_rl.inference import EnvDriver
 from rlt_online_rl.inference import MachineAFeatureClient
 from rlt_online_rl.inference import PolicyPlan
+from rlt_online_rl.intervention_state import HumanInterventionState
 from rlt_online_rl.replay import NullReplayClient
 from rlt_online_rl.replay import ReplayClient
 from rlt_online_rl.replay import TransitionSource
@@ -551,69 +552,6 @@ class TaskState:
             self._task = task
 
 
-class HumanInterventionState:
-    """Thread-safe policy/human takeover state with resume cooldown semantics."""
-
-    def __init__(self, *, policy_enabled: bool = True):
-        self._lock = threading.Lock()
-        self._policy_enabled = policy_enabled
-        self._episode_active = False
-        self._need_reset_on_resume = False
-        self._resume_until = 0.0
-
-    def _mode_name_locked(self) -> str:
-        if not self._episode_active:
-            return "reset"
-        return "policy" if self._policy_enabled else "teleop"
-
-    def current_mode(self) -> str:
-        with self._lock:
-            return self._mode_name_locked()
-
-    def is_policy_enabled(self) -> bool:
-        with self._lock:
-            return self._policy_enabled
-
-    def in_resume_cooldown(self) -> bool:
-        with self._lock:
-            return time.time() < self._resume_until
-
-    def toggle_policy(self, *, resume_delay_s: float) -> bool | None:
-        with self._lock:
-            if not self._episode_active:
-                return None
-            self._policy_enabled = not self._policy_enabled
-            if self._policy_enabled:
-                self._need_reset_on_resume = True
-                self._resume_until = time.time() + max(float(resume_delay_s), 0.0)
-            else:
-                self._need_reset_on_resume = False
-                self._resume_until = 0.0
-            return self._policy_enabled
-
-    def set_policy_enabled(self, enabled: bool) -> bool:
-        with self._lock:
-            self._episode_active = True
-            self._policy_enabled = bool(enabled)
-            self._need_reset_on_resume = False
-            self._resume_until = 0.0
-            return self._policy_enabled
-
-    def enter_episode_reset(self) -> str:
-        with self._lock:
-            self._episode_active = False
-            self._policy_enabled = True
-            self._need_reset_on_resume = False
-            self._resume_until = 0.0
-            return self._mode_name_locked()
-
-    def consume_reset_request(self) -> bool:
-        with self._lock:
-            need = self._need_reset_on_resume
-            self._need_reset_on_resume = False
-            return need
-
-
 class TeleopTriggerNode(Node):
     """ROS Trigger service to toggle policy control and human takeover."""
 
@@ -1035,6 +973,8 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
         self._last_sent_action: np.ndarray | None = None
         self._last_human_seq = -1
         self._last_human_action: np.ndarray | None = None
+        self._last_control_epoch: int | None = None
+        self._tick_policy_epoch = 0
         self._task_mode = str(system.env_driver.task_mode)
         if self._task_mode not in {"full_task", "critical_phase"}:
             raise ValueError(f"Unsupported task_mode={self._task_mode!r}")
@@ -1063,15 +1003,46 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
         locked_mode = self._runtime_context.lock_episode_critical_policy_mode()
         logger.info("Episode critical policy mode=%s", locked_mode)
         self._apply_episode_start_control_mode()
+        self._last_control_epoch = self._intervention_state.policy_epoch()
         return self._robot.get_observation(self._resize_hw, self._task_state.get())
 
     def current_phase_name(self) -> str:
         segment = "critical" if self._runtime_context.in_critical_phase() else "base"
         return f"{self._phase_controller.episode_phase}:{self._task_mode}:{segment}"
 
+    def _ownership_changed(self) -> bool:
+        """Drop a plan whose control epoch is no longer the one this chunk owns."""
+        policy_epoch = self._intervention_state.policy_epoch()
+        previous_epoch = self._last_control_epoch
+        self._tick_policy_epoch = policy_epoch
+        if previous_epoch == policy_epoch:
+            return False
+        self._last_control_epoch = policy_epoch
+        rtc = getattr(self, "_rtc", None)
+        if rtc is not None:
+            rtc.note_policy_enabled(False)
+        return previous_epoch is not None
+
+    def _publish_policy_action(self, bounded: np.ndarray) -> tuple[str, np.ndarray | None]:
+        if self._manual_terminal_requested():
+            return "terminal", None
+        sent_ok, sent = self._intervention_state.dispatch_policy_action(
+            self._tick_policy_epoch,
+            lambda: self._robot.send_action(bounded),
+        )
+        if not sent_ok:
+            self._last_control_epoch = self._intervention_state.policy_epoch()
+            rtc = getattr(self, "_rtc", None)
+            if rtc is not None:
+                rtc.note_policy_enabled(False)
+            return "rejected", None
+        recorded = bounded if sent is None else np.asarray(sent, dtype=np.float32)
+        return "sent", recorded
+
     def execute_chunk(
         self,
         *,
+        observation: dict[str, Any] | None = None,
         control_hz: float,
         policy_planner: Callable[[dict[str, Any], int], PolicyPlan] | None = None,
     ) -> tuple[dict[str, Any], list[float], bool, dict[str, Any]]:
@@ -1082,7 +1053,8 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
         period = 1.0 / max(float(control_hz), 1e-6)
         horizon = self.current_chunk_exec_horizon()
 
-        observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
+        if observation is None:
+            observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
         executed: list[np.ndarray] = []
         ref_actions: list[np.ndarray] = []
         human_controlled: list[bool] = []
@@ -1094,9 +1066,15 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
         chunk_start_features = None
         current_plan: PolicyPlan | None = None
         plan_cursor = 0
+        ownership_interrupted = False
 
         for local_step in range(horizon):
             if self._manual_terminal_requested():
+                break
+            if self._ownership_changed():
+                current_plan = None
+                plan_cursor = 0
+                ownership_interrupted = True
                 break
             step_observation = step_observations[-1]
             tick_start = time.perf_counter()
@@ -1124,8 +1102,14 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
                     dtype=np.float32,
                 )[: self._system.rl.action_dim]
                 bounded = self._apply_action_limits(raw_action)
-                self._robot.send_action(bounded)
-                executed.append(bounded)
+                publish_status, sent = self._publish_policy_action(bounded)
+                if publish_status == "terminal":
+                    break
+                if publish_status != "sent" or sent is None:
+                    ownership_interrupted = True
+                    current_plan = None
+                    break
+                executed.append(np.asarray(sent, dtype=np.float32))
                 ref_actions.append(
                     np.asarray(current_plan.ref_chunk[plan_cursor], dtype=np.float32)[: self._system.rl.action_dim]
                 )
@@ -1146,11 +1130,12 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
                 time.sleep(remaining)
             step_observations.append(self._robot.get_observation(self._resize_hw, self._task_state.get()))
 
-        next_observation = (
-            step_observations[-1]
-            if step_observations
-            else self._robot.get_observation(self._resize_hw, self._task_state.get())
-        )
+        if ownership_interrupted or not executed:
+            next_observation = self._robot.get_observation(self._resize_hw, self._task_state.get())
+            if step_observations:
+                step_observations[-1] = next_observation
+        else:
+            next_observation = step_observations[-1]
         signal_snapshot = self._runtime_context.snapshot_signals()
         context = {
             "episode_chunk_step": self._episode_chunk_step,
@@ -1202,7 +1187,8 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
                 terminal_requested,
                 {
                     "drop_transition": True,
-                    "intervention_flag": False,
+                    "intervention_flag": ownership_interrupted,
+                    "ownership_interrupted": ownership_interrupted,
                     "source": int(TransitionSource.HUMAN),
                     "success": success,
                     "step_trace": step_trace,
@@ -1225,36 +1211,19 @@ class PikaChunkEnvAdapter(ChunkHorizonEnvMixin):
             )
         else:
             source = int(step_sources[0])
-        if not critical_started:
-            return (
-                next_observation,
-                rewards,
-                done,
-                {
-                    "drop_transition": True,
-                    "intervention_flag": human_intervened,
-                    "source": source,
-                    "success": success,
-                    "step_trace": step_trace,
-                    "policy_anchor_offsets": policy_anchor_offsets,
-                    "policy_anchor_features": policy_anchor_features,
-                    "chunk_start_features": chunk_start_features,
-                },
-            )
-        return (
-            next_observation,
-            rewards,
-            done,
-            {
-                "success": success,
-                "intervention_flag": human_intervened,
-                "source": source,
-                "step_trace": step_trace,
-                "policy_anchor_offsets": policy_anchor_offsets,
-                "policy_anchor_features": policy_anchor_features,
-                "chunk_start_features": chunk_start_features,
-            },
-        )
+        info = {
+            "intervention_flag": bool(human_intervened or ownership_interrupted),
+            "ownership_interrupted": ownership_interrupted,
+            "source": source,
+            "success": success,
+            "step_trace": step_trace,
+            "policy_anchor_offsets": policy_anchor_offsets,
+            "policy_anchor_features": policy_anchor_features,
+            "chunk_start_features": chunk_start_features,
+        }
+        if ownership_interrupted or not critical_started:
+            info["drop_transition"] = True
+        return next_observation, rewards, done, info
 
     def _wait_until_policy_active(self) -> None:
         while rclpy.ok():

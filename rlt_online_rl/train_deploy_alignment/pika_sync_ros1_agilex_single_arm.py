@@ -49,6 +49,7 @@ from rlt_online_rl.inference import ChunkFeatures
 from rlt_online_rl.inference import EnvDriver
 from rlt_online_rl.inference import MachineAFeatureClient
 from rlt_online_rl.inference import PolicyPlan
+from rlt_online_rl.intervention_state import HumanInterventionState
 from rlt_online_rl.replay import NullReplayClient
 from rlt_online_rl.replay import ReplayClient
 from rlt_online_rl.replay import TransitionSource
@@ -448,67 +449,6 @@ class TaskState:
             return self._task
 
 
-class HumanInterventionState:
-    def __init__(self, *, policy_enabled: bool = True):
-        self._lock = threading.Lock()
-        self._policy_enabled = policy_enabled
-        self._episode_active = False
-        self._need_reset_on_resume = False
-        self._resume_until = 0.0
-
-    def _mode_name_locked(self) -> str:
-        if not self._episode_active:
-            return "reset"
-        return "policy" if self._policy_enabled else "teleop"
-
-    def current_mode(self) -> str:
-        with self._lock:
-            return self._mode_name_locked()
-
-    def is_policy_enabled(self) -> bool:
-        with self._lock:
-            return self._policy_enabled
-
-    def in_resume_cooldown(self) -> bool:
-        with self._lock:
-            return time.time() < self._resume_until
-
-    def toggle_policy(self, *, resume_delay_s: float) -> bool | None:
-        with self._lock:
-            if not self._episode_active:
-                return None
-            self._policy_enabled = not self._policy_enabled
-            if self._policy_enabled:
-                self._need_reset_on_resume = True
-                self._resume_until = time.time() + max(float(resume_delay_s), 0.0)
-            else:
-                self._need_reset_on_resume = False
-                self._resume_until = 0.0
-            return self._policy_enabled
-
-    def set_policy_enabled(self, enabled: bool) -> bool:
-        with self._lock:
-            self._episode_active = True
-            self._policy_enabled = bool(enabled)
-            self._need_reset_on_resume = False
-            self._resume_until = 0.0
-            return self._policy_enabled
-
-    def enter_episode_reset(self) -> str:
-        with self._lock:
-            self._episode_active = False
-            self._policy_enabled = True
-            self._need_reset_on_resume = False
-            self._resume_until = 0.0
-            return self._mode_name_locked()
-
-    def consume_reset_request(self) -> bool:
-        with self._lock:
-            need = self._need_reset_on_resume
-            self._need_reset_on_resume = False
-            return need
-
-
 class Ros1TeleopServices:
     def __init__(self, state: HumanInterventionState, service_name: str, resume_delay_s: float):
         self._state = state
@@ -865,6 +805,8 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
         self._last_sent_action: np.ndarray | None = None
         self._last_human_seq = -1
         self._last_human_action: np.ndarray | None = None
+        self._last_control_epoch: int | None = None
+        self._tick_policy_epoch = 0
         self._task_mode = str(system.env_driver.task_mode)
         if self._task_mode not in {"full_task", "critical_phase"}:
             raise ValueError(f"Unsupported task_mode={self._task_mode!r}")
@@ -934,11 +876,39 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
         locked_mode = self._runtime_context.lock_episode_critical_policy_mode()
         logger.info("Episode critical policy mode=%s", locked_mode)
         self._apply_episode_start_control_mode()
+        self._last_control_epoch = self._intervention_state.policy_epoch()
         return self._robot.get_observation(self._resize_hw, self._task_state.get())
 
     def current_phase_name(self) -> str:
         segment = "critical" if self._runtime_context.in_critical_phase() else "base"
         return f"{self._phase_controller.episode_phase}:{self._task_mode}:{segment}"
+
+    def _ownership_changed(self) -> bool:
+        """Drop a plan whose control epoch is no longer the one this chunk owns."""
+        policy_epoch = self._intervention_state.policy_epoch()
+        previous_epoch = self._last_control_epoch
+        self._tick_policy_epoch = policy_epoch
+        if previous_epoch == policy_epoch:
+            return False
+        self._last_control_epoch = policy_epoch
+        if self._rtc is not None:
+            self._rtc.note_policy_enabled(False)
+        return previous_epoch is not None
+
+    def _publish_policy_action(self, bounded: np.ndarray) -> tuple[str, np.ndarray | None]:
+        if self._manual_terminal_requested():
+            return "terminal", None
+        sent_ok, sent = self._intervention_state.dispatch_policy_action(
+            self._tick_policy_epoch,
+            lambda: self._robot.send_action(bounded),
+        )
+        if not sent_ok:
+            self._last_control_epoch = self._intervention_state.policy_epoch()
+            if self._rtc is not None:
+                self._rtc.note_policy_enabled(False)
+            return "rejected", None
+        recorded = bounded if sent is None else np.asarray(sent, dtype=np.float32)
+        return "sent", recorded
 
     def execute_chunk(
         self,
@@ -982,6 +952,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
         current_plan: PolicyPlan | None = None
         plan_cursor = 0
         phase_interrupted = False
+        ownership_interrupted = False
         # First tick may reuse EnvDriver's observation (Evo has no chunk seam).
         pending_obs = observation
 
@@ -991,6 +962,11 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
             if self._runtime_context.stop_requested():
                 raise KeyboardInterrupt
             if self._manual_terminal_requested():
+                break
+            if self._ownership_changed():
+                current_plan = None
+                plan_cursor = 0
+                ownership_interrupted = True
                 break
 
             # Re-sample phase each tick (Evo resets RTC on set_rl/set_vla/critical).
@@ -1058,7 +1034,13 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                     policy_anchor_features.append(meta.start_features)
                 raw_action = np.asarray(rtc_result.action, dtype=np.float32)[: self._system.rl.action_dim]
                 bounded = self._apply_action_limits(raw_action)
-                sent = self._robot.send_action(bounded)
+                publish_status, sent = self._publish_policy_action(bounded)
+                if publish_status == "terminal":
+                    break
+                if publish_status != "sent" or sent is None:
+                    ownership_interrupted = True
+                    current_plan = None
+                    break
                 self._last_sent_action = sent.copy()
                 executed.append(sent)
                 ref_actions.append(np.asarray(meta.ref_action, dtype=np.float32)[: self._system.rl.action_dim])
@@ -1081,7 +1063,13 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                         : self._system.rl.action_dim
                     ]
                     bounded = self._apply_action_limits(raw_action)
-                    sent = self._robot.send_action(bounded)
+                    publish_status, sent = self._publish_policy_action(bounded)
+                    if publish_status == "terminal":
+                        break
+                    if publish_status != "sent" or sent is None:
+                        ownership_interrupted = True
+                        current_plan = None
+                        break
                     self._last_sent_action = sent.copy()
                     executed.append(sent)
                     ref_actions.append(
@@ -1166,7 +1154,8 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
                 self._on_episode_done(terminal_requested=True)
             return next_observation, rewards, terminal_requested, {
                 "drop_transition": True,
-                "intervention_flag": False,
+                "intervention_flag": ownership_interrupted,
+                "ownership_interrupted": ownership_interrupted,
                 "source": int(TransitionSource.HUMAN),
                 "success": success,
                 "step_trace": step_trace,
@@ -1187,7 +1176,8 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
         else:
             source = int(step_sources[0])
         info = {
-            "intervention_flag": human_intervened,
+            "intervention_flag": bool(human_intervened or ownership_interrupted),
+            "ownership_interrupted": ownership_interrupted,
             "source": source,
             "success": success,
             "step_trace": step_trace,
@@ -1196,7 +1186,7 @@ class AgilexChunkEnvAdapter(ChunkHorizonEnvMixin):
             "chunk_start_features": chunk_start_features,
             "phase_interrupted": phase_interrupted,
         }
-        if not chunk_critical_started:
+        if ownership_interrupted or not chunk_critical_started:
             info["drop_transition"] = True
         return next_observation, rewards, done, info
 

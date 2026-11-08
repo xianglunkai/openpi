@@ -19,6 +19,7 @@ from rlt_online_rl.config import EnvDriverConfig
 from rlt_online_rl.config import RLTOnlineRLConfig
 from rlt_online_rl.inference import ActorClient
 from rlt_online_rl.inference import ActorRequest
+from rlt_online_rl.inference import ActorResponse
 from rlt_online_rl.inference import ActorService
 from rlt_online_rl.inference import EnvDriver
 from rlt_online_rl.inference import RLTPolicyInferenceWrapper
@@ -541,3 +542,181 @@ def test_run_forever_resumes_episode_numbering_and_stops_after_session_count() -
     driver.run_forever(num_episodes=3)
 
     assert calls == [3, 4, 5]
+
+
+def _collection_config() -> RLTOnlineRLConfig:
+    return RLTOnlineRLConfig(
+        action_dim=7,
+        chunk_len=4,
+        z_dim=3,
+        proprio_dim=7,
+        actor_hidden_dim=8,
+        actor_num_layers=1,
+    )
+
+
+def _obs(tag: str, cfg: RLTOnlineRLConfig) -> dict[str, np.ndarray | str]:
+    return {"state": np.zeros((cfg.proprio_dim,), dtype=np.float32), "tag": tag}
+
+
+def _trace_step(cfg: RLTOnlineRLConfig, tag: str, value: float) -> dict[str, object]:
+    action = np.full((cfg.action_dim,), value, dtype=np.float32)
+    return {
+        "observation": _obs(tag, cfg),
+        "next_observation": _obs(f"{tag}-next", cfg),
+        "action": action,
+        "ref_action": action.copy(),
+        "reward": 0.0,
+        "done": False,
+        "source": int(TransitionSource.RL),
+        "actor_param_version": 1,
+    }
+
+
+class _FeatureProvider:
+    def __init__(self, cfg: RLTOnlineRLConfig, *, ref_len: int | None = None):
+        self._cfg = cfg
+        self._ref_len = cfg.chunk_len if ref_len is None else ref_len
+
+    def get_features(self, observation: dict, **_kwargs) -> dict[str, np.ndarray]:
+        del observation
+        return {
+            "z_rl": np.zeros((self._cfg.z_dim,), dtype=np.float32),
+            "ref_chunk": np.full((self._ref_len, self._cfg.action_dim), 0.1, dtype=np.float32),
+        }
+
+
+class _JournalReplay:
+    def __init__(self, path: str):
+        self._path = path
+        self.added: list = []
+
+    def add_transitions(self, transitions) -> None:
+        self.added.extend(transitions)
+
+    def stats(self) -> dict[str, object]:
+        return {"journal_path": self._path, "max_episode_id": -1}
+
+
+def test_rtc_planner_does_not_replace_human_override_with_full_vla() -> None:
+    cfg = _collection_config()
+    captured: dict[str, object] = {}
+
+    class _Env:
+        def reset(self):
+            return _obs("start", cfg)
+
+        def current_ref_chunk_horizon(self) -> int:
+            return 6
+
+        def current_phase_name(self) -> str:
+            return "online"
+
+        def execute_chunk(self, *, observation, control_hz, policy_planner):
+            del control_hz
+            captured["plan"] = policy_planner(observation, 0)
+            return _obs("next", cfg), [], True, {"step_trace": [], "success": 0}
+
+    class _Actor:
+        def infer(self, request: ActorRequest) -> ActorResponse:
+            return ActorResponse(
+                refined_chunk=np.full((cfg.chunk_len, cfg.action_dim), 0.2, dtype=np.float32),
+                actor_param_version=3,
+                request_id=request.request_id,
+                source=int(TransitionSource.RL),
+            )
+
+    driver = EnvDriver(
+        env=_Env(),
+        feature_provider=_FeatureProvider(cfg, ref_len=6),
+        actor_client=_Actor(),
+        replay_client=_JournalReplay("unused"),
+        rl_config=cfg,
+        env_config=EnvDriverConfig(use_rtc=True, enable_human_override=True),
+        eval_actor_only=True,
+        human_override_fn=lambda _obs, _ref, _refined: np.full((cfg.chunk_len, cfg.action_dim), 0.75, dtype=np.float32),
+    )
+    driver.run_episode(0)
+
+    plan = captured["plan"]
+    assert plan.source == int(TransitionSource.HUMAN)
+    assert plan.action_chunk.shape == (cfg.chunk_len, cfg.action_dim)
+    assert np.allclose(plan.action_chunk, 0.75)
+
+
+def test_delayed_zero_step_success_labels_previous_executed_step(tmp_path) -> None:
+    cfg = _collection_config()
+    calls = {"n": 0}
+
+    class _Env:
+        def reset(self):
+            return _obs("start", cfg)
+
+        def current_phase_name(self) -> str:
+            return "online"
+
+        def execute_chunk(self, *, observation, control_hz, policy_planner):
+            del observation, control_hz, policy_planner
+            calls["n"] += 1
+            if calls["n"] == 1:
+                trace = [_trace_step(cfg, f"s{i}", float(i)) for i in range(cfg.chunk_len)]
+                return _obs("after-motion", cfg), [0.0] * cfg.chunk_len, False, {"step_trace": trace, "success": 0}
+            return _obs("late-success", cfg), [], True, {"step_trace": [], "success": 1, "drop_transition": True}
+
+    replay = _JournalReplay(str(tmp_path / "replay.journal"))
+    driver = EnvDriver(
+        env=_Env(),
+        feature_provider=_FeatureProvider(cfg),
+        actor_client=object(),
+        replay_client=replay,
+        rl_config=cfg,
+        env_config=EnvDriverConfig(),
+    )
+    driver.run_episode(3)
+
+    assert len(replay.added) == 1
+    transition = replay.added[0]
+    assert transition.done
+    assert float(np.sum(transition.rewards)) == 1.0
+    assert transition.rewards[-1] == 1.0
+
+
+def test_cancelled_empty_chunk_breaks_replay_windows(tmp_path) -> None:
+    cfg = _collection_config()
+    calls = {"n": 0}
+
+    class _Env:
+        def reset(self):
+            return _obs("start", cfg)
+
+        def current_phase_name(self) -> str:
+            return "online"
+
+        def execute_chunk(self, *, observation, control_hz, policy_planner):
+            del observation, control_hz, policy_planner
+            calls["n"] += 1
+            if calls["n"] == 1:
+                trace = [_trace_step(cfg, f"a{i}", 0.2) for i in range(4)]
+                return _obs("after-a", cfg), [0.0] * 4, False, {"step_trace": trace, "success": 0}
+            if calls["n"] == 2:
+                return _obs("gap", cfg), [], False, {"step_trace": [], "drop_transition": True, "success": 0}
+            trace = [_trace_step(cfg, f"b{i}", 0.4) for i in range(2)]
+            return _obs("after-b", cfg), [0.0, 0.0], True, {"step_trace": trace, "success": 0}
+
+    replay = _JournalReplay(str(tmp_path / "replay.journal"))
+    driver = EnvDriver(
+        env=_Env(),
+        feature_provider=_FeatureProvider(cfg),
+        actor_client=object(),
+        replay_client=replay,
+        rl_config=cfg,
+        env_config=EnvDriverConfig(step_trace_stride=1),
+    )
+    summary = driver.run_episode(4)
+    with open(summary["raw_episode_path"], "rb") as handle:
+        raw = pickle.load(handle)
+
+    segments, _positions = driver._collect_replay_segments(raw)
+    assert [len(segment.raw_indices) for segment in segments] == [4, 2]
+    gap_step = raw.steps[segments[1].raw_indices[0]]
+    assert raw.observations[gap_step.observation_idx]["tag"] == "gap"

@@ -38,10 +38,6 @@ def _quantile_denormalize(x: np.ndarray, stats: QuantileStats) -> np.ndarray:
     return (x + 1.0) * 0.5 * scale + q01
 
 
-def _zero_row_mask(chunk: np.ndarray) -> np.ndarray:
-    return np.all(np.isclose(chunk, 0.0), axis=-1, keepdims=True)
-
-
 def _broadcast_state0(state0: np.ndarray, chunk: np.ndarray) -> np.ndarray:
     state0 = np.asarray(state0, dtype=np.float32)
     while state0.ndim < chunk.ndim:
@@ -99,9 +95,7 @@ class ActionRepresentationAdapter:
         chunk_abs = np.asarray(chunk_abs, dtype=np.float32)
         state0 = _broadcast_state0(state0, chunk_abs)
         chunk_delta = chunk_abs.copy()
-        zero_mask = _zero_row_mask(chunk_abs)
         chunk_delta[..., :6] = chunk_abs[..., :6] - state0[..., :6]
-        chunk_delta = np.where(zero_mask, 0.0, chunk_delta)
         return chunk_delta
 
     def _delta_to_abs_chunk(self, chunk_delta: np.ndarray, state0: np.ndarray) -> np.ndarray:
@@ -123,8 +117,7 @@ class ActionRepresentationAdapter:
 
     def normalize_chunk(self, chunk_abs: np.ndarray, state0: np.ndarray) -> np.ndarray:
         chunk_repr = self._to_representation(chunk_abs, state0)
-        normalized = _quantile_normalize(chunk_repr, self.stats)
-        return np.where(_zero_row_mask(chunk_abs), 0.0, normalized).astype(np.float32, copy=False)
+        return _quantile_normalize(chunk_repr, self.stats).astype(np.float32, copy=False)
 
     def denormalize_to_abs_chunk(self, chunk_norm: np.ndarray, state0: np.ndarray) -> np.ndarray:
         chunk_repr = _quantile_denormalize(np.asarray(chunk_norm, dtype=np.float32), self.stats)
