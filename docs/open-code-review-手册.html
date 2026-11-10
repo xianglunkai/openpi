@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Open Code Review 操作手册</title>
+<style>
+  @page { size: A4; margin: 16mm 16mm 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    color: #1c1c1c;
+    font-family: "Noto Sans CJK SC", "Source Han Sans SC", "WenQuanYi Micro Hei", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+    background: #fff;
+  }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: 0.02em; }
+  h2 {
+    font-size: 17px;
+    margin: 26px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1.5px solid #222;
+    page-break-after: avoid;
+  }
+  h3 { font-size: 14.5px; margin: 16px 0 6px; page-break-after: avoid; }
+  p { margin: 6px 0 8px; }
+  .meta { color: #444; margin-bottom: 14px; }
+  .box {
+    border: 1px solid #c8c8c8;
+    background: #f6f6f6;
+    padding: 10px 12px;
+    margin: 8px 0 12px;
+    page-break-inside: avoid;
+  }
+  .key {
+    border: 1.5px solid #222;
+    background: #fff8e8;
+    padding: 10px 12px;
+    margin: 8px 0 12px;
+    page-break-inside: avoid;
+  }
+  .key code { font-size: 13.5px; }
+  code, pre {
+    font-family: "DejaVu Sans Mono", "Source Code Pro", "Noto Sans Mono CJK SC", monospace;
+  }
+  code { font-size: 12.5px; }
+  pre {
+    background: #f3f3f3;
+    border: 1px solid #ddd;
+    padding: 10px 12px;
+    margin: 6px 0 12px;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-all;
+    page-break-inside: avoid;
+  }
+  ul, ol { margin: 6px 0 10px; padding-left: 1.3em; }
+  li { margin: 3px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 12px; page-break-inside: avoid; }
+  th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #eee; }
+  .note { font-size: 13px; color: #333; }
+</style>
+</head>
+<body>
+
+<h1>Open Code Review 操作手册</h1>
+<p class="meta">命令 <code>ocr</code> · 版本 v1.13.6 · 本机 Linux x86_64 · 模型 DashScope <code>qwen3.8-max</code> · 审查语言中文</p>
+
+<div class="box">
+  <strong>这台机器已经装好。</strong> 新开终端可直接从第 3 节开始审查。安装文件在 <code>/home/xlk/.local/bin/ocr</code>，配置在 <code>~/.opencodereview/config.json</code>。
+</div>
+
+<h2>0. 先确认还能用</h2>
+<pre>ocr version
+ocr llm test</pre>
+<p><code>ocr version</code> 应显示 <code>open-code-review v1.13.6</code>。<code>ocr llm test</code> 出现 <code>Connection test successful</code> 就可以审查。</p>
+
+<h2>1. 密钥（明文）</h2>
+<p>来源文件：<code>/home/xlk/work/lerobot/examples/lerobot_annotate_web/run_pipeline.py</code> 里的 <code>DASHSCOPE_API_KEY</code>。接口与模型：</p>
+<div class="key">
+  <div>API Key：<code>sk-a42c33cd37dd452babdf855d8d870f5c</code></div>
+  <div>模型：<code>qwen3.8-max</code></div>
+  <div>地址：<code>https://dashscope.aliyuncs.com/compatible-mode/v1</code></div>
+</div>
+<p class="note">这份手册和 PDF 里写了密钥明文。不要把这两个文件提交进 git，也不要外发。</p>
+
+<h2>2. 安装（仅在命令找不到时重做）</h2>
+<p>本机访问 GitHub 会超时，不要用官方的 <code>curl | sh</code>。从国内 npm 镜像安装 Linux 二进制：</p>
+<pre>mkdir -p "$HOME/.local/bin" /tmp/ocr-extract
+curl -fL --max-time 180 -o /tmp/ocr-linux-x64.tgz \
+  "https://registry.npmmirror.com/@alibaba-group/ocr-linux-x64/-/ocr-linux-x64-1.13.6.tgz"
+tar -xzf /tmp/ocr-linux-x64.tgz -C /tmp/ocr-extract
+install -m 755 /tmp/ocr-extract/package/bin/opencodereview "$HOME/.local/bin/ocr"
+export PATH="$HOME/.local/bin:$PATH"
+ocr version</pre>
+<p>新开终端若找不到 <code>ocr</code>，确认 <code>~/.bashrc</code> 里有：</p>
+<pre>export PATH="$HOME/.local/bin:$PATH"</pre>
+
+<h2>3. 配置通义</h2>
+<p>密钥已经写进配置文件时，不必重复这一节。需要重配时直接粘贴：</p>
+<pre>ocr config set provider dashscope
+ocr config set model qwen3.8-max
+ocr config set providers.dashscope.api_key "sk-a42c33cd37dd452babdf855d8d870f5c"
+ocr config set language 中文
+ocr llm test</pre>
+<p>换模型只改这一行，然后重新测通：</p>
+<pre>ocr config set model qwen3.8-max
+ocr llm test</pre>
+
+<h2>4. 日常审查</h2>
+<p>进入要看的仓库。默认审查当前未提交改动（已暂存、未暂存、未跟踪）：</p>
+<pre>cd /home/xlk/work/openpi
+ocr review --preview
+ocr review</pre>
+<p><code>--preview</code> 只列出将要审查的文件，不调用模型、不计费。<code>ocr review</code> 才是正式审查，结果打印在终端。</p>
+
+<h3>其他范围</h3>
+<pre>ocr review --from main --to HEAD
+ocr review --commit HEAD
+ocr review --format json --output /tmp/ocr-review.json</pre>
+<table>
+  <tr><th>命令</th><th>作用</th></tr>
+  <tr><td><code>ocr review</code></td><td>审查工作区当前改动</td></tr>
+  <tr><td><code>ocr review --preview</code></td><td>只预览文件列表</td></tr>
+  <tr><td><code>ocr review --from main --to HEAD</code></td><td>审查相对 main 的分支改动</td></tr>
+  <tr><td><code>ocr review --commit HEAD</code></td><td>只审最新一次提交</td></tr>
+  <tr><td><code>--format json --output 文件</code></td><td>把结果写成 JSON。<code>comments</code> 里是正式意见，含文件、行号、严重程度和修改建议</td></tr>
+</table>
+
+<h2>5. 偶尔会用到</h2>
+<pre>ocr scan
+ocr scan --path rlt_online_rl
+ocr session list
+ocr viewer
+ocr review --help</pre>
+<table>
+  <tr><th>命令</th><th>作用</th></tr>
+  <tr><td><code>ocr scan</code></td><td>不看 diff，扫描整个仓库</td></tr>
+  <tr><td><code>ocr scan --path 目录</code></td><td>只扫一个目录</td></tr>
+  <tr><td><code>ocr session list</code></td><td>列出以前的审查记录</td></tr>
+  <tr><td><code>ocr viewer</code></td><td>用浏览器查看审查记录</td></tr>
+  <tr><td><code>ocr review --help</code></td><td>查看审查命令的全部参数</td></tr>
+</table>
+
+</body>
+</html>

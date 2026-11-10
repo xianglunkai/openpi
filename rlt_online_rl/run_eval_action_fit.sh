@@ -30,7 +30,7 @@ TASK_CONFIG="${RLT_TASK_CONFIG:-configs/tasks/${TASK}/online_rl.yaml}"
 
 # ── Replay filters / output naming ────────────────────────────────────────────
 PHASE="${RLT_PHASE:-all}"          # all | warmup | online | unknown
-SOURCE="${RLT_SOURCE:-all}"           # all | base | rl | human | mixed
+SOURCE="${RLT_SOURCE:-all}"           # all | base | rl | human | mixed | no-rl
 DISABLE_REF_INPUT="${RLT_DISABLE_REF_INPUT:-0}"
 
 # ── Eval-only knobs (not in task YAML) ────────────────────────────────────────

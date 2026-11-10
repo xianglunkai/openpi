@@ -31,6 +31,8 @@ SOURCE_CHOICES = {
     "rl": {1},
     "human": {2},
     "mixed": {3},
+    # Warmup VLA plus human corrections. Drops RL rows, whose BC target is the VLA chunk.
+    "no-rl": {0, 2, 3},
 }
 
 

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WALL-WM 算法笔记</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+  <style>
+    :root {
+      --paper: #f4f1ea;
+      --paper-2: #e7e1d6;
+      --ink: #1c1915;
+      --muted: #5e564c;
+      --line: #d2c8b8;
+      --copper: #8c3b22;
+      --teal: #1d4a48;
+      --ok: #3d6840;
+      --formula: #fbf7f0;
+      --card: #fbf8f3;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 17px;
+      line-height: 1.75;
+    }
+    .layout { display: grid; grid-template-columns: 232px 1fr; min-height: 100vh; }
+    nav {
+      position: sticky; top: 0; height: 100vh; overflow: auto;
+      padding: 28px 16px 40px;
+      border-right: 1px solid var(--line);
+      background: #efeae1;
+    }
+    nav h1 { font-size: 15px; line-height: 1.35; margin: 0 0 6px; }
+    nav .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+    nav a { display: block; text-decoration: none; color: var(--muted); font-size: 13px; padding: 3px 0; }
+    nav a:hover { color: var(--copper); }
+    main { padding: 42px 56px 88px; max-width: 920px; }
+    h1 { font-size: 34px; line-height: 1.2; margin: 0 0 8px; font-weight: 700; }
+    h2 { font-size: 24px; margin: 52px 0 12px; padding-top: 18px; border-top: 1px solid var(--line); }
+    h3 { font-size: 18px; margin: 28px 0 8px; color: var(--teal); }
+    p { margin: 0 0 12px; }
+    ul, ol { margin: 0 0 14px; padding-left: 1.3em; }
+    li { margin: 4px 0; }
+    .lead { font-size: 18px; color: var(--muted); margin: 0 0 18px; }
+    .meta { color: var(--muted); font-size: 13px; margin-bottom: 22px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 14px 16px;
+      margin: 12px 0;
+    }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .callout {
+      border-left: 3px solid var(--copper);
+      background: #f6eee6;
+      padding: 12px 16px;
+      margin: 14px 0 18px;
+    }
+    .callout.ok { border-left-color: var(--ok); background: #eaf0e8; }
+    .callout.teal { border-left-color: var(--teal); background: #e7f0ee; }
+    table { width: 100%; border-collapse: collapse; font-size: 14.5px; margin: 10px 0 16px; background: var(--card); }
+    th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 8px 10px; vertical-align: top; }
+    th { font-size: 12.5px; color: var(--muted); font-weight: 600; background: var(--paper-2); }
+    .formula {
+      background: var(--formula);
+      border: 1px solid var(--line);
+      padding: 8px 16px 4px;
+      margin: 12px 0 16px;
+      overflow-x: auto;
+    }
+    .formula .katex-display { margin: 0.55em 0; }
+    .cap { color: var(--muted); font-size: 13px; margin: -8px 0 16px; }
+    code { font-family: "IBM Plex Mono", ui-monospace, Consolas, monospace; font-size: 0.88em; background: var(--paper-2); padding: 1px 5px; }
+    .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0 16px; }
+    .node {
+      background: var(--card);
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      font-size: 13.5px;
+      min-width: 120px;
+    }
+    .node b { display: block; color: var(--teal); font-size: 12px; }
+    .arr { color: var(--copper); font-size: 18px; }
+    footer { margin-top: 48px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 12px; }
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; }
+      nav { position: relative; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      main { padding: 28px 18px 64px; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <h1>WALL-WM</h1>
+  <div class="sub">算法笔记 · arXiv:2606.01955</div>
+  <a href="#s0">0 用一个任务看问题</a>
+  <a href="#s1">1 模型在估计什么</a>
+  <a href="#s2">2 数据</a>
+  <a href="#s3">3 前处理</a>
+  <a href="#s4">4 数学</a>
+  <a href="#s5">5 模型</a>
+  <a href="#s6">6 训练</a>
+  <a href="#s7">7 一次前向的计算图</a>
+  <a href="#s8">8 输出之后</a>
+  <a href="#s9">9 推理</a>
+</nav>
+<main>
+
+<h1>WALL-WM 算法笔记</h1>
+<p class="lead">按数据进入模型的顺序写。每一节先说明这一步在解决什么，再给出符号和公式。</p>
+<p class="meta">论文：WALL-WM: Carving World Action Modeling at the Event Joints，X Square Robot，arXiv:2606.01955。公式编号与论文第 3–6 节一致。</p>
+
+<section id="s0">
+<h2>0. 用一个任务看问题</h2>
+<p>任务是：把桌上的杯子放进盒子。人用一句话就能说完。相机看到的是一段连续画面。控制器需要的是一串很密的末端位移。</p>
+<p>这三样东西的时间单位不一样。</p>
+<div class="grid-3">
+  <div class="card"><b>语言</b><p>说的是完整动作：伸手、抓住、抬起、放下。</p></div>
+  <div class="card"><b>视频</b><p>画面连续变化，接触发生在很少的几帧里。</p></div>
+  <div class="card"><b>动作</b><p>控制周期很短，一条指令只覆盖零点几秒。</p></div>
+</div>
+<p>常见做法是按固定长度切块。比如每次预测未来 1 秒的动作，条件只有当前画面和整句任务。切出来的那一秒，可能正好卡在「手指刚碰到杯壁」。字幕却仍是「把杯子放进盒子」。模型最容易学到的是这一小段里的局部相关，而不是「抓住」这个完整动作。</p>
+<p>WALL-WM 先把演示切成语义上完整的事件，再让字幕、视频和动作描述同一段物理过程。上面这个任务可以切成五段：</p>
+<ol>
+  <li>手臂移到杯子旁边。</li>
+  <li>夹爪合上。</li>
+  <li>把杯子抬离桌面。</li>
+  <li>移到盒子上方。</li>
+  <li>松开，杯子落入盒子。</li>
+</ol>
+<p>每一段长度不必相同。合上夹爪可能只有零点几秒，移动可能要两秒。模型一次学习一段，而不是一次学习固定的 30 个控制步。</p>
+<div class="callout ok"><strong>后文所有设计都为了保住这件事。</strong>视频模型原来就会「按一句描述生成一段画面」。训练动作时不能把这个能力冲掉。所以动作网络只读取视频特征，动作损失不更新视频网络。</div>
+</section>
+
+<section id="s1">
+<h2>1. 模型在估计什么</h2>
+<p>记一条事件为 <em>e</em>。模型估计的条件分布是</p>
+<div class="formula">\[
+p_{\theta}(V_e, a_e \mid V_0, s, c_e)
+\]</div>
+<p class="cap">给定当前画面、当前本体状态和这句事件描述，同时生成这段事件的未来视频和末端轨迹。</p>
+<table>
+  <thead><tr><th>符号</th><th>含义</th></tr></thead>
+  <tbody>
+    <tr><td>\(V_0\)</td><td>当前时刻每个相机的一帧画面。论文里的部署例子是 3 个相机。</td></tr>
+    <tr><td>\(s\)</td><td>当前本体状态。它是绝对量，用来说明机器人现在处于什么构型。</td></tr>
+    <tr><td>\(c_e\)</td><td>只描述这一段事件的字幕，例如「合上夹爪」。</td></tr>
+    <tr><td>\(V_e\)</td><td>从当前帧往后、与这段事件等长的多相机视频。</td></tr>
+    <tr><td>\(a_e\)</td><td>同一时间段里的末端轨迹。长度随事件变化。</td></tr>
+  </tbody>
+</table>
+<p>视频和动作都不是一次回归出来的。两边都用 flow matching：从噪声出发，沿一条直线逐步走回干净的视频潜变量和干净的轨迹。第 4 节把这条直线写清楚。</p>
+</section>
+
+<section id="s2">
+<h2>2. 数据</h2>
+<p>训练集不是单一机器人的成功演示。论文按「看不看得到动作、视角像不像真机」分成四类，中间再加入接触失败和人工接管。</p>
+<table>
+  <thead><tr><th>来源</th><th>用来学什么</th><th>缺什么</th></tr></thead>
+  <tbody>
+    <tr><td>互联网视频</td><td>物体外观和时间上的动态。文中包含约 120 万条 OpenVID 切片，以及 HD-VILA 等。</td><td>没有机器人动作。</td></tr>
+    <tr><td>第一人称人类视频</td><td>Ego4D、EPIC-KITCHENS 里的手部操作几何。</td><td>不能直接当成关节指令。</td></tr>
+    <tr><td>无机器人的手持采集</td><td>头戴相机加一对手持夹爪。夹爪外形与真机末端一致。6 自由度轨迹用部署机器人的 URDF 做逆运动学，变成合法动作。</td><td>接触力仍然不是真机上的接触力。</td></tr>
+    <tr><td>遥操作与公开机器人数据</td><td>DROID、AgiBot World，以及自有桌面双臂、移动平台 QUANTA X1 / X1 Pro、轮式人形 QUANTA X2。</td><td>成功演示里很少出现滑脱、重抓。</td></tr>
+  </tbody>
+</table>
+<h3>2.1 两种采集方式</h3>
+<div class="grid-2">
+  <div class="card">
+    <b>结构化</b>
+    <p>事先规定任务、起点和终点。一条录像就是一次命名任务。失败的复位、被截断的开头和结尾会删掉。</p>
+  </div>
+  <div class="card">
+    <b>非结构化</b>
+    <p>操作员在真实场景里自由移动，采集时不画任务边界。录像先做时间对齐，再切成后面的四层字幕。</p>
+  </div>
+</div>
+<p>生产配方里，真机数据只占一小部分，用来锚定物理尺度。更大量的片段来自手持设备，因为采集速度不再受机器人台时限制。</p>
+<h3>2.2 主动补上接触附近的失败</h3>
+<p>聚类只能把数据里已经出现的恢复动作找出来。接触点附近如果从来没采过，聚类也补不出样本。论文在每个接触事件 \(e\) 的名义位形 \(q_e^\star\) 周围画一个小球，在球里扰动初始位姿，然后重放原来的演示，或者重新采一条恢复轨迹。</p>
+<div class="formula">\[
+\tilde p_{\mathrm{train}}(q, e)
+= (1-\alpha)\, p_{\mathrm{nominal}}(q, e)
++ \alpha\, \mathbb{E}_{e}\bigl[p(q\mid e)\bigr]
+\]</div>
+<p class="cap">\(\alpha\) 是一个小权重。第二项只覆盖接触点附近，不把机器人扔到无关的位姿上。</p>
+</section>
+
+<section id="s3">
+<h2>3. 前处理</h2>
+<p>顺序不能颠倒：先把视频和动作拨到同一时刻，再清洗，再写字幕，最后聚类。如果字幕写在未对齐的时间轴上，「抓住」会被标到还在靠近杯子的画面上。</p>
+
+<h3>3.1 估计视频和动作之间的固定延迟</h3>
+<p>相机编码、控制器日志和落盘，会让同一段录像里的画面和动作相差一个近似常数的时间 \(\Delta\)。在 20 帧每秒的数据上，差 2 帧就是大约 100 毫秒。对抓取来说，这 100 毫秒足够把「靠近」变成「已经碰到」。</p>
+<p>对齐时做五件事。</p>
+<ol>
+  <li>自我视角和腕部相机转成灰度并归一化，计算帧与帧之间的光流。光流大，表示画面在动。</li>
+  <li>对左右末端位置做差分。差分大，表示手在动。</li>
+  <li>两条曲线都做平滑和归一化。</li>
+  <li>在一个小的整数窗口里滑动动作曲线，找到与光流曲线相关性最大的滞后。</li>
+  <li>把多个相机、左右手的投票合在一起，避免一次遮挡或一只静止的夹爪决定整个偏移。</li>
+</ol>
+<p>找到偏移之后，动作序列按视觉时间轴重新编号。平移造成的头尾空帧删掉。连续的动作数值只在对齐完成之后才重采样。</p>
+<p>如果最佳滞后的相关很弱，或者同一数据源里不同录像投出的滞后互相矛盾，或者需要的平移超出预期窗口，这条数据不直接进入训练。它会被单独拿出来检查，或者降权，直到这个数据源的延迟被确认。</p>
+
+<h3>3.2 清洗</h3>
+<p>删掉这些录像：缺相机、动作时间戳倒退或重复、帧率异常、视频长度和动作长度对不上、机器人状态非法、轨迹在运动学上断开、夹爪状态损坏、重定向之后超出真机可达空间。结构化数据再删掉失败复位和截断的起止。</p>
+<p>留下来的每条录像都带同一套标记：已对齐的多相机视频、对齐后的动作、相机参数、机器人状态、数据来源、置信度和清洗记录。后面的字幕和采样器都读这些标记。</p>
+
+<h3>3.3 四层字幕</h3>
+<p>切分按动作边界，不按固定帧数。仍用杯子的例子：</p>
+<table>
+  <thead><tr><th>层</th><th>这一层写什么</th><th>杯子任务里的例子</th></tr></thead>
+  <tbody>
+    <tr><td>Task</td><td>整段录像的目标</td><td>把杯子放进盒子</td></tr>
+    <tr><td>Subtask</td><td>少数几个连续阶段</td><td>接近杯子；建立抓取；搬运；放入</td></tr>
+    <tr><td>Action</td><td>可执行的短动作</td><td>伸手、对齐、合爪、抬起、平移、松开</td></tr>
+    <tr><td>Segment</td><td>更短的局部事件</td><td>第一次没夹住，腕部挪了 2 厘米再夹</td></tr>
+  </tbody>
+</table>
+<p>还有一个可选的人工层，只标在抽查过的录像上，用来检查自动边界准不准。不是每条数据都有人工层。</p>
+<p>Segment 这一层是为了保住失败和修正。如果整段只有一句「把杯子放进盒子」，滑脱和重抓会被写进成功句里，采样时也无法单独把它们抽出来。</p>
+
+<h3>3.4 截断和去掉静止帧</h3>
+<p>事件时长不同，网络的输入长度要有上限。视频预训练把每段截到最多 65 个潜帧。潜帧和原始帧的换算在第 5.2 节：按论文的 stride-2 下采样，65 个潜帧对应 129 个原始帧。</p>
+<p>构造事件时还会剪掉几乎不动的帧。flow matching 的监督因此落在末端确实在动的区间上。</p>
+
+<h3>3.5 聚类后再采样</h3>
+<p>原始数据是长尾的：大量录像都是「伸手、抓起、放下」，滑脱和重试很少。如果按自然频率训练，模型会倾向高频的顺利轨迹。</p>
+<p>论文做两趟离线聚类，训练时只使用簇编号，不再把编码器跑一遍。</p>
+<ul>
+  <li>视觉–语言簇：冻结的多模态编码器把「画面 + 字幕」映射到同一空间，按主题分成指令和场景的组合。</li>
+  <li>动作簇：只在轨迹空间里聚类。恢复、重抓、接触修正会形成自己的簇，而不是淹没在「抓」这个动词里。</li>
+</ul>
+<p>先按动作边界切开，再聚类。切完之后，语言分布比「一条录像一句任务描述」更均匀。采样器同时平衡这两种簇。</p>
+</section>
+
+<section id="s4">
+<h2>4. 数学</h2>
+<h3>4.1 先看 flow matching 在做什么</h3>
+<p>以动作轨迹为例。干净轨迹记为 \(a_0\)，纯噪声记为 \(\varepsilon\)。训练时不要求网络一步输出 \(a_0\)。它学习的是从噪声走回 \(a_0\) 的速度。</p>
+<p>论文使用一条直线插值。时间 \(t\) 从 0 到 1 时，带噪轨迹是</p>
+<div class="formula">\[
+a_t = (1-t)\, a_0 + t\, \varepsilon
+\]</div>
+<p>这条直线对 \(t\) 的导数是常数</p>
+<div class="formula">\[
+v^\star = \varepsilon - a_0
+\]</div>
+<p class="cap">这就是 v-prediction 的目标。网络看到 \(a_t\) 和 \(t\)，输出 \(\hat v\)。损失是 \(\hat v\) 和 \(v^\star\) 的均方误差。</p>
+<p>视频侧完全相同，只是对象从轨迹换成 VAE 潜变量 \(z_0^V\)：</p>
+<div class="formula">\[
+C^{V\star} = \varepsilon^V - z_0^V
+\]</div>
+<div class="formula">\[
+\mathcal{L}_V = w_V(t^V)\, \lVert \hat C^V - C^{V\star} \rVert^2
+\tag{7}
+\]</div>
+<p class="cap">\(w_V(t^V)\) 是按噪声水平可选的权重。损失只在有效图像块上计算。画面以外的区域和合成黑边不进入这个均方误差。论文把这叫做 border masking，所有视频训练都打开。</p>
+<p>如果打开了第 5.3 节的 tube 遮挡，被遮住的时空区域 \(\mathcal{T}\) 用同一个目标，但多乘一个权重 \(\lambda_{\mathrm{mask}}\)：</p>
+<div class="formula">\[
+\mathcal{L}_V
+= w_V(t^V)\Biggl(
+\sum_{u\notin\mathcal{T}}\lVert \hat C^V_u - C^{V\star}_u\rVert^2
++ \lambda_{\mathrm{mask}}\sum_{u\in\mathcal{T}}\lVert \hat C^V_u - C^{V\star}_u\rVert^2
+\Biggr)
+\tag{8}
+\]</div>
+<p>主实验把 tube 关掉，也就是 \(p_{\mathrm{tube}}=0\)。此时公式 (8) 退回公式 (7)。</p>
+
+<h3>4.2 动作损失</h3>
+<p>动作塔默认也预测速度，目标是 \(v^{A\star}=\varepsilon^A-a_0\)。视频塔在这一阶段是冻结的。一个优化步可以抽 \(K\) 个不同的动作噪声，它们共用同一次视频前向：</p>
+<div class="formula">\[
+\mathcal{L}_A
+= \frac{1}{K}\sum_{k=1}^{K}
+w(t_k^A)\, \lVert \hat y_k^A - y_k^{A\star}\rVert^2
+\tag{13}
+\]</div>
+<p>主实验取 \(K=6\)，并且 \(\hat y\) 就是预测速度。\(K\) 只出现在训练里。推理时每个控制周期只走一条去噪轨迹。</p>
+<p>接触事件往往只有几帧。速度预测在高噪声时会把这几帧的权重压得很低。论文因此留了一个可选项：网络直接预测干净动作 \(a_0\)，称为 x-prediction。还可以加上离散余弦变换的辅助项，让损失更关心整条轨迹的形状，而不是相邻帧的抖动。主实验这两个选项都关闭。</p>
+
+<h3>4.3 视频去噪和动作去噪为什么不对齐</h3>
+<p>动作第 \(j\) 步做交叉注意力时，必须读取某一步的视频特征。这个对应记为 \(m(j)\)。</p>
+<table>
+  <thead><tr><th></th><th>对应关系</th><th>什么时候用</th></tr></thead>
+  <tbody>
+    <tr><td>对称</td><td>\(m(j)=j\)</td><td>小数据上视频塔和动作塔一起更新。</td></tr>
+    <tr><td>非对称</td><td>\(m(j)=s^\star\)</td><td>主配方。动作的每一步都读同一次视频前向。</td></tr>
+  </tbody>
+</table>
+<p>主配方的日程一共 50 步，锚点固定在</p>
+<div class="formula">\[
+N_d = 50, \qquad s^\star = 45, \qquad m(j)=45 \quad \text{对所有 } j
+\]</div>
+<p>原因可以分成计算和监督两半。</p>
+<ul>
+  <li>视频塔已经冻结。动作的正确答案来自数据集里的轨迹，不来自视频网络当场生成的画面。若让视频走到很噪的步数，那些特征对不上这段真值轨迹。若让视频走到几乎干净的步数，特征里又缺少仍可用来引导控制的结构。</li>
+  <li>所以视频只算到第 45 步，停在中等噪声。动作的 50 个噪声水平都看这一份特征。训练时锚点允许小幅抖动。推理时锚点固定。</li>
+</ul>
+
+<h3>4.4 长事件更容易丢掉字幕</h3>
+<p>事件越长，模型越可能只靠字幕记住后半段，而不看当前画面。丢掉字幕的概率 \(\rho\) 随原始帧数 \(L_e\) 从 0.1 升到 0.9，中间用升余弦：</p>
+<div class="formula">\[
+\rho(L_e)=
+\begin{cases}
+0.1, & L_e \le 129, \\[4pt]
+0.1 + 0.8\cdot\dfrac{1-\cos\bigl(\pi \dfrac{L_e-129}{220-129}\bigr)}{2}, & 129 &lt; L_e &lt; 220, \\[10pt]
+0.9, & L_e \ge 220.
+\end{cases}
+\tag{20}
+\]</div>
+<p>129 与第 3.4 节的截断长度相同。字幕被丢掉的那一步，网络只能根据当前多相机画面，推断接触和末端接下来会怎样动。</p>
+
+<h3>4.5 动作写成相对位移</h3>
+<p>事件训练时，每个潜帧 \(f\) 上的图像块共享时间索引 \(\tau=f\)。状态量和第 0 个潜帧的索引都是 0。动作 token 每 \(K_p\) 个对齐一个未来潜帧：</p>
+<div class="formula">\[
+\tau^A_0 = 0,
+\qquad
+\tau^A_{1+k} = \left\lfloor \frac{k}{K_p} \right\rfloor + 1
+\tag{10}
+\]</div>
+<p>统一模式还要看历史。窗口是 \(M\) 帧历史、1 个当前锚点、\(N\) 帧未来。锚点上的动作 token 写成 0，用来固定时间原点。锚点之前的 token 是从锚点往回看的位移，锚点之后的 token 是从锚点往前走的位移。机器人的绝对构型不写进这条相对轨迹，它留在单独的状态 token \(s\) 里。</p>
+
+<h3>4.6 视线锥：训练时哪些图像块可以互相看</h3>
+<p>三个相机并不看同一块空间。如果让所有图像块自由互看，注意力会把不相干的背景混在一起。论文在训练时用标定计算一个掩码，推理时再把掩码拿掉，所以部署不需要标定。</p>
+<p>同一潜帧上的两个图像块 \(u\) 和 \(u'\)，各自的视锥近似成一个圆锥：顶点在相机光心，轴指向图像块中心，半顶角刚好包住这个图像块。在景深区间 \([d_{\min}, d_{\max}]\) 里，如果两个圆锥有交，则这两个图像块允许互看。</p>
+<div class="formula">\[
+\mathcal{M}_{\mathrm{sc}}[u,u'] = 1
+\quad\Longleftrightarrow\quad
+\text{两个视锥在景深范围内相交}
+\tag{6}
+\]</div>
+<p>注意力logit 上加的偏置是 \((1-\mathcal{M}_{\mathrm{sc}})\cdot(-\infty)\)。同一相机内部始终允许互看。这个掩码每个样本算一次，所有层共用。它只改变注意力，不改变哪些 token 进入视频损失。</p>
+
+<h3>4.7 文本条件的两个损失</h3>
+<p>后面会把 T5 换成一个视觉语言模型。为了不重训视频网络，视觉语言模型输出的条件 \(c_\ell^{\mathrm{VLM}}\) 要对齐到原来的 T5 特征 \(c_\ell^{\mathrm{T5}}\)。同时监督两件辅助事：下一事件的字幕，以及当前事件还剩多少时间。</p>
+<div class="formula">\[
+\mathcal{L}_{\mathrm{text}}
+= \lambda_{\mathrm{align}}\lVert c_\ell^{\mathrm{VLM}}-c_\ell^{\mathrm{T5}}\rVert^2
++ \lambda_{\mathrm{next}}\, \mathrm{CE}(\hat c_{\mathrm{next}}, c_{\mathrm{next}})
++ \lambda_{\mathrm{time}}\, \mathrm{Huber}(\widehat{\Delta t}, \Delta t)
+\tag{21}
+\]</div>
+<p>统一模式里的连续思维向量不逐个字生成。它们先被投影成一个短前缀，再交给一个冻结的 Qwen3.5-0.8B，让这个小模型把原来的文字思维链 \(r_{1:M_r}\) 重建出来：</p>
+<div class="formula">\[
+\mathcal{L}_{\mathrm{CoT}}
+= -\sum_{m=1}^{M_r}
+\log P_{\phi}\bigl(r_m \mid z_{1:K_c},\, r_{&lt;m}\bigr)
+\tag{19}
+\]</div>
+<p class="cap">梯度只进入思维支路和前缀投影。0.8B 模型不更新。这样连续向量要装下高层语义，而不是模仿逐 token 的隐状态。</p>
+</section>
+
+<section id="s5">
+<h2>5. 模型</h2>
+<p>主干是两座同样深的 DiT。一座继承文生视频模型 Wan，负责未来画面。一座随机初始化，负责末端轨迹。视频生成评测使用的视频塔从 Wan2.2-5B 初始化。图像先经过冻结的 3D 因果 VAE，网络在潜变量上做去噪。</p>
+
+<h3>5.1 原始帧如何变成潜帧</h3>
+<p>VAE 的时间打包规则是「开头 1 帧，后面每 4 帧压成 1 个潜帧」。</p>
+<div class="formula">\[
+\underbrace{1}_{\text{当前帧}} + 4N \text{ 个原始帧}
+\quad\longrightarrow\quad
+\underbrace{1}_{\text{条件潜帧}} + N \text{ 个待去噪潜帧}
+\]</div>
+<p>事件训练时，当前画面放在开头那一帧。网络只去噪后面的 \(N\) 个潜帧。</p>
+<p>统一模式还要看历史。在当前帧前面再接 \(4M\) 个原始帧，一次编码整段 \(1+4M+4N\)。得到 \(1+M+N\) 个潜帧，历史和未来之间没有第二次编码的接缝。网络仍然只去噪最后 \(N\) 个未来潜帧，历史潜帧只作为条件。</p>
+
+<h3>5.2 视频塔的一个 block</h3>
+<p>Wan 原来的视角内自注意力和 3D RoPE 保持不动。每个相机先作为自己的 batch 项进入。多相机时，每个 block 在视角内注意力之后多一条跨视角支路。</p>
+<ol>
+  <li>按潜帧，把 \(N_v\) 个相机在这一帧上的图像块拼成一条序列。</li>
+  <li>位置编码从 \((f,h,w)\) 扩到 \((f,h,w,\mathrm{view})\)。view 这一维来自每个相机一个可学习向量，所有层共用。增加或去掉一个相机，只改这张表。运行时不输入标定外参。</li>
+  <li>这条支路的注意力权重，用该 block 原有的视角内自注意力初始化。</li>
+  <li>输出乘一个从零开始的投影 \(W_{\mathrm{view}}\)，再乘 AdaLN 的门 \(g_i\)，加回原特征：</li>
+</ol>
+<div class="formula">\[
+h_i^V \leftarrow h_i^V + g_i\, W_{\mathrm{view}}\, \mathrm{CrossViewAttn}_i(h_i^V),
+\qquad W_{\mathrm{view}}\text{ 的初值为 } 0
+\tag{1}
+\]</div>
+<p>零初始化的作用很具体：训练的第一步，跨视角支路的输出是 0，Wan 原来的外观和语言对齐还在。跨相机关联是后来学出来的。</p>
+<p>训练时还可以随机遮住一个相机上的一小块空间，并且沿所有潜帧都遮住，这块区域叫做 tube。遮住之后，单靠这个相机自己的前后帧补不回来，网络只能向其他相机要信息。窗口必须落在至少能被另一个相机看到的地方。主配方不用 tube，只保留视线锥和黑边屏蔽。</p>
+
+<h3>5.3 动作塔的一个 block</h3>
+<p>一个共享的 MLP 把本体状态 \(s\) 和带噪动作都映射到宽度 \(d\)。随后每个 block 按固定顺序做四件事。</p>
+<ol>
+  <li>动作 token 之间做自注意力，时间用一维 RoPE。</li>
+  <li>再单独和状态 token 做一次交叉注意力。这样绝对构型不会被很长的视频序列稀释。</li>
+  <li>读取同一深度的视频特征。等深时，动作第 \(i\) 层读视频第 \(i\) 层。</li>
+  <li>经过带门控的前馈网络。</li>
+</ol>
+<p>交给动作塔之前，各相机的视频 token 沿序列维拼起来，并加上窗内时间嵌入 \(E_\tau\)。统一模式再加一个窗口编号嵌入 \(E_{\mathrm{abs}}\)，用来区分「这是第几个定长窗口」。</p>
+<div class="formula">\[
+\tilde h_i^V
+= \mathrm{ViewConcat}\bigl(h_{\pi(i)}^V\bigr)
++ E_\tau(\tau^V)
++ E_{\mathrm{abs}}(t_{\mathrm{abs}})
+\tag{9}
+\]</div>
+<p class="cap">等深网络里 \(\pi(i)=i\)。\(\tilde h_i^V\) 是动作交叉注意力的 key 和 value。事件训练时 \(E_{\mathrm{abs}}\) 关闭。</p>
+<div class="callout teal"><strong>耦合是单向的。</strong>动作层读取视频层。视频 DiT 上没有从动作回来的支路。动作损失的梯度停在动作塔里。</div>
+<p>最后的 MLP 把头把动作 token 映回末端动作的维度 \(D_a\)。</p>
+
+<h3>5.4 语言支路</h3>
+<p>事件模式可以直接使用一句下一事件的文字。这句文字在早期训练里由冻结的 T5 编码。后来换成冻结的 Qwen3.5-9B，但它输出的向量要对齐到 T5 的特征空间，视频塔因此不用重训。</p>
+<p>统一模式如果每次都逐字生成思维链，延迟会随思维长度线性增加，而且底层的视觉语言特征会被重复计算。Staircase 把网络在深度 \(N_r\) 处切开：</p>
+<ul>
+  <li>只有第一个思维位置走过 \(N_r\) 以下的层，得到一份共享的视觉语言特征。</li>
+  <li>其余 \(K_c-1\) 个连续向量在 \(N_r\) 以上并行生成。</li>
+  <li>这些向量直接进入世界模型的交叉注意力，中间不采样离散 token。</li>
+</ul>
+</section>
+
+<section id="s6">
+<h2>6. 训练</h2>
+<p>训练分成五段。每一段只更新该段负责的参数。表里「训」表示更新，「冻」表示已经接上但不更新，「—」表示这一段还没有这个模块。</p>
+<table>
+  <thead>
+    <tr><th>模块</th><th>视频预训练</th><th>动作预训练</th><th>文本适配</th><th>Staircase</th><th>定长适配</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>3D VAE</td><td>冻</td><td>冻</td><td>冻</td><td>冻</td><td>冻</td></tr>
+    <tr><td>T5</td><td>冻</td><td>冻</td><td>冻</td><td>—</td><td>冻</td></tr>
+    <tr><td>Qwen3.5-9B 主体</td><td>—</td><td>—</td><td>冻</td><td>冻</td><td>冻</td></tr>
+    <tr><td>投影头、下一事件头、剩余时间头</td><td>—</td><td>—</td><td>训</td><td>冻</td><td>冻</td></tr>
+    <tr><td>视频 DiT</td><td>训</td><td>冻</td><td>冻</td><td>冻</td><td>训</td></tr>
+    <tr><td>动作 DiT</td><td>—</td><td>训</td><td>冻</td><td>冻</td><td>训</td></tr>
+    <tr><td>Staircase 支路</td><td>—</td><td>—</td><td>—</td><td>训</td><td>冻</td></tr>
+  </tbody>
+</table>
+
+<h3>6.1 视频预训练</h3>
+<p>只更新视频 DiT，动作塔还没接上。条件是当前多相机画面，以及 T5 编码后的事件字幕。噪声时间步均匀采样。跨视角投影从 0 开始。字幕按第 4.4 节的概率丢掉。权重做指数滑动平均，衰减系数 0.9999。不同长度的事件按潜变量形状分桶，减少填充。采样用第 3.5 节的双簇均衡。</p>
+
+<h3>6.2 动作预训练</h3>
+<p>载入上一段的视频 DiT 并冻结，关掉视频损失。动作塔随机初始化。视频前向停在第 45 步。一个优化步抽 6 个动作噪声，共用这一次视频特征。数据布局仍是变长事件，不是定长窗口。</p>
+
+<h3>6.3 把条件从 T5 换成视觉语言模型</h3>
+<p>Qwen3.5-9B 的主体冻结。一次前向要产出三样东西：对齐到 T5 空间的条件向量、下一事件字幕、当前事件的剩余时间。损失是公式 (21)。下游 DiT 在这一段不更新。</p>
+
+<h3>6.4 Staircase</h3>
+<p>只更新思维支路和前缀投影。监督是公式 (19)：冻结的 0.8B 模型能否从这些连续向量里把文字思维链读出来。</p>
+
+<h3>6.5 可选的定长适配</h3>
+<p>如果部署时每次只执行固定的 \(H_a\) 步，需要这一段。两座 DiT 一起在「历史 + 当前 + 未来」窗口上更新。全局指令来自 Task 层，仍由冻结的 T5 编码。锚点仍是 45。因为窗口切法变了，视觉–语言聚类和动作聚类要在新窗口上重做一遍。</p>
+<p>只跑事件模式的话，这一段可以不做。</p>
+
+<h3>6.6 和算法绑在一起的三个实现选择</h3>
+<ul>
+  <li>多个事件拼进同一条序列，用注意力掩码禁止跨事件看见。这样每个优化步的有效批量不随录像长短变化。</li>
+  <li>优化器主体用 Muon。分片训练时 Newton–Schulz 很贵，论文的 DMuon 给每个矩阵指定一个负责的 rank，把参数同步从 all-reduce 改成 reduce 加 broadcast，并与下一步前向重叠。</li>
+  <li>每层有视角内注意力和跨视角注意力。序列并行下如果朴素实现，每层要做四次 all-to-all。调度把通信叠进注意力计算里。</li>
+</ul>
+</section>
+
+<section id="s7">
+<h2>7. 一次前向的计算图</h2>
+<p>下面是动作预训练里一个优化步的数据依赖。箭头表示必须先算完左边，才能算右边。</p>
+<div class="flow">
+  <div class="node"><b>1 输入</b>当前帧 \(V_0\)<br>字幕 \(c_e\)<br>真值视频和轨迹<br>状态 \(s\)</div>
+  <span class="arr">→</span>
+  <div class="node"><b>2 编码</b>冻结 VAE 得到 \(z_0^V\)<br>冻结 T5 得到文本条件<br>按 \(\rho\) 可能丢掉字幕</div>
+  <span class="arr">→</span>
+  <div class="node"><b>3 视频锚点</b>冻结视频塔只走到第 45 步<br>留下每一层的 \(h_i^V\)</div>
+  <span class="arr">→</span>
+  <div class="node"><b>4 动作</b>抽 \(t^A\)，形成 \(a_t\)<br>每层读取对应的 \(h_i^V\)<br>预测速度</div>
+  <span class="arr">→</span>
+  <div class="node"><b>5 损失</b>公式 (13)<br>只更新动作塔<br>同一份 \(h_i^V\) 给 6 个噪声用</div>
+</div>
+<p>动作第 \(i\) 层内部的顺序是：动作自注意力，读取状态 token，读取 \(\mathrm{ViewConcat}(h_i^V)+E_\tau\)，再经过门控前馈。</p>
+<p>视频预训练的图更短。没有第 4、5 步。被加噪的是 \(z_t^V\)，损失是公式 (7)。\(W_{\mathrm{view}}\) 在这一段更新。视线锥偏置只在这次训练前向里加上。</p>
+<p>统一模式推理时，去噪器的图不变。变化的是文本条件从哪里来。下面三种来源占用同一个交叉注意力槽，滚出过程中可以更换，不必重新加载去噪器。</p>
+<div class="grid-3">
+  <div class="card"><b>全局指令</b><p>整句任务编码一次，后面的每个定长窗口都复用。</p></div>
+  <div class="card"><b>原子指令</b><p>人或上层规划器在每个窗口边界给一句短指令。</p></div>
+  <div class="card"><b>Staircase</b><p>底层算一次视觉语言特征，高层并行给出 \(K_c\) 个连续向量。</p></div>
+</div>
+</section>
+
+<section id="s8">
+<h2>8. 输出之后</h2>
+<h3>8.1 从网络输出到机器人指令</h3>
+<p>网络给出的是相对当前观测位姿的末端位移。锚点是 0。把未来 token 从锚点开始累加，得到这一段事件或这一个窗口的末端轨迹。当前的绝对构型来自状态 token，不从相对位移里反推。</p>
+<p>手持数据在进入训练集之前，已经用部署机器人的 URDF 做过逆运动学。模型看到的动作维度与真机末端一致。</p>
+<p>事件模式把这一段的自然时长执行完，再取新的观测。统一模式每次只执行固定的 \(H_a\) 步，然后窗口向前滑动。</p>
+
+<h3>8.2 把 50 步压缩到可以闭环</h3>
+<p>50 步去噪、每步一次大网络前向，来不及放进机器人的控制周期。论文用两步压缩。</p>
+<p>第一步是分布匹配蒸馏。学生只用很少的采样步。它不对齐教师的每一步轨迹，而对齐最终样本的分布。损失里有两项分数：冻结教师的分数，以及一个在线跟着学生分布走的分数网络。学生被推向「教师有概率、学生还很少生成」的区域。</p>
+<p>只做分布对齐，动作头会漂。论文把原来的动作预测损失留在蒸馏目标里。去掉这一项后，动作平均绝对误差变差 53%。学生用教师的权重初始化。部署时只保留学生。</p>
+<p>第二步是 FP8 量化。权重量化后离线打包。激活的缩放和类型转换写进前一个算子的收尾，避免把整块激活再读写一遍。再用 CUDA Graph 去掉每步去噪的主机启动开销。论文给出的结果是，这套栈把端到端推理收到 10 Hz。</p>
+</section>
+
+<section id="s9">
+<h2>9. 推理</h2>
+<p>两种模式都使用第 4.3 节的锚点：视频网络只前向到第 45 步，动作网络走完自己的去噪步，每一步的视觉特征都来自这一次视频前向。上机时走的是蒸馏后的少步学生，不是 50 步教师。</p>
+
+<h3>9.1 事件模式</h3>
+<div class="flow">
+  <div class="node"><b>观测</b>\(V_0, s\)</div>
+  <span class="arr">→</span>
+  <div class="node"><b>下一事件</b>人给出，或由 Qwen 头给出<br>同时给出剩余时间</div>
+  <span class="arr">→</span>
+  <div class="node"><b>去噪</b>变长的视频潜变量和末端轨迹</div>
+  <span class="arr">→</span>
+  <div class="node"><b>执行</b>按这段的自然时长走完</div>
+  <span class="arr">→</span>
+  <div class="node"><b>新观测</b>再要下一条事件</div>
+</div>
+<p>这个模式不需要历史窗口，也不需要第 6.5 节的定长适配。</p>
+
+<h3>9.2 统一模式</h3>
+<p>每次预测固定的 \(H_a\) 步。条件是当前画面、一段历史，以及文本槽里的 \(c_\ell\)。\(c_\ell\) 可以是第 7 节的三种来源之一。因为它们只替换交叉注意力的文本输入，一次滚出中途可以从全局指令换成 Staircase，去噪器权重不用重载。</p>
+<p>定长窗口如果只有整句任务、没有历史，局部动作是欠定的：「把杯子放进盒子」不能唯一决定接下来 1 秒该伸手还是该松开。历史帧把「刚刚已经抓住」写进条件，问题才重新变得可解。这是统一模式要看 \(M\) 帧历史的原因。</p>
+
+<h3>9.3 训练里有、推理里关掉的东西</h3>
+<table>
+  <thead><tr><th>训练技巧</th><th>推理时</th></tr></thead>
+  <tbody>
+    <tr><td>视线锥偏置、tube 遮挡</td><td>关闭。Camera RoPE 保留。</td></tr>
+    <tr><td>一个视频前向配 6 个动作噪声</td><td>关闭。一次控制只走一条动作去噪。</td></tr>
+    <tr><td>按长度丢掉字幕</td><td>关闭。推理需要条件。</td></tr>
+    <tr><td>多事件打包和打包掩码</td><td>只用于训练。</td></tr>
+    <tr><td>50 步教师日程</td><td>部署用蒸馏后的少步学生，再加 FP8。</td></tr>
+  </tbody>
+</table>
+</section>
+
+<footer>
+依据 WALL-WM: Carving World Action Modeling at the Event Joints，arXiv:2606.01955。本文按算法数据流重写，不收录实验表。
+</footer>
+</main>
+</div>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    function render() {
+      if (!window.renderMathInElement) return;
+      renderMathInElement(document.body, {
+        delimiters: [
+          { left: "\\[", right: "\\]", display: true },
+          { left: "\\(", right: "\\)", display: false }
+        ],
+        throwOnError: false
+      });
+    }
+    if (window.renderMathInElement) render();
+    else window.addEventListener("load", render);
+  });
+</script>
+</body>
+</html>

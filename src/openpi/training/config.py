@@ -1659,6 +1659,53 @@ _CONFIGS = [
         # If true, will enable wandb logging.
         wandb_enabled = True,
     ),
+    # Continue the RTC-SFT checkpoint for 5k steps on the HIL mix
+    # (90 intervention snippets + 6 auto-success episodes). Weights come from
+    # step 29999; the optimizer starts fresh. Norm stats are the ones stored in
+    # that checkpoint, not statistics recomputed on the small HIL set.
+    TrainConfig(
+        name="pi05_cobot_screw_sorting_single_rtc_hil",
+        model=pi0_config.Pi0Config(pi05=True, rtc_max_delay=10, action_horizon=32),
+        data=LeRobotCobotSingleArmDataConfig(
+            repo_id="hil_screw_sorting_20261106_162646_auto_and_intervention",
+            assets=AssetsConfig(
+                assets_dir="/workspace/openpi/checkpoints/pi05_cobot_screw_sorting_single_rtc/pi05_cobot_screw_sorting_single_rtc/29999/assets",
+                asset_id="screw_sorting_single_sft_ep279_annotated",
+            ),
+            default_prompt="Please sort and return the silver screws in the grey box to their proper places",
+            repack_transforms=_transforms.Group(
+                inputs=[
+                    _transforms.RepackTransform(
+                        {
+                            "images": {
+                                "cam_high": "observation.images.cam_high",
+                                "cam_right_wrist": "observation.images.cam_right_wrist",
+                            },
+                            "state": "observation.state",
+                            "actions": "action",
+                        }
+                    )
+                ]
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/workspace/openpi/checkpoints/pi05_cobot_screw_sorting_single_rtc/pi05_cobot_screw_sorting_single_rtc/29999/params"
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=200,
+            peak_lr=2.5e-5,
+            decay_steps=5_000,
+        ),
+        batch_size=64,
+        num_workers=8,
+        num_train_steps=5_000,
+        log_interval=100,
+        save_interval=2_500,
+        keep_period=2_500,
+        overwrite=False,
+        resume=False,
+        wandb_enabled=True,
+    ),
 
     TrainConfig(
         name="pi05_cobot_screw_sorting_single",
